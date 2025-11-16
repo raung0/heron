@@ -1,0 +1,18 @@
+a += 1 + 2 * 3 + 4
+a.b.c
+((-(&'a &mut &'b mut +-identifier))) + 123
+if my_condition { 123 }
+if my_definition = 2; my_condition { 123 }
+if my_condition { 123 } else { 456 } + 4
+if my_condition { 123 } else if another_cond { 456 } / 4
+if my_condition {
+	123
+} else if another_cond {
+	456
+} else {
+	789
+} * 4
+
+for &a, b in my_iter {
+}
+
