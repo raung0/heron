@@ -85,6 +85,13 @@ fn emit_parser_error<W: WriteColor>(
                 describe_token_value(&tok.v)
             )
         }
+        ParserError::InvalidDeclarationType(tok) => {
+            location = Some(tok.location);
+            format!(
+                "invalid declaration type, found {}",
+                describe_token_value(&tok.v)
+            )
+        }
     };
 
     let mut error_spec = ColorSpec::new();

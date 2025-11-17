@@ -21,6 +21,7 @@ pub enum ASTValue {
     },
     Deref(Box<AST>),
     ExprList(Vec<Box<AST>>),
+    ExprListNoScope(Vec<Box<AST>>),
     If {
         cond: Box<AST>,
         decl: Option<Box<AST>>,
@@ -37,6 +38,10 @@ pub enum ASTValue {
         iter: Box<AST>,
         body: Box<AST>,
     },
+    Pub(Box<AST>),
+    Set(String, Box<AST>),
+    Declaration(String, Box<AST>),
+    DeclarationConstexpr(String, Box<AST>),
 }
 
 pub struct AST {
@@ -309,6 +314,9 @@ impl fmt::Display for AST {
                     .collect::<Vec<_>>()
                     .join(" ");
                 write!(f, "(For {} {} {})", bindings_s, iter, body)
+            }
+            Pub(node) => {
+                write!(f, "(Pub {})", node)
             }
         }
     }
