@@ -2,6 +2,17 @@ use std::fmt;
 
 use crate::frontend::{Operator, SourceLocation};
 
+pub enum Type {
+    Integer { bit_size: u8, signed: bool },
+    Float { bit_size: u8 },
+    Bool,
+    Rune,
+    Pointer,
+    CArray { underlying: Box<Type> }
+    Array { size: u32, underlying: Box<Type> },
+    Reference { mutable: bool, lifetime: Option<char>, underlying: Box<Type> }
+}
+
 pub enum ASTValue {
     Id(String),
     String(String),
@@ -42,6 +53,7 @@ pub enum ASTValue {
     Set(String, Box<AST>),
     Declaration(String, Box<AST>),
     DeclarationConstexpr(String, Box<AST>),
+    Type(Box<Type>),
 }
 
 pub struct AST {
@@ -280,6 +292,14 @@ impl fmt::Display for AST {
                     .join(" ");
                 write!(f, "(ExprList {})", folded)
             }
+            ExprListNoScope(v) => {
+                let folded = v
+                    .iter()
+                    .map(|x| x.to_string())
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                write!(f, "(ExprListNoScope {})", folded)
+            }
             If {
                 cond,
                 decl,
@@ -317,6 +337,15 @@ impl fmt::Display for AST {
             }
             Pub(node) => {
                 write!(f, "(Pub {})", node)
+            }
+            Set(s, v) => {
+                write!(f, "(Set {:?} {})", s, v)
+            }
+            Declaration(name, value) => {
+                write!(f, "(Declaration {:?} {})", name, value)
+            }
+            DeclarationConstexpr(name, value) => {
+                write!(f, "(DeclarationConstexpr {:?} {})", name, value)
             }
         }
     }

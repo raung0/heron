@@ -37,5 +37,6 @@ pub main := fn {
 	// No need to manually dereference, there's a formatter that forwards &T to T, so the normal Vector formatter can be used, as it uses that formatter.
 	core.io.println("Swizzled (zyx): {}", swizzles_ref)
 	// Fun fact: println does something similar to swizzle to check at compile time the format string. If it passes, then just uses RTTI to print the values by instantiating a Formatter<T> where T is the value of the `args: ...any` array (`any` type).
+	assert(swizzles_ref == vec.swizzle("zyx"))
 }
 

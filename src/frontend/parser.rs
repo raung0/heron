@@ -1,5 +1,5 @@
 use crate::frontend::{
-    AST, ASTValue, Keyword, Lexer, LexerError, Operator, SourceLocation, Token, TokenValue,
+    ASTValue, Keyword, Lexer, LexerError, Operator, SourceLocation, Token, TokenValue, AST,
 };
 
 pub struct Parser<'a> {
@@ -8,7 +8,6 @@ pub struct Parser<'a> {
     next: Token,
 
     enable_multi_id_parse: bool,
-    counter: u64,
 }
 
 #[derive(Debug)]
@@ -35,7 +34,6 @@ impl<'a> Parser<'a> {
             cur: Token::new(),
             next: Token::new(),
             enable_multi_id_parse: true,
-            counter: 0,
         };
         ret.next()?;
         ret.next()?;
@@ -505,6 +503,8 @@ impl<'a> Parser<'a> {
         Ok(ast)
     }
 
+    fn parse_type(&mut self) -> ParseResult {}
+
     fn parse_multi_id(&mut self) -> ParseResult {
         let mut list_identifiers_lhs = Vec::<Box<AST>>::new();
         while let TokenValue::Id(id) = &self.cur.v {
@@ -530,7 +530,6 @@ impl<'a> Parser<'a> {
             self.next()?;
         }
 
-        #[derive(PartialEq)]
         enum Kind {
             Assign,
             Define,
@@ -560,44 +559,14 @@ impl<'a> Parser<'a> {
             }
         };
 
-        let mut list_expr_rhs = Vec::<Box<AST>>::new();
-
         let enable_multi_id_parse_prev = self.enable_multi_id_parse;
         self.enable_multi_id_parse = false;
         loop {
-            let expr = self.parse_expression()?;
-            list_expr_rhs.push(expr);
-            if self.cur.v != TokenValue::Comma {
-                break;
-            }
+            todo!()
         }
         self.enable_multi_id_parse = enable_multi_id_parse_prev;
 
-        let mut vars = Vec::<String>::new();
-        for i in 0..list_expr_rhs.len() {
-            vars.push(format!("__tmp_{}", self.counter));
-            self.counter += 1;
-        }
-
-        let ret = Vec::<Box<AST>>::new();
-        for (i, v) in vars.iter().enumerate() {
-            match kind {
-                Kind::Assign | Kind::Define => {
-                    ret.push(AST::from(
-                        SourceLocation::new_from_file("<compiler inserted>".to_string()),
-                        ASTValue::Declaration(v.clone(), list_expr_rhs[i]),
-                    ));
-                }
-                Kind::DefineConstexpr => {
-                    ret.push(AST::from(
-                        SourceLocation::new_from_file("<compiler inserted>".to_string()),
-                        ASTValue::DeclarationConstexpr(v.clone(), list_expr_rhs[i]),
-                    ));
-                }
-            }
-        }
-
-        if kind == Kind::Assign {}
+        todo!()
     }
 }
 
