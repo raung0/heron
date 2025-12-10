@@ -16,3 +16,5 @@ if my_condition {
 for &a, b in my_iter {
 }
 
+a, b := 230
+

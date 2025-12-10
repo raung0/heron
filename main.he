@@ -11,15 +11,15 @@ swizzle :: fn<'a; T: type; N, M: u32>(
 	vector: &'a core.math.Vector<T, N>
 	format: [M]rune
 ) -> core.math.Vector<&'a T, M>
-	throws core.Exception
+	throws core.CompileTimeException
 {
 	parse_rune :: fn(r: rune) -> u32 throws core.Exception {
 		match r {
-		case "x" | "r" | "s" | "u" -> if 0 < N do 0
-		case "y" | "g" | "t" | "v" -> if 1 < N do 1
-		case "z" | "b" | "p"       -> if 2 < N do 2
-		case "w" | "a" | "q"       -> if 3 < N do 3
-		case -> throw core.Exception("Invalid swizzle accessor")
+		case "x" | "r" | "s" | "u" if 0 < N -> 0
+		case "y" | "g" | "t" | "v" if 1 < N -> 1
+		case "z" | "b" | "p"       if 2 < N -> 2
+		case "w" | "a" | "q"       if 3 < N -> 3
+		case -> throw core.CompileTimeException("Invalid swizzle accessor")
 		}
 	}
 
@@ -30,7 +30,7 @@ swizzle :: fn<'a; T: type; N, M: u32>(
 	ret
 }
 
-pub main := fn throws core.Exception {
+pub main := fn {
 	vec := core.math.Vector<f32, 3>(.{1, 2, 3})
 	swizzles_ref := swizzle(vec, "zyx")
 	core.io.println("Original: {}", vec)
