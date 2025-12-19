@@ -77,6 +77,7 @@ pub enum Keyword {
     Struct,
     Enum,
     Union,
+    RawUnion,
 }
 
 #[derive(PartialEq, Clone, Debug)]
@@ -126,6 +127,7 @@ pub enum LexerError {
     UnexpectedCharacter(char),
 }
 
+#[derive(Clone)]
 pub struct Lexer {
     input: String,
     location: SourceLocation,
@@ -864,6 +866,7 @@ fn keyword_from_str(s: &str) -> Option<Keyword> {
         "struct" => Keyword::Struct,
         "enum" => Keyword::Enum,
         "union" => Keyword::Union,
+        "raw_union" => Keyword::RawUnion,
         _ => return None,
     })
 }
@@ -871,6 +874,7 @@ fn keyword_from_str(s: &str) -> Option<Keyword> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs::read_to_string;
 
     fn expect_lexer_error(source: &str) -> LexerError {
         let mut lx = Lexer::new(source.to_string(), "<test>".to_string());
@@ -998,5 +1002,44 @@ mod tests {
         assert!(matches!(int.v, TokenValue::Integer(42)));
         assert_eq!(int.location.range.begin, (7, 1));
         assert_eq!(int.location.range.end, (9, 1));
+    }
+
+    #[test]
+    fn testing_he_has_semicolon_between_point_and_child() {
+        let input = read_to_string("testing.he").expect("read testing.he");
+        let values = lex_values(&input);
+
+        let mut saw_point = false;
+        let mut saw_end_point_struct = false;
+        let mut saw_separator_after_point = false;
+        for v in values {
+            if !saw_point {
+                if v == TokenValue::Id("Point".to_string()) {
+                    saw_point = true;
+                }
+                continue;
+            }
+
+            if !saw_end_point_struct {
+                if v == TokenValue::Semicolon {
+                    // There are many semicolons inside, but the explicit `};` ends the declaration.
+                    saw_end_point_struct = true;
+                }
+                continue;
+            }
+
+            if !saw_separator_after_point {
+                if v == TokenValue::Semicolon {
+                    saw_separator_after_point = true;
+                }
+                continue;
+            }
+
+            if v == TokenValue::Id("Child".to_string()) {
+                return;
+            }
+        }
+
+        panic!("did not observe semicolon-separated `Point` then `Child` in token stream");
     }
 }

@@ -17,4 +17,44 @@ for &a, b in my_iter {
 }
 
 a, b := 230
+c, d := 230, 456
 
+a, b, c = c, b, a
+
+add :: fn(a, b: int) -> int do a + b
+
+swap :: fn(using a, b: &mut int) {
+	a, b = b, a
+}
+
+generic_id :: fn<'a; T: type; N: u32>(
+	x: &'a T
+	y: [N]T
+) -> &'a T do x
+
+throws_fn :: fn() throws core.Exception, []int; YourMum
+{
+	123
+}
+
+Point :: struct<T; N: usize> {
+	x: T
+	y: [N]T
+}
+
+Child :: struct extends Base {
+}
+
+Maybe :: union<T> {
+	T
+	int
+}
+
+Bits :: raw_union {
+	as_u32: u32
+	as_f32: f32
+}
+
+Idx :: newtype uint(0..<32)
+Entities := alias [Idx]int
+Adder :: alias fn(int, int) -> int

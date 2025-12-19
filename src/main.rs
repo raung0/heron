@@ -199,6 +199,7 @@ fn keyword_lexeme(keyword: &Keyword) -> &'static str {
         Keyword::Struct => "struct",
         Keyword::Enum => "enum",
         Keyword::Union => "union",
+        Keyword::RawUnion => "raw_union",
     }
 }
 
