@@ -406,6 +406,46 @@ impl<'a> Parser<'a> {
     fn parse_primary(&mut self) -> ParseResult {
         let l = self.cur.location.clone();
 
+        if self.cur.v == TokenValue::Keyword(Keyword::Operator) && self.enable_multi_id_parse {
+            let snap = self.snapshot();
+            if self.parse_decl_name().is_ok()
+                && matches!(
+                    self.cur.v,
+                    TokenValue::Colon
+                        | TokenValue::Comma
+                        | TokenValue::Op {
+                            op: Operator::Set,
+                            has_equals: false
+                        }
+                )
+            {
+                self.restore(snap);
+                return self.parse_multi_id();
+            }
+            self.restore(snap);
+        }
+
+        if self.token_starts_type(&self.cur.v) {
+            let snap = self.snapshot();
+            let type_start = self.cur.location.clone();
+            if let Ok(ty) = self.parse_type_inner() {
+                if self.cur.v == TokenValue::ListInit {
+                    let list_ast = self.parse_initializer_list()?;
+                    let items = match list_ast.v {
+                        ASTValue::InitializerList(items) => items,
+                        _ => unreachable!("initializer list parse must produce InitializerList"),
+                    };
+                    let mut loc = type_start;
+                    loc.range.end = list_ast.location.range.end;
+                    return Ok(AST::from(
+                        loc,
+                        ASTValue::TypedInitializerList { ty, items },
+                    ));
+                }
+            }
+            self.restore(snap);
+        }
+
         let node = match &self.cur.v {
             TokenValue::Id(v) => {
                 let should_parse_multi_id = self.enable_multi_id_parse
@@ -452,6 +492,7 @@ impl<'a> Parser<'a> {
                 Keyword::For => return self.parse_for(),
                 Keyword::Return => return self.parse_return(),
                 Keyword::Throw => return self.parse_throw(),
+                Keyword::Defer => return self.parse_defer(),
                 Keyword::Match => return self.parse_match(),
                 Keyword::Fn => return self.parse_fn(),
                 Keyword::Struct => return self.parse_struct(),
@@ -461,9 +502,36 @@ impl<'a> Parser<'a> {
                 Keyword::Newtype => return self.parse_newtype(),
                 Keyword::Alias => return self.parse_alias(),
                 Keyword::Pub => return self.parse_pub(),
+                Keyword::Operator => {
+                    return Err(ParseError::UnexpectedToken(
+                        self.cur.clone(),
+                        TokenValue::Id("expression".to_string()),
+                    ))
+                }
+                Keyword::Throws => {
+                    return Err(ParseError::UnexpectedToken(
+                        self.cur.clone(),
+                        TokenValue::Id("expression".to_string()),
+                    ))
+                }
                 _ => todo!("Unimplemented keyword: {:?}", k),
             },
 
+            TokenValue::Op {
+                op: Operator::Dot,
+                has_equals: false,
+            } => {
+                self.next()?; // consume '.'
+                let TokenValue::Id(name) = &self.cur.v else {
+                    return Err(ParseError::ExpectedToken(
+                        self.cur.clone(),
+                        TokenValue::Id("<identifier>".to_string()),
+                    ));
+                };
+                let node = AST::from(l, ASTValue::DotId(name.clone()));
+                self.next()?; // consume id
+                node
+            }
             TokenValue::Op { .. } => return Err(ParseError::InvalidFactorToken(self.cur.clone())),
 
             TokenValue::LParen => {
@@ -482,6 +550,7 @@ impl<'a> Parser<'a> {
                 expr
             }
             TokenValue::ListInit => return self.parse_initializer_list(),
+            TokenValue::LSquirly => return self.parse_block(),
 
             _ => return Err(ParseError::InvalidFactorToken(self.cur.clone())),
         };
@@ -756,18 +825,7 @@ impl<'a> Parser<'a> {
                 }
                 TokenValue::LParen => {
                     self.next()?; // consume '('
-                    let args_list = self.parse_expression_list(&[TokenValue::RParen], true)?;
-                    let args = match args_list.v {
-                        ASTValue::ExprList(v) => v,
-                        _ => unreachable!("expression_list always returns ExprList"),
-                    };
-
-                    if self.cur.v != TokenValue::RParen {
-                        return Err(ParseError::ExpectedToken(
-                            self.cur.clone(),
-                            TokenValue::RParen,
-                        ));
-                    }
+                    let args = self.parse_call_args()?;
                     let end = self.cur.location.range.end;
                     self.next()?; // consume ')'
 
@@ -840,6 +898,13 @@ impl<'a> Parser<'a> {
                 op,
                 has_equals: false,
             } => match op {
+                Operator::Dot => self.parse_postfix(),
+                Operator::Not => {
+                    self.next()?; // consume '!'
+                    let inner = self.parse_unary()?;
+                    l.range.end = inner.location.range.end;
+                    Ok(AST::from(l, ASTValue::Not(inner)))
+                }
                 Operator::BinAnd => {
                     self.next()?; // consume '&'
 
@@ -900,6 +965,60 @@ impl<'a> Parser<'a> {
         }
     }
 
+    fn parse_call_args(&mut self) -> Result<Vec<Box<AST>>, ParseError> {
+        let enable_multi_id_parse_prev = self.enable_multi_id_parse;
+        self.enable_multi_id_parse = false;
+
+        let mut args: Vec<Box<AST>> = Vec::new();
+        if self.cur.v == TokenValue::RParen {
+            self.enable_multi_id_parse = enable_multi_id_parse_prev;
+            return Ok(args);
+        }
+
+        loop {
+            if self.cur.v == TokenValue::EOF {
+                self.enable_multi_id_parse = enable_multi_id_parse_prev;
+                return Err(ParseError::ExpectedToken(
+                    self.cur.clone(),
+                    TokenValue::RParen,
+                ));
+            }
+
+            let arg = match (&self.cur.v, &self.next.v) {
+                (TokenValue::Id(name), TokenValue::Colon) => {
+                    let mut loc = self.cur.location.clone();
+                    let name = name.clone();
+                    self.next()?; // consume name
+                    self.next()?; // consume ':'
+                    let value =
+                        self.parse_expression_with_stop(&[TokenValue::Comma, TokenValue::RParen])?;
+                    loc.range.end = value.location.range.end;
+                    AST::from(loc, ASTValue::NamedArg { name, value })
+                }
+                _ => self.parse_expression_with_stop(&[TokenValue::Comma, TokenValue::RParen])?,
+            };
+            args.push(arg);
+
+            match self.cur.v {
+                TokenValue::Comma => {
+                    self.next()?;
+                    continue;
+                }
+                TokenValue::RParen => break,
+                _ => {
+                    self.enable_multi_id_parse = enable_multi_id_parse_prev;
+                    return Err(ParseError::ExpectedToken(
+                        self.cur.clone(),
+                        TokenValue::Comma,
+                    ));
+                }
+            }
+        }
+
+        self.enable_multi_id_parse = enable_multi_id_parse_prev;
+        Ok(args)
+    }
+
     fn parse_factor(&mut self) -> ParseResult {
         self.parse_unary()
     }
@@ -931,6 +1050,15 @@ impl<'a> Parser<'a> {
         let v = self.parse_expression()?;
         loc.range.end = v.location.range.end;
         Ok(AST::from(loc, ASTValue::Throw(v)))
+    }
+
+    fn parse_defer(&mut self) -> ParseResult {
+        let mut loc = self.cur.location.clone();
+        self.next()?; // consume 'defer'
+
+        let v = self.parse_expression()?;
+        loc.range.end = v.location.range.end;
+        Ok(AST::from(loc, ASTValue::Defer(v)))
     }
 
     fn parse_match(&mut self) -> ParseResult {
@@ -1636,7 +1764,14 @@ impl<'a> Parser<'a> {
             return Err(ParseError::ExpectedBody(self.cur.location.clone()));
         }
 
-        let body = self.parse_block()?;
+        let body = self.parse_block_or_do(&[
+            TokenValue::Semicolon,
+            TokenValue::EOF,
+            TokenValue::RSquirly,
+            TokenValue::RParen,
+            TokenValue::RBracket,
+            TokenValue::Keyword(Keyword::Else),
+        ])?;
         loc.range.end = body.location.range.end;
         self.enable_multi_id_parse = enable_multi_id_parse_prev;
 
@@ -1652,7 +1787,13 @@ impl<'a> Parser<'a> {
                     return Err(ParseError::ExpectedBody(self.cur.location.clone()));
                 }
 
-                let else_body = self.parse_block()?;
+                let else_body = self.parse_block_or_do(&[
+                    TokenValue::Semicolon,
+                    TokenValue::EOF,
+                    TokenValue::RSquirly,
+                    TokenValue::RParen,
+                    TokenValue::RBracket,
+                ])?;
                 loc.range.end = else_body.location.range.end;
                 Some(else_body)
             }
@@ -1700,8 +1841,12 @@ impl<'a> Parser<'a> {
         let mut loc = self.cur.location.clone();
         self.next()?;
 
-        if self.cur.v == TokenValue::LSquirly {
-            let body = self.parse_block()?;
+        if matches!(self.cur.v, TokenValue::LSquirly | TokenValue::Keyword(Keyword::Do)) {
+            let body = self.parse_block_or_do(&[
+                TokenValue::Semicolon,
+                TokenValue::EOF,
+                TokenValue::RSquirly,
+            ])?;
             loc.range.end = body.location.range.end;
             return Ok(AST::from(
                 loc,
@@ -1729,6 +1874,7 @@ impl<'a> Parser<'a> {
         let header_ast = self.parse_expression_list(
             &[
                 TokenValue::Keyword(Keyword::In),
+                TokenValue::Keyword(Keyword::Do),
                 TokenValue::LSquirly,
                 TokenValue::Semicolon,
             ],
@@ -1762,7 +1908,7 @@ impl<'a> Parser<'a> {
 
                 self.next()?; // consume `in`
 
-                if self.cur.v == TokenValue::LSquirly {
+                if matches!(self.cur.v, TokenValue::LSquirly | TokenValue::Keyword(Keyword::Do)) {
                     return Err(ParseError::ExpectedExpression(self.cur.clone()));
                 }
 
@@ -1771,7 +1917,11 @@ impl<'a> Parser<'a> {
                     return Err(ParseError::ExpectedBody(self.cur.location.clone()));
                 }
 
-                let body = self.parse_block()?;
+                let body = self.parse_block_or_do(&[
+                    TokenValue::Semicolon,
+                    TokenValue::EOF,
+                    TokenValue::RSquirly,
+                ])?;
                 loc.range.end = body.location.range.end;
 
                 Ok(AST::from(
@@ -1783,7 +1933,7 @@ impl<'a> Parser<'a> {
                     },
                 ))
             }
-            TokenValue::LSquirly => {
+            TokenValue::LSquirly | TokenValue::Keyword(Keyword::Do) => {
                 if header_exprs.len() > 1 {
                     return Err(ParseError::ExpectedToken(
                         self.cur.clone(),
@@ -1792,7 +1942,11 @@ impl<'a> Parser<'a> {
                 }
 
                 let cond = header_exprs.into_iter().next();
-                let body = self.parse_block()?;
+                let body = self.parse_block_or_do(&[
+                    TokenValue::Semicolon,
+                    TokenValue::EOF,
+                    TokenValue::RSquirly,
+                ])?;
                 loc.range.end = body.location.range.end;
 
                 Ok(AST::from(
@@ -1818,8 +1972,12 @@ impl<'a> Parser<'a> {
                     ])?)
                 };
 
-                if self.cur.v == TokenValue::LSquirly {
-                    let body = self.parse_block()?;
+                if matches!(self.cur.v, TokenValue::LSquirly | TokenValue::Keyword(Keyword::Do)) {
+                    let body = self.parse_block_or_do(&[
+                        TokenValue::Semicolon,
+                        TokenValue::EOF,
+                        TokenValue::RSquirly,
+                    ])?;
                     loc.range.end = body.location.range.end;
                     return Ok(AST::from(
                         loc,
@@ -1840,7 +1998,7 @@ impl<'a> Parser<'a> {
                 }
                 self.next()?; // consume second `;`
 
-                let step = if self.cur.v == TokenValue::LSquirly {
+                let step = if matches!(self.cur.v, TokenValue::LSquirly | TokenValue::Keyword(Keyword::Do)) {
                     None
                 } else {
                     Some(self.parse_expression_with_stop(&[TokenValue::LSquirly])?)
@@ -1850,7 +2008,11 @@ impl<'a> Parser<'a> {
                     return Err(ParseError::ExpectedBody(self.cur.location.clone()));
                 }
 
-                let body = self.parse_block()?;
+                let body = self.parse_block_or_do(&[
+                    TokenValue::Semicolon,
+                    TokenValue::EOF,
+                    TokenValue::RSquirly,
+                ])?;
                 loc.range.end = body.location.range.end;
 
                 Ok(AST::from(
@@ -1887,6 +2049,18 @@ impl<'a> Parser<'a> {
         self.next()?;
 
         Ok(ast)
+    }
+
+    fn parse_block_or_do(&mut self, stop: &[TokenValue]) -> ParseResult {
+        if self.cur.v == TokenValue::Keyword(Keyword::Do) {
+            self.next()?; // consume 'do'
+            if self.cur.v == TokenValue::Semicolon {
+                return Err(ParseError::ExpectedExpression(self.cur.clone()));
+            }
+            self.parse_expression_with_stop(stop)
+        } else {
+            self.parse_block()
+        }
     }
 
     fn should_parse_multi_id_from_comma(&self) -> Result<bool, ParseError> {
@@ -2371,10 +2545,13 @@ impl<'a> Parser<'a> {
         let mut loc = self.cur.location.clone();
 
         let mut names = Vec::<String>::new();
-        while let TokenValue::Id(id) = &self.cur.v {
-            names.push(id.clone());
-            loc.range.end = self.cur.location.range.end;
-            self.next()?;
+        while matches!(
+            self.cur.v,
+            TokenValue::Id(_) | TokenValue::Keyword(Keyword::Operator)
+        ) {
+            let (name, end_loc) = self.parse_decl_name()?;
+            names.push(name);
+            loc.range.end = end_loc.range.end;
             match self.cur.v {
                 TokenValue::Colon
                 | TokenValue::Op {
@@ -2535,6 +2712,89 @@ impl<'a> Parser<'a> {
 
         self.enable_multi_id_parse = enable_multi_id_parse_prev;
         Ok(ast)
+    }
+
+    fn parse_decl_name(&mut self) -> Result<(String, SourceLocation), ParseError> {
+        match &self.cur.v {
+            TokenValue::Id(name) => {
+                let end_loc = self.cur.location.clone();
+                let name = name.clone();
+                self.next()?;
+                Ok((name, end_loc))
+            }
+            TokenValue::Keyword(Keyword::Operator) => {
+                self.next()?; // consume 'operator'
+                match &self.cur.v {
+                    TokenValue::Op { op, has_equals } => {
+                        let end_loc = self.cur.location.clone();
+                        let sym = Self::operator_symbol(op, *has_equals);
+                        self.next()?;
+                        Ok((format!("operator{sym}"), end_loc))
+                    }
+                    TokenValue::LBracket => {
+                        self.next()?; // consume '['
+                        if self.cur.v != TokenValue::RBracket {
+                            return Err(ParseError::ExpectedToken(
+                                self.cur.clone(),
+                                TokenValue::RBracket,
+                            ));
+                        }
+                        let end_loc = self.cur.location.clone();
+                        self.next()?; // consume ']'
+                        Ok(("operator[]".to_string(), end_loc))
+                    }
+                    TokenValue::LParen => {
+                        self.next()?; // consume '('
+                        if self.cur.v != TokenValue::RParen {
+                            return Err(ParseError::ExpectedToken(
+                                self.cur.clone(),
+                                TokenValue::RParen,
+                            ));
+                        }
+                        let end_loc = self.cur.location.clone();
+                        self.next()?; // consume ')'
+                        Ok(("operator()".to_string(), end_loc))
+                    }
+                    _ => Err(ParseError::ExpectedToken(
+                        self.cur.clone(),
+                        TokenValue::Op {
+                            op: Operator::Add,
+                            has_equals: false,
+                        },
+                    )),
+                }
+            }
+            _ => Err(ParseError::ExpectedToken(
+                self.cur.clone(),
+                TokenValue::Id("name".to_string()),
+            )),
+        }
+    }
+
+    fn operator_symbol(op: &Operator, has_equals: bool) -> String {
+        let mut symbol = match op {
+            Operator::Add => "+",
+            Operator::Sub => "-",
+            Operator::Mul => "*",
+            Operator::Divide => "/",
+            Operator::LessThan => "<",
+            Operator::GreaterThan => ">",
+            Operator::Not => "!",
+            Operator::Or => "||",
+            Operator::And => "&&",
+            Operator::BinAnd => "&",
+            Operator::BinOr => "|",
+            Operator::BinXOR => "^",
+            Operator::Dot => ".",
+            Operator::Set => "=",
+        }
+        .to_string();
+
+        if has_equals {
+            symbol.push('=');
+        }
+
+        symbol
     }
 
     fn is_lt(v: &TokenValue) -> bool {
@@ -2773,12 +3033,6 @@ impl<'a> Parser<'a> {
                 break;
             }
 
-            let mut using_param = false;
-            if self.cur.v == TokenValue::Keyword(Keyword::Using) {
-                using_param = true;
-                self.next()?;
-            }
-
             let mut names: Vec<String> = Vec::new();
             match &self.cur.v {
                 TokenValue::Id(name) => {
@@ -2837,7 +3091,6 @@ impl<'a> Parser<'a> {
             };
 
             params.push(FnParam {
-                using: using_param,
                 names,
                 ty,
                 default,
@@ -3129,6 +3382,13 @@ mod tests {
         }
     }
 
+    fn expect_named_arg<'a>(ast: &'a AST) -> (&'a str, &'a AST) {
+        match &ast.v {
+            ASTValue::NamedArg { name, value } => (name.as_str(), value.as_ref()),
+            _ => panic!("expected NamedArg, got {}", ast),
+        }
+    }
+
     fn expect_generic_apply<'a>(ast: &'a AST) -> (&'a AST, &'a [GenericArg]) {
         match &ast.v {
             ASTValue::GenericApply { target, args } => (target.as_ref(), args.as_slice()),
@@ -3147,6 +3407,15 @@ mod tests {
         match &ast.v {
             ASTValue::InitializerList(items) => items.as_slice(),
             _ => panic!("expected InitializerList, got {}", ast),
+        }
+    }
+
+    fn expect_typed_initializer_list<'a>(
+        ast: &'a AST,
+    ) -> (&'a crate::frontend::Type, &'a [crate::frontend::InitializerItem]) {
+        match &ast.v {
+            ASTValue::TypedInitializerList { ty, items } => (ty.as_ref(), items.as_slice()),
+            _ => panic!("expected TypedInitializerList, got {}", ast),
         }
     }
 
@@ -3175,6 +3444,32 @@ mod tests {
                 );
             }
             _ => panic!("expected Throw, got {}", ast),
+        }
+    }
+
+    #[test]
+    fn defer_parses_as_expression() {
+        let ast =
+            parse_expr(Lexer::new("defer cleanup()".to_string(), "<test>".to_string()))
+                .expect("ok");
+        match &ast.v {
+            ASTValue::Defer(inner) => {
+                let has_call = matches!(inner.v, ASTValue::Call { .. })
+                    || matches!(
+                        inner.v,
+                        ASTValue::BinExpr {
+                            op: Operator::Dot,
+                            rhs: _,
+                            ..
+                        }
+                    ) && inner.to_string().contains("(Call");
+                assert!(
+                    has_call,
+                    "expected defer payload to contain a call, got {}",
+                    inner
+                );
+            }
+            _ => panic!("expected Defer, got {}", ast),
         }
     }
 
@@ -3977,6 +4272,50 @@ mod tests {
     }
 
     #[test]
+    fn call_allows_named_args() {
+        let ast = parse_expr(Lexer::new(
+            "make(width: 640, height: 480)".to_string(),
+            "<test>".to_string(),
+        ))
+        .expect("ok");
+        let (_callee, args) = expect_call(ast.as_ref());
+        assert_eq!(args.len(), 2);
+        let (name, value) = expect_named_arg(args[0].as_ref());
+        assert_eq!(name, "width");
+        expect_integer(value, 640);
+    }
+
+    #[test]
+    fn typed_initializer_list_parses() {
+        let ast = parse_expr(Lexer::new(
+            "Point .{ .x = 1, .y = 2 }".to_string(),
+            "<test>".to_string(),
+        ))
+        .expect("ok");
+        let (ty, items) = expect_typed_initializer_list(ast.as_ref());
+        match ty {
+            crate::frontend::Type::Id(name) => assert_eq!(name, "Point"),
+            _ => panic!("expected Point type"),
+        }
+        assert_eq!(items.len(), 2);
+    }
+
+    #[test]
+    fn typed_initializer_list_allows_dotted_type() {
+        let ast = parse_expr(Lexer::new(
+            "core.math.Point .{ .x = 1 }".to_string(),
+            "<test>".to_string(),
+        ))
+        .expect("ok");
+        let (ty, items) = expect_typed_initializer_list(ast.as_ref());
+        match ty {
+            crate::frontend::Type::Id(name) => assert_eq!(name, "core.math.Point"),
+            _ => panic!("expected dotted type"),
+        }
+        assert_eq!(items.len(), 1);
+    }
+
+    #[test]
     fn decl_type_generics_can_take_expr_args() {
         let ast = parse_expr(Lexer::new(
             "x: Array<T, N + 1>".to_string(),
@@ -4066,6 +4405,64 @@ mod tests {
                 _ => panic!("expected Divide op token"),
             },
             _ => panic!("expected InvalidUnaryOperator"),
+        }
+    }
+
+    #[test]
+    fn not_is_unary_operator() {
+        let lx = Lexer::new("!x".to_string(), "<test>".to_string());
+        let ast = parse_one(lx).expect("ok");
+        match &ast.v {
+            ASTValue::Not(inner) => expect_id(inner.as_ref(), "x"),
+            _ => panic!("expected Not"),
+        }
+    }
+
+    #[test]
+    fn leading_dot_identifier_parses() {
+        let lx = Lexer::new(".UP".to_string(), "<test>".to_string());
+        let ast = parse_one(lx).expect("ok");
+        match &ast.v {
+            ASTValue::DotId(name) => assert_eq!(name, "UP"),
+            _ => panic!("expected DotId"),
+        }
+    }
+
+    #[test]
+    fn block_is_expression() {
+        let lx = Lexer::new("{ 1; 2 }".to_string(), "<test>".to_string());
+        let ast = parse_one(lx).expect("ok");
+        match &ast.v {
+            ASTValue::ExprList(items) => assert_eq!(items.len(), 2),
+            _ => panic!("expected ExprList"),
+        }
+    }
+
+    #[test]
+    fn nested_blocks_parse() {
+        let lx = Lexer::new("{{}}".to_string(), "<test>".to_string());
+        let ast = parse_one(lx).expect("ok");
+        match &ast.v {
+            ASTValue::ExprList(items) => {
+                assert_eq!(items.len(), 1);
+                match &items[0].v {
+                    ASTValue::ExprList(inner) => assert!(inner.is_empty()),
+                    _ => panic!("expected inner ExprList"),
+                }
+            }
+            _ => panic!("expected ExprList"),
+        }
+    }
+
+    #[test]
+    fn block_in_binary_expression() {
+        let lx = Lexer::new("1 * { 3 * 4 }".to_string(), "<test>".to_string());
+        let ast = parse_expr(lx).expect("ok");
+        let (lhs, rhs) = expect_binary(ast.as_ref(), Operator::Mul, false);
+        expect_integer(lhs, 1);
+        match &rhs.v {
+            ASTValue::ExprList(items) => assert_eq!(items.len(), 1),
+            _ => panic!("expected ExprList"),
         }
     }
 
@@ -4245,6 +4642,19 @@ mod tests {
     }
 
     #[test]
+    fn if_allows_do_body() {
+        let source = "if foo do bar else do baz";
+        let lx = Lexer::new(source.to_string(), "<test>".to_string());
+        let ast = parse_expr(lx).expect("ok");
+        let (_decl, cond, body, else_) = expect_if(ast.as_ref());
+
+        expect_id(cond, "foo");
+        expect_id(body, "bar");
+        let else_body = else_.expect("else body should exist");
+        expect_id(else_body, "baz");
+    }
+
+    #[test]
     fn if_else_if_chain_nests_else_branch() {
         let lx = Lexer::new(
             "if foo { bar } else if baz { qux }".to_string(),
@@ -4376,6 +4786,19 @@ mod tests {
         assert!(step.is_none(), "expected no step clause");
         expect_id(cond.expect("expected condition"), "foo");
         expect_expr_list_ids(body, &["bar"]);
+    }
+
+    #[test]
+    fn for_loop_allows_do_body() {
+        let source = "for foo do bar";
+        let lx = Lexer::new(source.to_string(), "<test>".to_string());
+        let ast = parse_expr(lx).expect("ok");
+        let (init, cond, step, body) = expect_for_loop(ast.as_ref());
+
+        assert!(init.is_none(), "expected no init clause");
+        assert!(step.is_none(), "expected no step clause");
+        expect_id(cond.expect("expected condition"), "foo");
+        expect_id(body, "bar");
     }
 
     #[test]
@@ -4617,7 +5040,7 @@ mod tests {
     #[test]
     fn fn_params_are_pretty_printed() {
         let lx = Lexer::new(
-            "fn(a: int; using ctx: Context; b = 1) do a".to_string(),
+            "fn(a: int; ctx: Context; b = 1) do a".to_string(),
             "<test>".to_string(),
         );
         let ast = parse_one(lx).expect("ok");
@@ -4631,8 +5054,8 @@ mod tests {
             "expected a typed param, got: {s}"
         );
         assert!(
-            s.contains("(Param \"ctx\" \"Context\" (Using))"),
-            "expected a using param, got: {s}"
+            s.contains("(Param \"ctx\" \"Context\")"),
+            "expected a typed param, got: {s}"
         );
         assert!(
             s.contains("(Param \"b\" \"infer\" (Default 1))"),
@@ -4672,6 +5095,17 @@ mod tests {
             }
             _ => panic!("expected Struct"),
         }
+    }
+
+    #[test]
+    fn operator_declaration_parses() {
+        let ast = parse_expr(Lexer::new(
+            "operator+ :: fn(a, b: int) -> int do a + b".to_string(),
+            "<test>".to_string(),
+        ))
+        .expect("ok");
+        let (_constexpr, names, _types, _values) = expect_declaration_multi(ast.as_ref());
+        assert_eq!(names, &["operator+".to_string()]);
     }
 
     #[test]

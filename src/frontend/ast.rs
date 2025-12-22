@@ -89,9 +89,6 @@ fn write_param_list(f: &mut fmt::Formatter<'_>, params: &[FnParam]) -> fmt::Resu
             write_quoted_atom(f, name)?;
             write!(f, " ")?;
             write_quoted_atom(f, &ty_s)?;
-            if p.using {
-                write!(f, " (Using)")?;
-            }
             if let Some(default) = &p.default {
                 write!(f, " (Default {})", default)?;
             }
@@ -103,7 +100,6 @@ fn write_param_list(f: &mut fmt::Formatter<'_>, params: &[FnParam]) -> fmt::Resu
 }
 
 pub struct FnParam {
-    pub using: bool,
     pub names: Vec<String>,
     pub ty: Option<Box<Type>>,
     pub default: Option<Box<AST>>,
@@ -340,6 +336,7 @@ pub enum ASTValue {
         rhs: Box<AST>,
         has_eq: bool,
     },
+    Not(Box<AST>),
     Ref {
         mutable: bool,
         lifetime: Option<char>,
@@ -351,11 +348,19 @@ pub enum ASTValue {
         callee: Box<AST>,
         args: Vec<Box<AST>>,
     },
+    NamedArg {
+        name: String,
+        value: Box<AST>,
+    },
     GenericApply {
         target: Box<AST>,
         args: Vec<GenericArg>,
     },
     InitializerList(Vec<InitializerItem>),
+    TypedInitializerList {
+        ty: Box<Type>,
+        items: Vec<InitializerItem>,
+    },
     PtrOf(Box<AST>),
     Index {
         target: Box<AST>,
@@ -365,6 +370,8 @@ pub enum ASTValue {
     ExprListNoScope(Vec<Box<AST>>),
     Return(Option<Box<AST>>),
     Throw(Box<AST>),
+    Defer(Box<AST>),
+    DotId(String),
     Match {
         binder: Option<MatchBinder>,
         scrutinee: Box<AST>,
@@ -723,6 +730,9 @@ impl fmt::Display for AST {
                     op, has_eq, lhs, rhs
                 )
             }
+            Not(v) => {
+                write!(f, "(Not {})", v)
+            }
             Ref {
                 mutable,
                 lifetime,
@@ -745,6 +755,9 @@ impl fmt::Display for AST {
                 }
                 write!(f, ")")
             }
+            NamedArg { name, value } => {
+                write!(f, "(NamedArg {:?} {})", name, value)
+            }
             GenericApply { target, args } => {
                 write!(f, "(GenericApply {}", target)?;
                 for a in args {
@@ -755,6 +768,14 @@ impl fmt::Display for AST {
             }
             InitializerList(items) => {
                 write!(f, "(InitializerList")?;
+                for it in items {
+                    write!(f, " ")?;
+                    write_initializer_item(f, it)?;
+                }
+                write!(f, ")")
+            }
+            TypedInitializerList { ty, items } => {
+                write!(f, "(TypedInitializerList {}", quote_type(ty.as_ref()))?;
                 for it in items {
                     write!(f, " ")?;
                     write_initializer_item(f, it)?;
@@ -796,6 +817,12 @@ impl fmt::Display for AST {
             }
             Throw(v) => {
                 write!(f, "(Throw {})", v)
+            }
+            Defer(v) => {
+                write!(f, "(Defer {})", v)
+            }
+            DotId(name) => {
+                write!(f, "(DotId {:?})", name)
             }
             Match {
                 binder,

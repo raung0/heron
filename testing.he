@@ -36,7 +36,7 @@ a, b, c = c, b, a
 
 add :: fn(a, b: int) -> int do a + b
 
-swap :: fn(using a, b: &mut int) {
+swap :: fn(a, b: &mut int) {
 	a, b = b, a
 }
 
@@ -108,11 +108,11 @@ slice[index]
 Number :: struct<T> {
 	pub number: T
 
-	__construct :: fn (using this: &mut Self; n: T) {
+	__construct :: fn (this: &mut Self; n: T) {
 		number = n
 	}
 
-//	operator+ :: fn (using this, other: &Self) -> Self {
+//	operator+ :: fn (this, other: &Self) -> Self {
 //		return Self(number + other.number)
 //	}
 }
@@ -127,5 +127,4 @@ Direction :: enum {
 	Left
 	Right
 }
-
 

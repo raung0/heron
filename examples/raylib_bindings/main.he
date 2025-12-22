@@ -11,7 +11,7 @@ pub main := fn {
 
 	player_pos := mut core.math.Vector<f32, 2>()
 
-	for not window.should_close() {
+	for !window.should_close() {
 		if rl.is_key_down(.UP) do player_pos -= .{ 0, 1 }
 		if rl.is_key_down(.DOWN) do player_pos += .{ 0, 1 }
 		if rl.is_key_down(.LEFT) do player_pos -= .{ 1, 0 }
@@ -21,7 +21,7 @@ pub main := fn {
 			rl.begin_drawing()
 			defer rl.end_drawing()
 
-			rl.draw_circle_v(position: player_pos, radius: PLAYER_RADIUS, color: rl::RED)
+			rl.draw_circle_v(position: player_pos, radius: PLAYER_RADIUS, color: rl.RED)
 		}
 	}
 }

@@ -7,4 +7,4 @@ EntitiesIdx :: newtype uint(0..<32)
 // This slice can be index only by EntitiesIdx.
 Entities := alias [EntitiesIdx]Entity
 
-pub fn main := fn {}
+pub main := fn {}

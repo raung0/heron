@@ -15,7 +15,7 @@ pub main := fn {
 	// Calls the vector's constructor, which returns a mutable self, hence `mut` keyword is allowed here.
 	player_pos := mut core.math.Vector<f32, 2>()
 
-	for not rl.raw.window_should_close() {
+for !rl.raw.window_should_close() {
 		// `do ...` is just syntactic sugar for `{ ... }`
 		if rl.is_key_down(.UP) do player_pos -= .{ 0, 1 }
 		if rl.is_key_down(.DOWN) do player_pos += .{ 0, 1 }
@@ -31,4 +31,3 @@ pub main := fn {
 		}
 	}
 }
-

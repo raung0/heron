@@ -5,11 +5,11 @@ use core.io
 Number :: struct<T> {
 	pub number: T
 
-	__construct :: fn (using this: &mut Self; n: T) {
+	__construct :: fn (this: &mut Self; n: T) {
 		number = n
 	}
 
-	operator+ :: fn (using this, other: &Self) -> Self {
+	operator+ :: fn (this, other: &Self) -> Self {
 		return Self(number + other.number)
 	}
 }
