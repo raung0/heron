@@ -1,7 +1,7 @@
 use crate::frontend::{
-    AST, ASTValue, EnsuresClause, FnBody, FnParam, GenericArg, GenericParam, Keyword, Lexer,
-    LexerError, MatchBinder, MatchCase, MatchCasePattern, Operator, PostClause, SourceLocation,
-    Token, TokenValue, Type,
+    AST, ASTValue, EnsuresClause, EnumVariant, FnBody, FnParam, GenericArg, GenericParam, Keyword,
+    Lexer, LexerError, MatchBinder, MatchCase, MatchCasePattern, Operator, PostClause,
+    SourceLocation, Token, TokenValue, Type,
 };
 
 pub struct Parser<'a> {
@@ -455,6 +455,7 @@ impl<'a> Parser<'a> {
                 Keyword::Match => return self.parse_match(),
                 Keyword::Fn => return self.parse_fn(),
                 Keyword::Struct => return self.parse_struct(),
+                Keyword::Enum => return self.parse_enum(),
                 Keyword::Union => return self.parse_union(),
                 Keyword::RawUnion => return self.parse_raw_union(),
                 Keyword::Newtype => return self.parse_newtype(),
@@ -1348,6 +1349,9 @@ impl<'a> Parser<'a> {
         self.consume_semicolons()?;
         let body = if self.cur.v == TokenValue::Keyword(Keyword::Do) {
             self.next()?; // consume 'do'
+            if self.cur.v == TokenValue::Semicolon {
+                return Err(ParseError::ExpectedExpression(self.cur.clone()));
+            }
             let stop = &[
                 TokenValue::Semicolon,
                 TokenValue::EOF,
@@ -1418,6 +1422,86 @@ impl<'a> Parser<'a> {
                 body,
             },
         ))
+    }
+
+    fn parse_enum(&mut self) -> ParseResult {
+        let mut loc = self.cur.location.clone();
+        self.next()?; // consume 'enum'
+
+        if self.cur.v != TokenValue::LSquirly {
+            return Err(ParseError::ExpectedToken(
+                self.cur.clone(),
+                TokenValue::LSquirly,
+            ));
+        }
+        self.next()?; // consume '{'
+
+        let mut variants: Vec<EnumVariant> = Vec::new();
+        while self.cur.v != TokenValue::RSquirly {
+            if self.cur.v == TokenValue::EOF {
+                return Err(ParseError::ExpectedToken(
+                    self.cur.clone(),
+                    TokenValue::RSquirly,
+                ));
+            }
+
+            let name = match &self.cur.v {
+                TokenValue::Id(name) => name.clone(),
+                _ => {
+                    return Err(ParseError::ExpectedToken(
+                        self.cur.clone(),
+                        TokenValue::Id("enum_variant".to_string()),
+                    ));
+                }
+            };
+            self.next()?; // consume variant name
+
+            let value = if matches!(
+                self.cur.v,
+                TokenValue::Op {
+                    op: Operator::Set,
+                    has_equals: false
+                }
+            ) {
+                self.next()?; // consume '='
+                Some(self.parse_expression_with_stop(&[
+                    TokenValue::Comma,
+                    TokenValue::Semicolon,
+                    TokenValue::RSquirly,
+                ])?)
+            } else {
+                None
+            };
+
+            variants.push(EnumVariant { name, value });
+
+            match self.cur.v {
+                TokenValue::Semicolon | TokenValue::Comma => {
+                    self.next()?;
+                    if self.cur.v == TokenValue::RSquirly {
+                        break;
+                    }
+                }
+                TokenValue::RSquirly => break,
+                _ => {
+                    return Err(ParseError::ExpectedToken(
+                        self.cur.clone(),
+                        TokenValue::Semicolon,
+                    ));
+                }
+            }
+        }
+
+        if self.cur.v != TokenValue::RSquirly {
+            return Err(ParseError::ExpectedToken(
+                self.cur.clone(),
+                TokenValue::RSquirly,
+            ));
+        }
+        loc.range.end = self.cur.location.range.end;
+        self.next()?; // consume '}'
+
+        Ok(AST::from(loc, ASTValue::Enum { variants }))
     }
 
     fn parse_union(&mut self) -> ParseResult {
@@ -4591,6 +4675,34 @@ mod tests {
     }
 
     #[test]
+    fn enum_parses_variants_with_optional_values() {
+        let lx = Lexer::new(
+            "enum { Up; Down = 2; Left }".to_string(),
+            "<test>".to_string(),
+        );
+        let ast = parse_one(lx).expect("ok");
+
+        match &ast.v {
+            ASTValue::Enum { variants } => {
+                assert_eq!(variants.len(), 3);
+                assert_eq!(variants[0].name, "Up");
+                assert!(variants[0].value.is_none());
+                assert_eq!(variants[1].name, "Down");
+                match variants[1].value.as_deref() {
+                    Some(AST {
+                        v: ASTValue::Integer(value),
+                        ..
+                    }) => assert_eq!(*value, 2),
+                    _ => panic!("expected enum variant value"),
+                }
+                assert_eq!(variants[2].name, "Left");
+                assert!(variants[2].value.is_none());
+            }
+            _ => panic!("expected Enum"),
+        }
+    }
+
+    #[test]
     fn union_is_list_of_types() {
         let lx = Lexer::new("union<T> { int; T }".to_string(), "<test>".to_string());
         let ast = parse_one(lx).expect("ok");
@@ -4868,6 +4980,23 @@ mod tests {
                 _ => panic!("expected block body"),
             },
             _ => panic!("expected Fn"),
+        }
+    }
+
+    #[test]
+    fn fn_do_semicolon_requires_expression() {
+        let mut lx = Lexer::new("fn() do;".to_string(), "<test>".to_string());
+        let mut parser = Parser::new(&mut lx).expect("parser init");
+        let err = match parser.parse() {
+            Ok(_) => panic!("missing do-body expression should not parse"),
+            Err(err) => err,
+        };
+        match err {
+            ParseError::ExpectedExpression(tok) => match tok.v {
+                TokenValue::Semicolon => {}
+                other => panic!("expected ';' token, got {:?}", other),
+            },
+            other => panic!("expected ExpectedExpression, got {:?}", other),
         }
     }
 

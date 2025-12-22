@@ -103,6 +103,8 @@ slice[index]
 //.{.hi=6, .hds, yrd=3}
 //.{.hi=6, 0xDEADBEEF}
 
+//the :: fn do
+
 Number :: struct<T> {
 	pub number: T
 
@@ -117,4 +119,13 @@ Number :: struct<T> {
 
 a[1]
 a[1, 2]
+
+
+Direction :: enum {
+	Up
+	Down
+	Left
+	Right
+}
+
 

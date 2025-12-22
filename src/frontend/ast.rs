@@ -148,6 +148,11 @@ pub enum InitializerItem {
     Named { name: String, value: Box<AST> },
 }
 
+pub struct EnumVariant {
+    pub name: String,
+    pub value: Option<Box<AST>>,
+}
+
 #[derive(Clone, Debug)]
 pub enum Type {
     Id(String),
@@ -417,6 +422,9 @@ pub enum ASTValue {
         generics: Vec<GenericParam>,
         extends: Option<Box<Type>>,
         body: Box<AST>,
+    },
+    Enum {
+        variants: Vec<EnumVariant>,
     },
     Union {
         generics: Vec<GenericParam>,
@@ -1006,6 +1014,17 @@ impl fmt::Display for AST {
                     write!(f, " (extends {})", quote_type(ex.as_ref()))?;
                 }
                 write!(f, " {})", body)
+            }
+            Enum { variants } => {
+                write!(f, "(Enum")?;
+                for variant in variants {
+                    write!(f, " (Variant {:?}", variant.name)?;
+                    if let Some(value) = &variant.value {
+                        write!(f, " {}", value)?;
+                    }
+                    write!(f, ")")?;
+                }
+                write!(f, ")")
             }
             Union { generics, variants } => {
                 write!(f, "(Union")?;
