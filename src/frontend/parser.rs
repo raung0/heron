@@ -10,9 +10,10 @@ pub struct Parser<'a> {
     next: Token,
 
     enable_multi_id_parse: bool,
+    errors: Vec<ParseError>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum ParseError {
     LexerError(LexerError),
     InvalidUnaryOperator(Token),
@@ -39,6 +40,7 @@ impl<'a> Parser<'a> {
             cur: Token::new(),
             next: Token::new(),
             enable_multi_id_parse: true,
+            errors: Vec::new(),
         };
         ret.next()?;
         ret.next()?;
@@ -56,7 +58,12 @@ impl<'a> Parser<'a> {
     }
 
     pub fn parse(&mut self) -> ParseResult {
-        self.parse_expression_list(&[TokenValue::EOF], false)
+        let ast = self.parse_expression_list(&[TokenValue::EOF], false)?;
+        if self.errors.is_empty() {
+            Ok(ast)
+        } else {
+            Err(self.errors[0].clone())
+        }
     }
 
     fn parse_expression_list(&mut self, list_end: &[TokenValue], only_comma: bool) -> ParseResult {
@@ -68,17 +75,23 @@ impl<'a> Parser<'a> {
             if need_separator {
                 match self.cur.v {
                     TokenValue::Semicolon if !only_comma => {
-                        self.next()?;
+                        if let Err(e) = self.next() {
+                            self.record_error(e.clone());
+                            return Err(e);
+                        }
                         need_separator = false;
                         continue;
                     }
                     TokenValue::Comma => {
-                        self.next()?;
+                        if let Err(e) = self.next() {
+                            self.record_error(e.clone());
+                            return Err(e);
+                        }
                         need_separator = false;
                         continue;
                     }
                     _ => {
-                        return Err(ParseError::ExpectedToken(
+                        self.record_error(ParseError::ExpectedToken(
                             self.cur.clone(),
                             if only_comma {
                                 TokenValue::Comma
@@ -86,26 +99,54 @@ impl<'a> Parser<'a> {
                                 TokenValue::Semicolon
                             },
                         ));
+                        need_separator = false;
+                        continue;
                     }
                 }
             }
 
             if self.cur.v == TokenValue::Semicolon {
                 if only_comma {
-                    return Err(ParseError::UnexpectedToken(
+                    self.record_error(ParseError::UnexpectedToken(
                         self.cur.clone(),
                         TokenValue::Comma,
                     ));
+                    if let Err(e) = self.next() {
+                        self.record_error(e.clone());
+                        return Err(e);
+                    }
+                    continue;
                 }
-                self.next()?;
+                if let Err(e) = self.next() {
+                    self.record_error(e.clone());
+                    return Err(e);
+                }
                 continue;
             }
             if self.cur.v == TokenValue::Comma {
-                self.next()?;
+                if let Err(e) = self.next() {
+                    self.record_error(e.clone());
+                    return Err(e);
+                }
                 continue;
             }
 
-            let v = self.parse_expression()?;
+            let v = match self.parse_expression() {
+                Ok(v) => v,
+                Err(e) => {
+                    if matches!(e, ParseError::LexerError(_)) {
+                        self.record_error(e.clone());
+                        return Err(e);
+                    }
+                    self.record_error(e);
+                    if let Err(e) = self.recover_to(list_end, only_comma) {
+                        self.record_error(e.clone());
+                        return Err(e);
+                    }
+                    need_separator = false;
+                    continue;
+                }
+            };
             loc.range.end = v.location.range.end;
             lst.push(v);
             need_separator = true;
@@ -2067,6 +2108,33 @@ impl<'a> Parser<'a> {
         self.cur = cur;
         self.next = next;
         self.enable_multi_id_parse = enable_multi_id_parse;
+    }
+
+    fn record_error(&mut self, err: ParseError) {
+        self.errors.push(err);
+    }
+
+    fn recover_to(&mut self, list_end: &[TokenValue], only_comma: bool) -> Result<(), ParseError> {
+        loop {
+            if list_end.contains(&self.cur.v) || self.cur.v == TokenValue::EOF {
+                break;
+            }
+            let is_separator = if only_comma {
+                self.cur.v == TokenValue::Comma
+            } else {
+                matches!(self.cur.v, TokenValue::Comma | TokenValue::Semicolon)
+            };
+            if is_separator {
+                self.next()?;
+                break;
+            }
+            self.next()?;
+        }
+        Ok(())
+    }
+
+    pub fn take_errors(&mut self) -> Vec<ParseError> {
+        std::mem::take(&mut self.errors)
     }
 
     fn parse_generic_args(&mut self) -> Result<(Vec<GenericArg>, (i32, i32)), ParseError> {

@@ -123,7 +123,7 @@ impl Token {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum LexerError {
     InvalidString(String),
     InvalidLifetimeName(char),

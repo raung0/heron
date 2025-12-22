@@ -10,17 +10,9 @@ use termcolor::{Color, ColorChoice, ColorSpec, StandardStream, WriteColor};
 
 type ParserError = ParseError;
 
-struct OnExit;
-
-impl Drop for OnExit {
-    fn drop(&mut self) {
-        println!("Done!");
-    }
-}
-
-fn pretty_print_parser_error(err: ParserError, input: String) {
+fn pretty_print_parser_error(err: ParserError, input: &str) {
     let mut stderr = StandardStream::stderr(ColorChoice::Auto);
-    let _ = emit_parser_error(&mut stderr, err, input.as_str());
+    let _ = emit_parser_error(&mut stderr, err, input);
 }
 
 fn emit_parser_error<W: WriteColor>(
@@ -419,8 +411,6 @@ fn write_source_line<W: WriteColor>(
 }
 
 fn main() {
-    let _guard = OnExit;
-
     let matches = Command::new("heron")
         .about("Heron compiler")
         .arg(
@@ -448,11 +438,23 @@ fn main() {
     let input = lexer.get_input();
     let mut parser = frontend::Parser::new(&mut lexer).unwrap();
     let ast = parser.parse();
-    match ast {
-        Ok(ast) => println!(
-            "{}",
-            frontend::AST::pretty_format(format!("{}", ast).as_str())
-        ),
-        Err(e) => pretty_print_parser_error(e, input),
+    let errors = parser.take_errors();
+    if errors.is_empty() {
+        match ast {
+            Ok(ast) => println!(
+                "{}",
+                frontend::AST::pretty_format(format!("{}", ast).as_str())
+            ),
+            Err(e) => pretty_print_parser_error(e, input.as_str()),
+        }
+    } else {
+        let mut first = true;
+        for err in errors {
+            if !first {
+                eprintln!();
+            }
+            pretty_print_parser_error(err, input.as_str());
+            first = false;
+        }
     }
 }
