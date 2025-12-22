@@ -112,9 +112,9 @@ Number :: struct<T> {
 		number = n
 	}
 
-//	operator+ :: fn (this, other: &Self) -> Self {
-//		return Self(number + other.number)
-//	}
+	operator+ :: fn (this, other: &Self) -> Self {
+		return Self(number + other.number)
+	}
 }
 
 a[1]
