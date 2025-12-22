@@ -98,6 +98,11 @@ fn emit_parser_error<W: WriteColor>(
             location = Some(tok.location);
             format!("post return identifier already defined")
         }
+        ParserError::MixedInitializerListStyles(tok) => {
+            label = Some("initializer list items must be all named or all positional".to_string());
+            location = Some(tok.location);
+            format!("mixed initializer list styles")
+        }
     };
 
     let mut error_spec = ColorSpec::new();
@@ -412,7 +417,7 @@ fn main() {
     let _guard = OnExit;
 
     let matches = Command::new("heron")
-        .about("Parses a Heron source file and prints the formatted AST.")
+        .about("Heron compiler")
         .arg(
             Arg::new("file")
                 .help("Path to the Heron source file to parse")

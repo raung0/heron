@@ -26,6 +26,7 @@ pub enum ParseError {
     ExpectedExpression(Token),
     InvalidDeclarationType(Token),
     PostReturnIdAlreadyDefined(Token),
+    MixedInitializerListStyles(Token),
 }
 
 type ParseResult = Result<Box<AST>, ParseError>;
@@ -416,6 +417,7 @@ impl<'a> Parser<'a> {
                 Keyword::RawUnion => return self.parse_raw_union(),
                 Keyword::Newtype => return self.parse_newtype(),
                 Keyword::Alias => return self.parse_alias(),
+                Keyword::Pub => return self.parse_pub(),
                 _ => todo!("Unimplemented keyword: {:?}", k),
             },
 
@@ -436,11 +438,197 @@ impl<'a> Parser<'a> {
                 (*expr).location.range.end = end;
                 expr
             }
+            TokenValue::ListInit => return self.parse_initializer_list(),
 
             _ => return Err(ParseError::InvalidFactorToken(self.cur.clone())),
         };
 
         Ok(node)
+    }
+
+    fn parse_initializer_list(&mut self) -> ParseResult {
+        #[derive(Copy, Clone, Eq, PartialEq)]
+        enum InitStyle {
+            Positional,
+            Named,
+        }
+
+        let mut loc = self.cur.location.clone();
+        if self.cur.v != TokenValue::ListInit {
+            return Err(ParseError::ExpectedToken(
+                self.cur.clone(),
+                TokenValue::ListInit,
+            ));
+        }
+        self.next()?; // consume '.{'
+
+        let enable_multi_id_parse_prev = self.enable_multi_id_parse;
+        self.enable_multi_id_parse = false;
+
+        let mut items: Vec<crate::frontend::InitializerItem> = Vec::new();
+        let mut style: Option<InitStyle> = None;
+        while self.cur.v != TokenValue::RSquirly {
+            if self.cur.v == TokenValue::EOF {
+                self.enable_multi_id_parse = enable_multi_id_parse_prev;
+                return Err(ParseError::ExpectedToken(
+                    self.cur.clone(),
+                    TokenValue::RSquirly,
+                ));
+            }
+
+            let is_named_item = matches!((&self.cur.v, &self.next.v),
+                (TokenValue::Id(_), TokenValue::Op { op: Operator::Set, has_equals: false })
+                    | (TokenValue::Id(_), TokenValue::Comma)
+                    | (TokenValue::Id(_), TokenValue::RSquirly)
+            );
+
+            let item_style = if is_named_item {
+                InitStyle::Named
+            } else {
+                InitStyle::Positional
+            };
+
+            match style {
+                None => style = Some(item_style),
+                Some(existing) if existing != item_style => {
+                    let err_tok = self.cur.clone();
+                    self.enable_multi_id_parse = enable_multi_id_parse_prev;
+                    return Err(ParseError::MixedInitializerListStyles(err_tok));
+                }
+                _ => {}
+            }
+
+            if item_style == InitStyle::Named {
+                let TokenValue::Id(name) = &self.cur.v else {
+                    unreachable!("named style requires identifier");
+                };
+                match &self.next.v {
+                    TokenValue::Op {
+                        op: Operator::Set,
+                        has_equals: false,
+                    } => {
+                        let name = name.clone();
+                        self.next()?; // consume name
+                        self.next()?; // consume '='
+                        let stop = &[TokenValue::Comma, TokenValue::RSquirly];
+                        let value = self.parse_expression_with_stop(stop)?;
+                        items.push(crate::frontend::InitializerItem::Named { name, value });
+                    }
+                    TokenValue::Comma | TokenValue::RSquirly => {
+                        let name = name.clone();
+                        let value =
+                            AST::from(self.cur.location.clone(), ASTValue::Id(name.clone()));
+                        self.next()?; // consume name
+                        items.push(crate::frontend::InitializerItem::Named { name, value });
+                    }
+                    _ => unreachable!("named style detection should have matched"),
+                }
+            } else {
+                let stop = &[TokenValue::Comma, TokenValue::RSquirly];
+                let value = self.parse_expression_with_stop(stop)?;
+                items.push(crate::frontend::InitializerItem::Positional(value));
+            }
+
+            match self.cur.v {
+                TokenValue::Comma => {
+                    self.next()?;
+                    continue;
+                }
+                TokenValue::RSquirly => break,
+                _ => {
+                    self.enable_multi_id_parse = enable_multi_id_parse_prev;
+                    return Err(ParseError::ExpectedToken(
+                        self.cur.clone(),
+                        TokenValue::Comma,
+                    ));
+                }
+            }
+        }
+
+        if self.cur.v != TokenValue::RSquirly {
+            self.enable_multi_id_parse = enable_multi_id_parse_prev;
+            return Err(ParseError::ExpectedToken(
+                self.cur.clone(),
+                TokenValue::RSquirly,
+            ));
+        }
+        loc.range.end = self.cur.location.range.end;
+        self.next()?; // consume '}'
+        self.enable_multi_id_parse = enable_multi_id_parse_prev;
+
+        Ok(AST::from(loc, ASTValue::InitializerList(items)))
+    }
+
+    fn parse_pub(&mut self) -> ParseResult {
+        let mut loc = self.cur.location.clone();
+        self.next()?; // consume 'pub'
+        self.consume_semicolons()?;
+
+        let inner = self.parse_primary()?;
+        loc.range.end = inner.location.range.end;
+        Ok(AST::from(loc, ASTValue::Pub(inner)))
+    }
+
+    fn ast_is_idish(node: &AST) -> bool {
+        match &node.v {
+            ASTValue::Id(_) => true,
+            ASTValue::BinExpr {
+                op: Operator::Dot,
+                lhs,
+                rhs,
+                has_eq: false,
+            } => Self::ast_is_idish(lhs.as_ref()) && matches!(rhs.v, ASTValue::Id(_)),
+            _ => false,
+        }
+    }
+
+    fn ast_last_ident(node: &AST) -> Option<&str> {
+        match &node.v {
+            ASTValue::Id(name) => Some(name.as_str()),
+            ASTValue::BinExpr {
+                op: Operator::Dot,
+                rhs,
+                has_eq: false,
+                ..
+            } => match &rhs.v {
+                ASTValue::Id(name) => Some(name.as_str()),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    fn should_commit_generic_apply(target: &AST, args: &[GenericArg]) -> bool {
+        let args_have_unambiguous_syntax = args
+            .iter()
+            .any(|a| !matches!(a, GenericArg::Name(_)));
+        if args_have_unambiguous_syntax {
+            return true;
+        }
+
+        if args.len() > 1 {
+            return true;
+        }
+
+        let target_has_dot = matches!(
+            target.v,
+            ASTValue::BinExpr {
+                op: Operator::Dot,
+                has_eq: false,
+                ..
+            }
+        );
+        if target_has_dot {
+            return true;
+        }
+
+        let Some(last) = Self::ast_last_ident(target) else {
+            return false;
+        };
+        last.chars()
+            .next()
+            .map(|c| c.is_uppercase())
+            .unwrap_or(false)
     }
 
     fn parse_postfix(&mut self) -> ParseResult {
@@ -475,6 +663,41 @@ impl<'a> Parser<'a> {
                             lhs: node,
                             rhs,
                             has_eq: false,
+                        },
+                    );
+                }
+                TokenValue::Op {
+                    op: Operator::LessThan,
+                    has_equals: false,
+                } => {
+                    if !Self::ast_is_idish(node.as_ref()) {
+                        break;
+                    }
+
+                    let snap = self.snapshot();
+                    let generic_parse = self.parse_generic_args();
+                    let Ok((args, gt_end)) = generic_parse else {
+                        self.restore(snap);
+                        break;
+                    };
+
+                    if self.cur.v != TokenValue::LParen {
+                        self.restore(snap);
+                        break;
+                    }
+
+                    if !Self::should_commit_generic_apply(node.as_ref(), &args) {
+                        self.restore(snap);
+                        break;
+                    }
+
+                    let mut generic_loc = node.location.clone();
+                    generic_loc.range.end = gt_end;
+                    node = AST::from(
+                        generic_loc,
+                        ASTValue::GenericApply {
+                            target: node,
+                            args,
                         },
                     );
                 }
@@ -1773,7 +1996,7 @@ impl<'a> Parser<'a> {
                 has_equals: false
             }
         ) {
-            let args = self.parse_generic_args()?;
+            let (args, _end) = self.parse_generic_args()?;
             return Ok(Box::new(Type::Generic { base: full, args }));
         }
 
@@ -1835,7 +2058,7 @@ impl<'a> Parser<'a> {
         self.enable_multi_id_parse = enable_multi_id_parse;
     }
 
-    fn parse_generic_args(&mut self) -> Result<Vec<GenericArg>, ParseError> {
+    fn parse_generic_args(&mut self) -> Result<(Vec<GenericArg>, (i32, i32)), ParseError> {
         // cur is '<'
         if !matches!(
             self.cur.v,
@@ -1865,12 +2088,13 @@ impl<'a> Parser<'a> {
                 has_equals: false
             }
         ) {
+            let end = self.cur.location.range.end;
             self.next()?; // consume '>'
             self.enable_multi_id_parse = enable_multi_id_parse_prev;
-            return Ok(args);
+            return Ok((args, end));
         }
 
-        loop {
+        let end = loop {
             let arg = self.parse_generic_arg()?;
             args.push(arg);
 
@@ -1886,8 +2110,9 @@ impl<'a> Parser<'a> {
                     has_equals: false
                 }
             ) {
+                let end = self.cur.location.range.end;
                 self.next()?; // consume '>'
-                break;
+                break end;
             }
 
             self.enable_multi_id_parse = enable_multi_id_parse_prev;
@@ -1898,10 +2123,10 @@ impl<'a> Parser<'a> {
                     has_equals: false,
                 },
             ));
-        }
+        };
 
         self.enable_multi_id_parse = enable_multi_id_parse_prev;
-        Ok(args)
+        Ok((args, end))
     }
 
     fn parse_generic_arg(&mut self) -> Result<GenericArg, ParseError> {
@@ -2730,6 +2955,34 @@ mod tests {
         }
     }
 
+    fn expect_call<'a>(ast: &'a AST) -> (&'a AST, &'a [Box<AST>]) {
+        match &ast.v {
+            ASTValue::Call { callee, args } => (callee.as_ref(), args.as_slice()),
+            _ => panic!("expected Call, got {}", ast),
+        }
+    }
+
+    fn expect_generic_apply<'a>(ast: &'a AST) -> (&'a AST, &'a [GenericArg]) {
+        match &ast.v {
+            ASTValue::GenericApply { target, args } => (target.as_ref(), args.as_slice()),
+            _ => panic!("expected GenericApply, got {}", ast),
+        }
+    }
+
+    fn expect_pub<'a>(ast: &'a AST) -> &'a AST {
+        match &ast.v {
+            ASTValue::Pub(inner) => inner.as_ref(),
+            _ => panic!("expected Pub, got {}", ast),
+        }
+    }
+
+    fn expect_initializer_list<'a>(ast: &'a AST) -> &'a [crate::frontend::InitializerItem] {
+        match &ast.v {
+            ASTValue::InitializerList(items) => items.as_slice(),
+            _ => panic!("expected InitializerList, got {}", ast),
+        }
+    }
+
     #[test]
     fn throw_parses_as_expression() {
         let ast = parse_expr(Lexer::new(
@@ -3360,6 +3613,199 @@ mod tests {
             }
             _ => panic!("expected Generic type"),
         }
+    }
+
+    #[test]
+    fn call_with_generics_disambiguates_from_comparison() {
+        let ast = parse_expr(Lexer::new(
+            "core.math.Vector<&'a T, M>()".to_string(),
+            "<test>".to_string(),
+        ))
+        .expect("ok");
+
+        let (callee, args) = expect_call(ast.as_ref());
+        assert!(args.is_empty());
+
+        let (target, gen_args) = expect_generic_apply(callee);
+        assert_eq!(gen_args.len(), 2);
+        match &gen_args[0] {
+            GenericArg::Type(t) => match t.as_ref() {
+                Type::Reference {
+                    mutable,
+                    lifetime,
+                    underlying,
+                } => {
+                    assert!(!*mutable);
+                    assert_eq!(*lifetime, Some('a'));
+                    assert_eq!(underlying.as_ref(), &Type::Id("T".to_string()));
+                }
+                _ => panic!("expected reference type arg"),
+            },
+            _ => panic!("expected type arg"),
+        }
+        assert_eq!(gen_args[1], GenericArg::Name("M".to_string()));
+
+        match &target.v {
+            ASTValue::BinExpr {
+                op: Operator::Dot,
+                lhs,
+                rhs,
+                has_eq: false,
+            } => {
+                expect_id(rhs.as_ref(), "Vector");
+                match &lhs.v {
+                    ASTValue::BinExpr {
+                        op: Operator::Dot,
+                        lhs,
+                        rhs,
+                        has_eq: false,
+                    } => {
+                        expect_id(lhs.as_ref(), "core");
+                        expect_id(rhs.as_ref(), "math");
+                    }
+                    _ => panic!("expected core.math qualifier, got {}", lhs),
+                }
+            }
+            _ => panic!("expected dotted target, got {}", target),
+        }
+    }
+
+    #[test]
+    fn comparison_wins_over_ambiguous_single_name_generic_call() {
+        let ast = parse_expr(Lexer::new(
+            "a < b > (c)".to_string(),
+            "<test>".to_string(),
+        ))
+        .expect("ok");
+        let s = ast.to_string();
+        assert!(
+            s.contains("BinExp [op: LessThan") && s.contains("BinExp [op: GreaterThan"),
+            "expected chained comparisons, got {s}"
+        );
+        assert!(!s.contains("GenericApply"), "unexpected generic apply: {s}");
+    }
+
+    #[test]
+    fn pub_can_wrap_declarations() {
+        let ast = parse_expr(Lexer::new(
+            "pub main := 1".to_string(),
+            "<test>".to_string(),
+        ))
+        .expect("ok");
+
+        let inner = expect_pub(ast.as_ref());
+        let (constexpr, names, types, values) = expect_declaration_multi(inner);
+        assert!(!constexpr);
+        assert_eq!(names, &["main".to_string()]);
+        assert!(types.is_empty());
+        let values = values.expect("values");
+        assert_eq!(values.len(), 1);
+        expect_integer(values[0].as_ref(), 1);
+    }
+
+    #[test]
+    fn initializer_list_positional_parses() {
+        let ast = parse_expr(Lexer::new(".{1, 2, 3}".to_string(), "<test>".to_string()))
+            .expect("ok");
+        let items = expect_initializer_list(ast.as_ref());
+        assert_eq!(items.len(), 3);
+        match &items[0] {
+            crate::frontend::InitializerItem::Positional(v) => expect_integer(v.as_ref(), 1),
+            _ => panic!("expected positional item"),
+        }
+    }
+
+    #[test]
+    fn initializer_list_named_uses_equals() {
+        let ast =
+            parse_expr(Lexer::new(".{ x = 1, y = 2 }".to_string(), "<test>".to_string()))
+                .expect("ok");
+        let items = expect_initializer_list(ast.as_ref());
+        assert_eq!(items.len(), 2);
+        match &items[0] {
+            crate::frontend::InitializerItem::Named { name, value } => {
+                assert_eq!(name, "x");
+                expect_integer(value.as_ref(), 1);
+            }
+            _ => panic!("expected named item"),
+        }
+    }
+
+    #[test]
+    fn initializer_list_named_shorthand_uses_identifier_value() {
+        let ast = parse_expr(Lexer::new(".{ x }".to_string(), "<test>".to_string())).expect("ok");
+        let items = expect_initializer_list(ast.as_ref());
+        assert_eq!(items.len(), 1);
+        match &items[0] {
+            crate::frontend::InitializerItem::Named { name, value } => {
+                assert_eq!(name, "x");
+                expect_id(value.as_ref(), "x");
+            }
+            _ => panic!("expected named shorthand item"),
+        }
+    }
+
+    #[test]
+    fn initializer_list_mixed_shorthand_and_explicit_named() {
+        let ast = parse_expr(Lexer::new(
+            ".{ x, y = 2 }".to_string(),
+            "<test>".to_string(),
+        ))
+        .expect("ok");
+        let items = expect_initializer_list(ast.as_ref());
+        assert_eq!(items.len(), 2);
+        match &items[0] {
+            crate::frontend::InitializerItem::Named { name, value } => {
+                assert_eq!(name, "x");
+                expect_id(value.as_ref(), "x");
+            }
+            _ => panic!("expected named shorthand item"),
+        }
+        match &items[1] {
+            crate::frontend::InitializerItem::Named { name, value } => {
+                assert_eq!(name, "y");
+                expect_integer(value.as_ref(), 2);
+            }
+            _ => panic!("expected named item"),
+        }
+    }
+
+    #[test]
+    fn initializer_list_cannot_mix_positional_and_named() {
+        let err = parse_expr(Lexer::new(
+            ".{ 1, x = 2 }".to_string(),
+            "<test>".to_string(),
+        ))
+        .err()
+        .expect("should be Err");
+        match err {
+            ParseError::MixedInitializerListStyles(_) => {}
+            other => panic!("expected MixedInitializerListStyles, got {:?}", other),
+        }
+
+        let err = parse_expr(Lexer::new(
+            ".{ x = 1, 2 }".to_string(),
+            "<test>".to_string(),
+        ))
+        .err()
+        .expect("should be Err");
+        match err {
+            ParseError::MixedInitializerListStyles(_) => {}
+            other => panic!("expected MixedInitializerListStyles, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn initializer_list_can_be_call_argument() {
+        let ast = parse_expr(Lexer::new(
+            "Vector<f32, 3>(.{1, 2, 3})".to_string(),
+            "<test>".to_string(),
+        ))
+        .expect("ok");
+        let (_callee, args) = expect_call(ast.as_ref());
+        assert_eq!(args.len(), 1);
+        let items = expect_initializer_list(args[0].as_ref());
+        assert_eq!(items.len(), 3);
     }
 
     #[test]

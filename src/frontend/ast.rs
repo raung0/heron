@@ -143,6 +143,11 @@ pub enum FnBody {
     Expr(Box<AST>),
 }
 
+pub enum InitializerItem {
+    Positional(Box<AST>),
+    Named { name: String, value: Box<AST> },
+}
+
 #[derive(Clone, Debug)]
 pub enum Type {
     Id(String),
@@ -341,6 +346,11 @@ pub enum ASTValue {
         callee: Box<AST>,
         args: Vec<Box<AST>>,
     },
+    GenericApply {
+        target: Box<AST>,
+        args: Vec<GenericArg>,
+    },
+    InitializerList(Vec<InitializerItem>),
     PtrOf(Box<AST>),
     Index {
         target: Box<AST>,
@@ -649,6 +659,24 @@ impl fmt::Display for AST {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         use ASTValue::*;
         let quote_type = |t: &crate::frontend::Type| format!("\"{}\"", t);
+        fn write_generic_arg(f: &mut fmt::Formatter<'_>, a: &crate::frontend::GenericArg) -> fmt::Result {
+            match a {
+                crate::frontend::GenericArg::Type(t) => write!(f, "(Type \"{}\")", t),
+                crate::frontend::GenericArg::Expr(e) => write!(f, "(Expr {})", e),
+                crate::frontend::GenericArg::Name(n) => write!(f, "(Name {:?})", n),
+            }
+        }
+        fn write_initializer_item(
+            f: &mut fmt::Formatter<'_>,
+            it: &crate::frontend::InitializerItem,
+        ) -> fmt::Result {
+            match it {
+                crate::frontend::InitializerItem::Positional(v) => write!(f, "(Item {})", v),
+                crate::frontend::InitializerItem::Named { name, value } => {
+                    write!(f, "(Field {:?} {})", name, value)
+                }
+            }
+        }
         fn write_opt_dbg<T: fmt::Debug>(f: &mut fmt::Formatter<'_>, v: &Option<T>) -> fmt::Result {
             match v {
                 Some(x) => write!(f, "{:?}", x),
@@ -706,6 +734,22 @@ impl fmt::Display for AST {
                 write!(f, "(Call {}", callee)?;
                 for a in args {
                     write!(f, " {}", a)?;
+                }
+                write!(f, ")")
+            }
+            GenericApply { target, args } => {
+                write!(f, "(GenericApply {}", target)?;
+                for a in args {
+                    write!(f, " ")?;
+                    write_generic_arg(f, a)?;
+                }
+                write!(f, ")")
+            }
+            InitializerList(items) => {
+                write!(f, "(InitializerList")?;
+                for it in items {
+                    write!(f, " ")?;
+                    write_initializer_item(f, it)?;
                 }
                 write!(f, ")")
             }
