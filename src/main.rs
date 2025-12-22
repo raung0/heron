@@ -55,6 +55,22 @@ fn emit_parser_error<W: WriteColor>(
                 describe_token_value(&tok.v)
             )
         }
+        ParserError::UnclosedOperatorName(tok, expected) => {
+            label = Some(format!(
+                "operator name not closed (expected {})",
+                describe_token_value(&expected)
+            ));
+            location = Some(tok.location);
+            format!(
+                "operator name not closed (expected {})",
+                describe_token_value(&expected)
+            )
+        }
+        ParserError::InvalidOperatorName(tok) => {
+            label = Some("invalid operator".to_string());
+            location = Some(tok.location);
+            format!("invalid operator")
+        }
         ParserError::InvalidFactorToken(tok) => {
             location = Some(tok.location);
             format!("invalid factor token {}", describe_token_value(&tok.v))

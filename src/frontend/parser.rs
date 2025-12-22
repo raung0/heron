@@ -20,6 +20,8 @@ pub enum ParseError {
     InvalidBinaryOperator(Token),
     UnexpectedToken(Token, TokenValue),
     ExpectedToken(Token, TokenValue),
+    UnclosedOperatorName(Token, TokenValue),
+    InvalidOperatorName(Token),
     InvalidFactorToken(Token),
     ExpectedConditionExpression(Token),
     InvalidForBinding(SourceLocation),
@@ -407,22 +409,7 @@ impl<'a> Parser<'a> {
         let l = self.cur.location.clone();
 
         if self.cur.v == TokenValue::Keyword(Keyword::Operator) && self.enable_multi_id_parse {
-            let snap = self.snapshot();
-            if self.parse_decl_name().is_ok()
-                && matches!(
-                    self.cur.v,
-                    TokenValue::Colon
-                        | TokenValue::Comma
-                        | TokenValue::Op {
-                            op: Operator::Set,
-                            has_equals: false
-                        }
-                )
-            {
-                self.restore(snap);
-                return self.parse_multi_id();
-            }
-            self.restore(snap);
+            return self.parse_multi_id();
         }
 
         if self.token_starts_type(&self.cur.v) {
@@ -840,9 +827,6 @@ impl<'a> Parser<'a> {
                         ASTValue::ExprList(v) => v,
                         _ => unreachable!("expression_list always returns ExprList"),
                     };
-                    if indices.is_empty() {
-                        return Err(ParseError::ExpectedExpression(self.cur.clone()));
-                    }
                     if self.cur.v != TokenValue::RBracket {
                         return Err(ParseError::ExpectedToken(
                             self.cur.clone(),
@@ -2734,7 +2718,7 @@ impl<'a> Parser<'a> {
                     TokenValue::LBracket => {
                         self.next()?; // consume '['
                         if self.cur.v != TokenValue::RBracket {
-                            return Err(ParseError::ExpectedToken(
+                            return Err(ParseError::UnclosedOperatorName(
                                 self.cur.clone(),
                                 TokenValue::RBracket,
                             ));
@@ -2746,7 +2730,7 @@ impl<'a> Parser<'a> {
                     TokenValue::LParen => {
                         self.next()?; // consume '('
                         if self.cur.v != TokenValue::RParen {
-                            return Err(ParseError::ExpectedToken(
+                            return Err(ParseError::UnclosedOperatorName(
                                 self.cur.clone(),
                                 TokenValue::RParen,
                             ));
@@ -2755,13 +2739,7 @@ impl<'a> Parser<'a> {
                         self.next()?; // consume ')'
                         Ok(("operator()".to_string(), end_loc))
                     }
-                    _ => Err(ParseError::ExpectedToken(
-                        self.cur.clone(),
-                        TokenValue::Op {
-                            op: Operator::Add,
-                            has_equals: false,
-                        },
-                    )),
+                    _ => Err(ParseError::InvalidOperatorName(self.cur.clone())),
                 }
             }
             _ => Err(ParseError::ExpectedToken(
@@ -4425,6 +4403,19 @@ mod tests {
         match &ast.v {
             ASTValue::DotId(name) => assert_eq!(name, "UP"),
             _ => panic!("expected DotId"),
+        }
+    }
+
+    #[test]
+    fn empty_index_parse() {
+        let lx = Lexer::new("value[]".to_string(), "<test>".to_string());
+        let ast = parse_one(lx).expect("ok");
+        match &ast.v {
+            ASTValue::Index { target, indices } => {
+                expect_id(target.as_ref(), "value");
+                assert!(indices.is_empty(), "expected empty index list");
+            }
+            _ => panic!("expected Index"),
         }
     }
 

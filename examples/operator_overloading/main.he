@@ -12,11 +12,13 @@ Number :: struct<T> {
 	operator+ :: fn (this, other: &Self) -> Self {
 		return Self(number + other.number)
 	}
+	
+	operator[] :: fn (this: &Self) -> T do this.number
 }
 
 pub main := fn {
 	n1 := Number(123)
 	n2 := Number(456)
 
-	core.io.println("{} + {} = {}", n1.number, n2.number, n1 + n2)
+	core.io.println("{} + {} = {}", n1[], n2.number, n1 + n2)
 }
