@@ -354,7 +354,7 @@ pub enum ASTValue {
     PtrOf(Box<AST>),
     Index {
         target: Box<AST>,
-        index: Box<AST>,
+        indices: Vec<Box<AST>>,
     },
     ExprList(Vec<Box<AST>>),
     ExprListNoScope(Vec<Box<AST>>),
@@ -756,8 +756,12 @@ impl fmt::Display for AST {
             PtrOf(v) => {
                 write!(f, "(PtrOf {})", v)
             }
-            Index { target, index } => {
-                write!(f, "(Index {} {})", target, index)
+            Index { target, indices } => {
+                write!(f, "(Index {}", target)?;
+                for index in indices {
+                    write!(f, " {}", index)?;
+                }
+                write!(f, ")")
             }
             ExprList(v) => {
                 let folded = v

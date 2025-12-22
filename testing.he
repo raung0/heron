@@ -100,8 +100,8 @@ slice[index]
 
 .{123, 8888, abcd}
 .{.hi}
-.{.hi=6, .hds, yrd=3}
-.{.hi=6, 0xDEADBEEF}
+//.{.hi=6, .hds, yrd=3}
+//.{.hi=6, 0xDEADBEEF}
 
 Number :: struct<T> {
 	pub number: T
@@ -114,4 +114,7 @@ Number :: struct<T> {
 //		return Self(number + other.number)
 //	}
 }
+
+a[1]
+a[1, 2]
 

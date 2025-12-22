@@ -776,10 +776,14 @@ impl<'a> Parser<'a> {
                 }
                 TokenValue::LBracket => {
                     self.next()?; // consume '['
-                    if self.cur.v == TokenValue::RBracket {
+                    let indices_list = self.parse_expression_list(&[TokenValue::RBracket], true)?;
+                    let indices = match indices_list.v {
+                        ASTValue::ExprList(v) => v,
+                        _ => unreachable!("expression_list always returns ExprList"),
+                    };
+                    if indices.is_empty() {
                         return Err(ParseError::ExpectedExpression(self.cur.clone()));
                     }
-                    let index = self.parse_expression()?;
                     if self.cur.v != TokenValue::RBracket {
                         return Err(ParseError::ExpectedToken(
                             self.cur.clone(),
@@ -795,7 +799,7 @@ impl<'a> Parser<'a> {
                         index_loc,
                         ASTValue::Index {
                             target: node,
-                            index,
+                            indices,
                         },
                     );
                 }
