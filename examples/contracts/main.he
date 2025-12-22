@@ -1,0 +1,12 @@
+package main
+
+use core.io
+
+divide := fn (a, b: int) -> int
+	where b != 0
+	ensures<result> result * b == a / b * b
+do return a / b
+
+pub main := fn {
+	core.io.println("{}", divide(10, 2))
+}

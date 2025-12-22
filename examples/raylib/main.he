@@ -1,0 +1,34 @@
+package main
+
+use core.math
+use vendor.raylib as rl
+
+// PLAYER_RADIUS is an <untyped integer> constant expression
+PLAYER_RADIUS :: 32
+
+pub main := fn {
+	// 640, 480 and "Raylib" are all untyped constant expressions, however, because they are parameters to init_window, which takes 2 i32s and one [^]i8, they resolve to the appropriate types.
+	rl.raw.init_window(width: 640, height: 480, title: "Raylib")
+	// `defer` defers an expression to the end of the scope.
+	defer rl.raw.close_window()
+
+	// Calls the vector's constructor, which returns a mutable self, hence `mut` keyword is allowed here.
+	player_pos := mut core.math.Vector<f32, 2>()
+
+	for not rl.raw.window_should_close() {
+		// `do ...` is just syntactic sugar for `{ ... }`
+		if rl.is_key_down(.UP) do player_pos -= .{ 0, 1 }
+		if rl.is_key_down(.DOWN) do player_pos += .{ 0, 1 }
+		if rl.is_key_down(.LEFT) do player_pos -= .{ 1, 0 }
+		if rl.is_key_down(.RIGHT) do player_pos += .{ 1, 0 }
+
+		{
+			rl.begin_drawing()
+			defer rl.end_drawing()
+
+			// Similarly to init_window, PLAYER_RADIUS resolves to an f32.
+			rl.draw_circle_v(position: player_pos, radius: PLAYER_RADIUS, color: rl::RED)
+		}
+	}
+}
+

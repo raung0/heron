@@ -1,0 +1,22 @@
+package main
+
+use core.io
+
+Number :: struct<T> {
+	pub number: T
+
+	__construct :: fn (using this: &mut Self; n: T) {
+		number = n
+	}
+
+	operator+ :: fn (using this, other: &Self) -> Self {
+		return Self(number + other.number)
+	}
+}
+
+pub main := fn {
+	n1 := Number(123)
+	n2 := Number(456)
+
+	core.io.println("{} + {} = {}", n1.number, n2.number, n1 + n2)
+}

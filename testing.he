@@ -102,3 +102,15 @@ slice[index]
 .{hi}
 .{hi=6, hds, yrd=3}
 
+Number :: struct<T> {
+	pub number: T
+
+	__construct :: fn (using this: &mut Self; n: T) {
+		number = n
+	}
+
+//	operator+ :: fn (using this, other: &Self) -> Self {
+//		return Self(number + other.number)
+//	}
+}
+

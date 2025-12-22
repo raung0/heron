@@ -1,0 +1,27 @@
+package main
+
+use core.math
+use vendor.raylib as rl
+
+PLAYER_RADIUS :: 32
+
+pub main := fn {
+	// RAII takes care of freeing up the Window.
+	window := rl.Window(width: 640, height: 480, title: "Raylib")
+
+	player_pos := mut core.math.Vector<f32, 2>()
+
+	for not window.should_close() {
+		if rl.is_key_down(.UP) do player_pos -= .{ 0, 1 }
+		if rl.is_key_down(.DOWN) do player_pos += .{ 0, 1 }
+		if rl.is_key_down(.LEFT) do player_pos -= .{ 1, 0 }
+		if rl.is_key_down(.RIGHT) do player_pos += .{ 1, 0 }
+
+		{
+			rl.begin_drawing()
+			defer rl.end_drawing()
+
+			rl.draw_circle_v(position: player_pos, radius: PLAYER_RADIUS, color: rl::RED)
+		}
+	}
+}
