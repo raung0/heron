@@ -4,6 +4,7 @@ pub mod frontend;
 
 use std::io;
 
+use clap::{Arg, Command};
 use frontend::{Keyword, LexerError, Operator, ParseError, SourceLocation, TokenValue};
 use termcolor::{Color, ColorChoice, ColorSpec, StandardStream, WriteColor};
 
@@ -91,6 +92,11 @@ fn emit_parser_error<W: WriteColor>(
                 "invalid declaration type, found {}",
                 describe_token_value(&tok.v)
             )
+        }
+        ParserError::PostReturnIdAlreadyDefined(tok) => {
+            label = Some("post return identifier already defined".to_string());
+            location = Some(tok.location);
+            format!("post return identifier already defined")
         }
     };
 
@@ -184,12 +190,15 @@ fn keyword_lexeme(keyword: &Keyword) -> &'static str {
         Keyword::Mut => "mut",
         Keyword::Defer => "defer",
         Keyword::Where => "where",
+        Keyword::Pre => "pre",
+        Keyword::Post => "post",
         Keyword::Ensures => "ensures",
         Keyword::Do => "do",
         Keyword::Extends => "extends",
         Keyword::Using => "using",
         Keyword::Throws => "throws",
         Keyword::Throw => "throw",
+        Keyword::Return => "return",
         Keyword::Match => "match",
         Keyword::Case => "case",
         Keyword::If => "if",
@@ -402,7 +411,30 @@ fn write_source_line<W: WriteColor>(
 fn main() {
     let _guard = OnExit;
 
-    let mut lexer = frontend::Lexer::new_from_file("testing.he".to_string());
+    let matches = Command::new("heron")
+        .about("Parses a Heron source file and prints the formatted AST.")
+        .arg(
+            Arg::new("file")
+                .help("Path to the Heron source file to parse")
+                .required(true)
+                .value_name("FILE"),
+        )
+        .get_matches();
+
+    let file = matches
+        .get_one::<String>("file")
+        .expect("clap enforces required argument")
+        .to_owned();
+
+    let input = match std::fs::read_to_string(&file) {
+        Ok(input) => input,
+        Err(e) => {
+            eprintln!("error: failed to read `{file}`: {e}");
+            std::process::exit(1);
+        }
+    };
+
+    let mut lexer = frontend::Lexer::new(input, file);
     let input = lexer.get_input();
     let mut parser = frontend::Parser::new(&mut lexer).unwrap();
     let ast = parser.parse();

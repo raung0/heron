@@ -22,6 +22,87 @@ pub enum GenericParam {
     },
 }
 
+impl fmt::Display for GenericParam {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            GenericParam::Lifetime(c) => write!(f, "'{}", c),
+            GenericParam::Type { names, constraint } => {
+                write!(f, "{}", names.join(", "))?;
+                match constraint.as_deref() {
+                    None => Ok(()),
+                    Some(Type::Id(name)) if name == "type" => Ok(()),
+                    Some(t) => write!(f, ": {}", t),
+                }
+            }
+            GenericParam::Value { names, ty } => write!(f, "{}: {}", names.join(", "), ty),
+        }
+    }
+}
+
+fn write_quoted_atom(f: &mut fmt::Formatter<'_>, s: &str) -> fmt::Result {
+    write!(f, "\"{}\"", s.escape_default())
+}
+
+fn write_generic_list(f: &mut fmt::Formatter<'_>, generics: &[GenericParam]) -> fmt::Result {
+    write!(f, " (GenericList")?;
+    for g in generics {
+        match g {
+            GenericParam::Lifetime(c) => write!(f, " (GenericLifetime '{}')", c)?,
+            GenericParam::Type { names, constraint } => {
+                let name = names.join(", ");
+                let constraint_s = match constraint.as_deref() {
+                    None => "type".to_string(),
+                    Some(Type::Id(id)) if id == "type" => "type".to_string(),
+                    Some(t) => t.to_string(),
+                };
+                write!(f, " (Generic ")?;
+                write_quoted_atom(f, &name)?;
+                write!(f, " ")?;
+                write_quoted_atom(f, &constraint_s)?;
+                write!(f, ")")?;
+            }
+            GenericParam::Value { names, ty } => {
+                let name = names.join(", ");
+                let ty_s = ty.to_string();
+                write!(f, " (Generic ")?;
+                write_quoted_atom(f, &name)?;
+                write!(f, " ")?;
+                write_quoted_atom(f, &ty_s)?;
+                write!(f, ")")?;
+            }
+        }
+    }
+    write!(f, ")")
+}
+
+fn write_param_list(f: &mut fmt::Formatter<'_>, params: &[FnParam]) -> fmt::Result {
+    write!(f, " (ParamList")?;
+
+    for p in params {
+        let ty_s = p
+            .ty
+            .as_ref()
+            .map(|t| t.to_string())
+            .unwrap_or_else(|| "infer".to_string());
+
+        for name in &p.names {
+            write!(f, " (Param ")?;
+            write_quoted_atom(f, name)?;
+            write!(f, " ")?;
+            write_quoted_atom(f, &ty_s)?;
+            if p.using {
+                write!(f, " (Using)")?;
+            }
+            if let Some(default) = &p.default {
+                write!(f, " (Default {})", default)?;
+            }
+            write!(f, ")")?;
+        }
+    }
+
+    write!(f, ")")
+}
+
 pub struct FnParam {
     pub using: bool,
     pub names: Vec<String>,
@@ -32,6 +113,11 @@ pub struct FnParam {
 pub struct EnsuresClause {
     pub binders: Vec<String>,
     pub condition: Box<AST>,
+}
+
+pub struct PostClause {
+    pub return_id: Option<String>,
+    pub conditions: Vec<Box<AST>>,
 }
 
 pub enum FnBody {
@@ -243,6 +329,7 @@ pub enum ASTValue {
     },
     ExprList(Vec<Box<AST>>),
     ExprListNoScope(Vec<Box<AST>>),
+    Return(Option<Box<AST>>),
     If {
         cond: Box<AST>,
         decl: Option<Box<AST>>,
@@ -286,6 +373,8 @@ pub enum ASTValue {
         params: Vec<FnParam>,
         return_type: Option<Box<Type>>,
         throws: Vec<Box<Type>>,
+        pre: Vec<Box<AST>>,
+        post: Option<PostClause>,
         where_clause: Option<Box<AST>>,
         ensures: Vec<EnsuresClause>,
         body: FnBody,
@@ -615,6 +704,13 @@ impl fmt::Display for AST {
                     .join(" ");
                 write!(f, "(ExprListNoScope {})", folded)
             }
+            Return(v) => {
+                if let Some(v) = v {
+                    write!(f, "(Return {})", v)
+                } else {
+                    write!(f, "(Return)")
+                }
+            }
             If {
                 cond,
                 decl,
@@ -725,15 +821,17 @@ impl fmt::Display for AST {
                 params,
                 return_type,
                 throws,
+                pre,
+                post,
                 where_clause,
                 ensures,
                 body,
             } => {
                 write!(f, "(Fn")?;
                 if !generics.is_empty() {
-                    write!(f, " <{}>", generics.len())?;
+                    write_generic_list(f, generics)?;
                 }
-                write!(f, " [params: {}]", params.len())?;
+                write_param_list(f, params)?;
                 if let Some(rt) = return_type {
                     write!(f, " [ret: {}]", quote_type(rt.as_ref()))?;
                 }
@@ -744,6 +842,23 @@ impl fmt::Display for AST {
                         .collect::<Vec<_>>()
                         .join(", ");
                     write!(f, " [throws: {}]", throws_s)?;
+                }
+                if !pre.is_empty() {
+                    write!(f, " (Pre")?;
+                    for p in pre {
+                        write!(f, " {}", p)?;
+                    }
+                    write!(f, ")")?;
+                }
+                if let Some(post) = post {
+                    write!(f, " (Post")?;
+                    if let Some(ret) = &post.return_id {
+                        write!(f, " {:?}", ret)?;
+                    }
+                    for c in &post.conditions {
+                        write!(f, " {}", c)?;
+                    }
+                    write!(f, ")")?;
                 }
                 if where_clause.is_some() {
                     write!(f, " [where]")?;
@@ -764,7 +879,7 @@ impl fmt::Display for AST {
             } => {
                 write!(f, "(Struct")?;
                 if !generics.is_empty() {
-                    write!(f, " <{}>", generics.len())?;
+                    write_generic_list(f, generics)?;
                 }
                 if let Some(ex) = extends {
                     write!(f, " (extends {})", quote_type(ex.as_ref()))?;
@@ -774,7 +889,7 @@ impl fmt::Display for AST {
             Union { generics, variants } => {
                 write!(f, "(Union")?;
                 if !generics.is_empty() {
-                    write!(f, " <{}>", generics.len())?;
+                    write_generic_list(f, generics)?;
                 }
                 write!(f, " [")?;
                 for (i, v) in variants.iter().enumerate() {
@@ -788,7 +903,7 @@ impl fmt::Display for AST {
             RawUnion { generics, body } => {
                 write!(f, "(RawUnion")?;
                 if !generics.is_empty() {
-                    write!(f, " <{}>", generics.len())?;
+                    write_generic_list(f, generics)?;
                 }
                 write!(f, " {})", body)
             }

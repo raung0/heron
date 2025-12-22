@@ -71,3 +71,13 @@ Bits :: raw_union {
 Idx :: newtype uint(0..<32)
 Entities := alias [Idx]int
 Adder :: alias fn(int, int) -> int
+
+divide :: fn(a, b: f32) -> f32
+	pre b != 0
+	post result: result * b == a
+	do a / b
+
+add :: fn<T>(a, b: T) -> T {
+	return a + b
+}
+

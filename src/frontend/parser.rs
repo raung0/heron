@@ -1,6 +1,6 @@
 use crate::frontend::{
     AST, ASTValue, EnsuresClause, FnBody, FnParam, GenericArg, GenericParam, Keyword, Lexer,
-    LexerError, Operator, SourceLocation, Token, TokenValue, Type,
+    LexerError, Operator, PostClause, SourceLocation, Token, TokenValue, Type,
 };
 
 pub struct Parser<'a> {
@@ -24,6 +24,7 @@ pub enum ParseError {
     ExpectedBody(SourceLocation),
     ExpectedExpression(Token),
     InvalidDeclarationType(Token),
+    PostReturnIdAlreadyDefined(Token),
 }
 
 type ParseResult = Result<Box<AST>, ParseError>;
@@ -408,6 +409,7 @@ impl<'a> Parser<'a> {
                 Keyword::If => return self.parse_if(),
                 Keyword::While => return self.parse_while(),
                 Keyword::For => return self.parse_for(),
+                Keyword::Return => return self.parse_return(),
                 Keyword::Mut => {
                     self.next()?; // consume `mut`
                     let inner = self.parse_factor()?;
@@ -547,6 +549,26 @@ impl<'a> Parser<'a> {
         Ok(node)
     }
 
+    fn parse_return(&mut self) -> ParseResult {
+        let mut loc = self.cur.location.clone();
+        self.next()?; // consume 'return'
+
+        let has_value = !matches!(
+            self.cur.v,
+            TokenValue::Semicolon | TokenValue::Comma | TokenValue::RSquirly | TokenValue::EOF
+        );
+        let v = if has_value {
+            let expr = self.parse_expression()?;
+            loc.range.end = expr.location.range.end;
+            Some(expr)
+        } else {
+            loc.range.end = self.cur.location.range.end;
+            None
+        };
+
+        Ok(AST::from(loc, ASTValue::Return(v)))
+    }
+
     fn parse_dotted_path(&mut self) -> Result<(Vec<String>, SourceLocation), ParseError> {
         let mut loc = self.cur.location.clone();
         let mut path: Vec<String> = Vec::new();
@@ -660,28 +682,107 @@ impl<'a> Parser<'a> {
         self.consume_semicolons()?;
 
         let mut throws: Vec<Box<Type>> = Vec::new();
-        if self.cur.v == TokenValue::Keyword(Keyword::Throws) {
-            self.next()?; // consume 'throws'
-            throws.push(self.parse_type_inner()?);
-            loop {
-                match self.cur.v {
-                    TokenValue::Comma => {
-                        self.next()?;
-                        throws.push(self.parse_type_inner()?);
-                    }
-                    TokenValue::Semicolon => {
-                        if self.token_starts_type(&self.next.v) {
-                            self.next()?; // consume ';'
-                            throws.push(self.parse_type_inner()?);
-                        } else {
-                            break;
+        let mut pre: Vec<Box<AST>> = Vec::new();
+        let mut post: Option<PostClause> = None;
+
+        let contract_stop = &[
+            TokenValue::Keyword(Keyword::Throws),
+            TokenValue::Keyword(Keyword::Pre),
+            TokenValue::Keyword(Keyword::Post),
+            TokenValue::Keyword(Keyword::Where),
+            TokenValue::Keyword(Keyword::Ensures),
+            TokenValue::Keyword(Keyword::Do),
+            TokenValue::LSquirly,
+            TokenValue::EOF,
+        ];
+
+        while matches!(
+            self.cur.v,
+            TokenValue::Keyword(Keyword::Throws)
+                | TokenValue::Keyword(Keyword::Pre)
+                | TokenValue::Keyword(Keyword::Post)
+        ) {
+            match self.cur.v.clone() {
+                TokenValue::Keyword(Keyword::Throws) => {
+                    self.next()?; // consume 'throws'
+                    throws.push(self.parse_type_inner()?);
+                    loop {
+                        match self.cur.v {
+                            TokenValue::Comma => {
+                                self.next()?;
+                                throws.push(self.parse_type_inner()?);
+                            }
+                            TokenValue::Semicolon => {
+                                if self.token_starts_type(&self.next.v) {
+                                    self.next()?; // consume ';'
+                                    throws.push(self.parse_type_inner()?);
+                                } else {
+                                    break;
+                                }
+                            }
+                            _ => break,
                         }
                     }
-                    _ => break,
                 }
+                TokenValue::Keyword(Keyword::Pre) => {
+                    self.next()?; // consume 'pre'
+                    let list_ast = self.parse_expression_list(contract_stop, false)?;
+                    let exprs = match list_ast.v {
+                        ASTValue::ExprList(exprs) => exprs,
+                        _ => unreachable!("expression_list always returns ExprList"),
+                    };
+                    pre.extend(exprs);
+                }
+                TokenValue::Keyword(Keyword::Post) => {
+                    self.next()?; // consume 'post'
+                    let return_id = match (&self.cur.v, &self.next.v) {
+                        (TokenValue::Id(name), TokenValue::Colon) => {
+                            let return_id_tok = self.cur.clone();
+                            let name = name.clone();
+                            self.next()?; // consume id
+                            self.next()?; // consume ':'
+                            if matches!(post.as_ref().and_then(|p| p.return_id.as_ref()), Some(_)) {
+                                return Err(ParseError::PostReturnIdAlreadyDefined(return_id_tok));
+                            }
+                            Some(name)
+                        }
+                        _ => {
+                            if self.cur.v != TokenValue::Colon {
+                                return Err(ParseError::ExpectedToken(
+                                    self.cur.clone(),
+                                    TokenValue::Colon,
+                                ));
+                            }
+                            self.next()?; // consume ':'
+                            None
+                        }
+                    };
+
+                    let list_ast = self.parse_expression_list(contract_stop, false)?;
+                    let conditions = match list_ast.v {
+                        ASTValue::ExprList(exprs) => exprs,
+                        _ => unreachable!("expression_list always returns ExprList"),
+                    };
+
+                    match &mut post {
+                        None => {
+                            post = Some(PostClause {
+                                return_id,
+                                conditions,
+                            });
+                        }
+                        Some(existing) => {
+                            if existing.return_id.is_none() {
+                                existing.return_id = return_id;
+                            }
+                            existing.conditions.extend(conditions);
+                        }
+                    }
+                }
+                _ => unreachable!(),
             }
+            self.consume_semicolons()?;
         }
-        self.consume_semicolons()?;
 
         let where_clause = if self.cur.v == TokenValue::Keyword(Keyword::Where) {
             self.next()?; // consume 'where'
@@ -745,6 +846,8 @@ impl<'a> Parser<'a> {
                 params,
                 return_type,
                 throws,
+                pre,
+                post,
                 where_clause,
                 ensures,
                 body,
@@ -1896,28 +1999,11 @@ impl<'a> Parser<'a> {
                     self.next()?;
                 }
                 TokenValue::Id(_) => {
-                    let mut names: Vec<String> = Vec::new();
-                    loop {
-                        match &self.cur.v {
-                            TokenValue::Id(name) => {
-                                names.push(name.clone());
-                                self.next()?;
-                            }
-                            _ => {
-                                self.enable_multi_id_parse = enable_multi_id_parse_prev;
-                                return Err(ParseError::ExpectedToken(
-                                    self.cur.clone(),
-                                    TokenValue::Id("name".to_string()),
-                                ));
-                            }
-                        }
-
-                        if self.cur.v == TokenValue::Comma {
-                            self.next()?;
-                            continue;
-                        }
-                        break;
-                    }
+                    let name = match &self.cur.v {
+                        TokenValue::Id(name) => name.clone(),
+                        _ => unreachable!("checked by match"),
+                    };
+                    self.next()?;
 
                     let constraint = if self.cur.v == TokenValue::Colon {
                         self.next()?; // consume ':'
@@ -1932,10 +2018,14 @@ impl<'a> Parser<'a> {
                     };
 
                     if is_type_param {
-                        params.push(GenericParam::Type { names, constraint });
+                        let constraint = Some(Box::new(Type::Id("type".to_string())));
+                        params.push(GenericParam::Type {
+                            names: vec![name],
+                            constraint,
+                        });
                     } else {
                         params.push(GenericParam::Value {
-                            names,
+                            names: vec![name],
                             ty: constraint.expect("value param requires type"),
                         });
                     }
@@ -1952,6 +2042,9 @@ impl<'a> Parser<'a> {
             match &self.cur.v {
                 TokenValue::Comma | TokenValue::Semicolon => {
                     self.next()?;
+                    if Self::is_gt(&self.cur.v) {
+                        break;
+                    }
                     continue;
                 }
                 v if Self::is_gt(v) => break,
@@ -3275,6 +3368,8 @@ mod tests {
                 params,
                 return_type,
                 throws,
+                pre,
+                post,
                 where_clause,
                 ensures,
                 body,
@@ -3287,6 +3382,8 @@ mod tests {
                     Some(&crate::frontend::Type::Id("int".to_string()))
                 );
                 assert!(throws.is_empty());
+                assert!(pre.is_empty());
+                assert!(post.is_none());
                 assert!(where_clause.is_none());
                 assert!(ensures.is_empty());
                 assert_eq!(
@@ -3338,6 +3435,83 @@ mod tests {
     }
 
     #[test]
+    fn fn_generic_params_are_pretty_printed() {
+        let lx = Lexer::new(
+            "fn<T, Y: type; N: usize>() do N".to_string(),
+            "<test>".to_string(),
+        );
+        let ast = parse_one(lx).expect("ok");
+        let s = ast.to_string();
+        assert!(
+            s.contains("(GenericList (Generic \"T\" \"type\") (Generic \"Y\" \"type\") (Generic \"N\" \"usize\"))"),
+            "expected generics to be printed, got: {s}"
+        );
+    }
+
+    #[test]
+    fn fn_generic_params_allow_commas_between_params() {
+        let lx = Lexer::new(
+            "fn<T, Y: type; N: usize>() do N".to_string(),
+            "<test>".to_string(),
+        );
+        let ast = parse_one(lx).expect("ok");
+
+        match &ast.v {
+            ASTValue::Fn { generics, .. } => {
+                assert_eq!(generics.len(), 3);
+                assert_eq!(
+                    generics[0],
+                    GenericParam::Type {
+                        names: vec!["T".to_string()],
+                        constraint: Some(Box::new(crate::frontend::Type::Id("type".to_string()))),
+                    }
+                );
+                assert_eq!(
+                    generics[1],
+                    GenericParam::Type {
+                        names: vec!["Y".to_string()],
+                        constraint: Some(Box::new(crate::frontend::Type::Id("type".to_string()))),
+                    }
+                );
+                assert_eq!(
+                    generics[2],
+                    GenericParam::Value {
+                        names: vec!["N".to_string()],
+                        ty: Box::new(crate::frontend::Type::Id("usize".to_string())),
+                    }
+                );
+            }
+            _ => panic!("expected Fn"),
+        }
+    }
+
+    #[test]
+    fn fn_params_are_pretty_printed() {
+        let lx = Lexer::new(
+            "fn(a: int; using ctx: Context; b = 1) do a".to_string(),
+            "<test>".to_string(),
+        );
+        let ast = parse_one(lx).expect("ok");
+        let s = ast.to_string();
+        assert!(
+            s.contains("(ParamList"),
+            "expected ParamList to be printed, got: {s}"
+        );
+        assert!(
+            s.contains("(Param \"a\" \"int\")"),
+            "expected a typed param, got: {s}"
+        );
+        assert!(
+            s.contains("(Param \"ctx\" \"Context\" (Using))"),
+            "expected a using param, got: {s}"
+        );
+        assert!(
+            s.contains("(Param \"b\" \"infer\" (Default 1))"),
+            "expected a defaulted param, got: {s}"
+        );
+    }
+
+    #[test]
     fn struct_with_generics_and_extends_parses() {
         let lx = Lexer::new(
             "struct<T> extends Base { x: int }".to_string(),
@@ -3355,7 +3529,7 @@ mod tests {
                     generics,
                     &vec![GenericParam::Type {
                         names: vec!["T".to_string()],
-                        constraint: None
+                        constraint: Some(Box::new(crate::frontend::Type::Id("type".to_string()))),
                     }]
                 );
                 assert_eq!(
@@ -3384,7 +3558,7 @@ mod tests {
                     generics,
                     &vec![GenericParam::Type {
                         names: vec!["T".to_string()],
-                        constraint: None
+                        constraint: Some(Box::new(crate::frontend::Type::Id("type".to_string()))),
                     }]
                 );
                 assert_eq!(variants.len(), 2);
@@ -3538,6 +3712,84 @@ mod tests {
                     _ => panic!("expected do-body expression"),
                 }
             }
+            _ => panic!("expected Fn"),
+        }
+    }
+
+    #[test]
+    fn fn_contract_pre_parses_expression_list() {
+        let lx = Lexer::new("fn() pre 1, 2; 3 do 0".to_string(), "<test>".to_string());
+        let ast = parse_one(lx).expect("ok");
+
+        match &ast.v {
+            ASTValue::Fn { pre, body, .. } => {
+                assert_eq!(pre.len(), 3);
+                match body {
+                    FnBody::Expr(expr) => expect_integer(expr.as_ref(), 0),
+                    _ => panic!("expected do-body expression"),
+                }
+            }
+            _ => panic!("expected Fn"),
+        }
+    }
+
+    #[test]
+    fn fn_contract_order_of_throws_pre_post_does_not_matter() {
+        let lx = Lexer::new(
+            "fn() post r: r; r + 1 pre 1 throws A do 0".to_string(),
+            "<test>".to_string(),
+        );
+        let ast = parse_one(lx).expect("ok");
+
+        match &ast.v {
+            ASTValue::Fn {
+                throws,
+                pre,
+                post,
+                body,
+                ..
+            } => {
+                assert_eq!(throws.len(), 1);
+                assert_eq!(
+                    *throws[0].as_ref(),
+                    crate::frontend::Type::Id("A".to_string())
+                );
+                assert_eq!(pre.len(), 1);
+                let post = post.as_ref().expect("post clause");
+                assert_eq!(post.return_id.as_deref(), Some("r"));
+                assert_eq!(post.conditions.len(), 2);
+                match body {
+                    FnBody::Expr(expr) => expect_integer(expr.as_ref(), 0),
+                    _ => panic!("expected do-body expression"),
+                }
+            }
+            _ => panic!("expected Fn"),
+        }
+    }
+
+    #[test]
+    fn return_statement_parses_with_and_without_value() {
+        let lx = Lexer::new("fn() { return 1; return; }".to_string(), "<test>".to_string());
+        let ast = parse_one(lx).expect("ok");
+
+        match &ast.v {
+            ASTValue::Fn { body, .. } => match body {
+                FnBody::Block(block) => match &block.v {
+                    ASTValue::ExprList(items) => {
+                        assert_eq!(items.len(), 2);
+                        match &items[0].v {
+                            ASTValue::Return(Some(v)) => expect_integer(v.as_ref(), 1),
+                            _ => panic!("expected Return(Some(_))"),
+                        }
+                        match &items[1].v {
+                            ASTValue::Return(None) => {}
+                            _ => panic!("expected Return(None)"),
+                        }
+                    }
+                    _ => panic!("expected block ExprList"),
+                },
+                _ => panic!("expected braced body"),
+            },
             _ => panic!("expected Fn"),
         }
     }
