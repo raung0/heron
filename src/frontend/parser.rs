@@ -27,6 +27,7 @@ pub enum ParseError {
     InvalidDeclarationType(Token),
     PostReturnIdAlreadyDefined(Token),
     MixedInitializerListStyles(Token),
+    MissingInitializerDot(Token),
 }
 
 type ParseResult = Result<Box<AST>, ParseError>;
@@ -477,9 +478,7 @@ impl<'a> Parser<'a> {
             }
 
             let is_named_item = matches!((&self.cur.v, &self.next.v),
-                (TokenValue::Id(_), TokenValue::Op { op: Operator::Set, has_equals: false })
-                    | (TokenValue::Id(_), TokenValue::Comma)
-                    | (TokenValue::Id(_), TokenValue::RSquirly)
+                (TokenValue::Op { op: Operator::Dot, has_equals: false }, TokenValue::Id(_))
             );
 
             let item_style = if is_named_item {
@@ -489,6 +488,17 @@ impl<'a> Parser<'a> {
             };
 
             match style {
+                Some(InitStyle::Named)
+                    if matches!((&self.cur.v, &self.next.v),
+                        (TokenValue::Id(_), TokenValue::Op { op: Operator::Set, has_equals: false })
+                            | (TokenValue::Id(_), TokenValue::Comma)
+                            | (TokenValue::Id(_), TokenValue::RSquirly)
+                    ) =>
+                {
+                    let err_tok = self.cur.clone();
+                    self.enable_multi_id_parse = enable_multi_id_parse_prev;
+                    return Err(ParseError::MissingInitializerDot(err_tok));
+                }
                 None => style = Some(item_style),
                 Some(existing) if existing != item_style => {
                     let err_tok = self.cur.clone();
@@ -499,6 +509,7 @@ impl<'a> Parser<'a> {
             }
 
             if item_style == InitStyle::Named {
+                self.next()?; // consume '.'
                 let TokenValue::Id(name) = &self.cur.v else {
                     unreachable!("named style requires identifier");
                 };
@@ -3718,7 +3729,7 @@ mod tests {
     #[test]
     fn initializer_list_named_uses_equals() {
         let ast =
-            parse_expr(Lexer::new(".{ x = 1, y = 2 }".to_string(), "<test>".to_string()))
+            parse_expr(Lexer::new(".{ .x = 1, .y = 2 }".to_string(), "<test>".to_string()))
                 .expect("ok");
         let items = expect_initializer_list(ast.as_ref());
         assert_eq!(items.len(), 2);
@@ -3733,7 +3744,8 @@ mod tests {
 
     #[test]
     fn initializer_list_named_shorthand_uses_identifier_value() {
-        let ast = parse_expr(Lexer::new(".{ x }".to_string(), "<test>".to_string())).expect("ok");
+        let ast = parse_expr(Lexer::new(".{ .x }".to_string(), "<test>".to_string()))
+            .expect("ok");
         let items = expect_initializer_list(ast.as_ref());
         assert_eq!(items.len(), 1);
         match &items[0] {
@@ -3748,7 +3760,7 @@ mod tests {
     #[test]
     fn initializer_list_mixed_shorthand_and_explicit_named() {
         let ast = parse_expr(Lexer::new(
-            ".{ x, y = 2 }".to_string(),
+            ".{ .x, .y = 2 }".to_string(),
             "<test>".to_string(),
         ))
         .expect("ok");
@@ -3773,7 +3785,7 @@ mod tests {
     #[test]
     fn initializer_list_cannot_mix_positional_and_named() {
         let err = parse_expr(Lexer::new(
-            ".{ 1, x = 2 }".to_string(),
+            ".{ 1, .x = 2 }".to_string(),
             "<test>".to_string(),
         ))
         .err()
@@ -3784,7 +3796,7 @@ mod tests {
         }
 
         let err = parse_expr(Lexer::new(
-            ".{ x = 1, 2 }".to_string(),
+            ".{ .x = 1, 2 }".to_string(),
             "<test>".to_string(),
         ))
         .err()

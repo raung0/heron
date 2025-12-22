@@ -103,6 +103,11 @@ fn emit_parser_error<W: WriteColor>(
             location = Some(tok.location);
             format!("mixed initializer list styles")
         }
+        ParserError::MissingInitializerDot(tok) => {
+            label = Some("named initializer items must start with '.'".to_string());
+            location = Some(tok.location);
+            format!("missing '.' before initializer item name")
+        }
     };
 
     let mut error_spec = ColorSpec::new();

@@ -98,9 +98,9 @@ slice[index]
 
 .{}
 
-.{123, 8888, (abcd)}
-.{hi}
-.{hi=6, hds, yrd=3}
+.{123, 8888, abcd}
+.{.hi}
+.{.hi=6, .hds, yrd=3}
 
 Number :: struct<T> {
 	pub number: T
