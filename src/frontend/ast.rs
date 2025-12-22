@@ -92,8 +92,14 @@ impl PartialEq for Type {
                 ab == bb && aa == ba
             }
             (
-                Type::Fn { params: ap, return_type: ar },
-                Type::Fn { params: bp, return_type: br },
+                Type::Fn {
+                    params: ap,
+                    return_type: ar,
+                },
+                Type::Fn {
+                    params: bp,
+                    return_type: br,
+                },
             ) => ap == bp && ar == br,
             (
                 Type::Integer {
@@ -156,7 +162,10 @@ impl fmt::Display for Type {
                 }
                 write!(f, ">")
             }
-            Type::Fn { params, return_type } => {
+            Type::Fn {
+                params,
+                return_type,
+            } => {
                 write!(f, "fn(")?;
                 for (i, p) in params.iter().enumerate() {
                     if i != 0 {
@@ -199,6 +208,13 @@ impl fmt::Display for Type {
 }
 
 pub enum ASTValue {
+    Package {
+        path: Vec<String>,
+    },
+    Use {
+        path: Vec<String>,
+        alias: Option<String>,
+    },
     Id(String),
     String(String),
     Char(char),
@@ -216,6 +232,15 @@ pub enum ASTValue {
         v: Box<AST>,
     },
     Deref(Box<AST>),
+    Mut(Box<AST>),
+    Call {
+        callee: Box<AST>,
+        args: Vec<Box<AST>>,
+    },
+    Index {
+        target: Box<AST>,
+        index: Box<AST>,
+    },
     ExprList(Vec<Box<AST>>),
     ExprListNoScope(Vec<Box<AST>>),
     If {
@@ -227,6 +252,13 @@ pub enum ASTValue {
     While {
         cond: Box<AST>,
         decl: Option<Box<AST>>,
+        body: Box<AST>,
+    },
+    // `for { ... }`, `for cond { ... }`, and `for init; cond; step { ... }` (all clauses optional)
+    ForLoop {
+        init: Option<Box<AST>>,
+        cond: Option<Box<AST>>,
+        step: Option<Box<AST>>,
         body: Box<AST>,
     },
     For {
@@ -504,7 +536,21 @@ impl fmt::Display for AST {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         use ASTValue::*;
         let quote_type = |t: &crate::frontend::Type| format!("\"{}\"", t);
+        fn write_opt_dbg<T: fmt::Debug>(f: &mut fmt::Formatter<'_>, v: &Option<T>) -> fmt::Result {
+            match v {
+                Some(x) => write!(f, "{:?}", x),
+                None => write!(f, "None"),
+            }
+        }
         match &self.v {
+            Package { path } => {
+                write!(f, "(Package {:?})", path)
+            }
+            Use { path, alias } => {
+                write!(f, "(Use {:?} ", path)?;
+                write_opt_dbg(f, alias)?;
+                write!(f, ")")
+            }
             Id(v) => write!(f, "{}", v),
             String(v) => write!(f, "\"{}\"", v.escape_default()),
             Char(v) => {
@@ -533,14 +579,25 @@ impl fmt::Display for AST {
                 lifetime,
                 v,
             } => {
-                write!(
-                    f,
-                    "(Ref [mut: {}, lifetime: {:?}] {})",
-                    mutable, lifetime, v
-                )
+                write!(f, "(Ref [mut: {}, lifetime: ", mutable)?;
+                write_opt_dbg(f, lifetime)?;
+                write!(f, "] {})", v)
             }
             Deref(v) => {
                 write!(f, "(Deref {})", v)
+            }
+            Mut(v) => {
+                write!(f, "(Mut {})", v)
+            }
+            Call { callee, args } => {
+                write!(f, "(Call {}", callee)?;
+                for a in args {
+                    write!(f, " {}", a)?;
+                }
+                write!(f, ")")
+            }
+            Index { target, index } => {
+                write!(f, "(Index {} {})", target, index)
             }
             ExprList(v) => {
                 let folded = v
@@ -580,6 +637,26 @@ impl fmt::Display for AST {
                     None => "None".to_string(),
                 };
                 write!(f, "(If {} {} {})", decl_s, cond, body)
+            }
+            ForLoop {
+                init,
+                cond,
+                step,
+                body,
+            } => {
+                let init_s = match init {
+                    Some(v) => v.to_string(),
+                    None => "None".to_string(),
+                };
+                let cond_s = match cond {
+                    Some(v) => v.to_string(),
+                    None => "None".to_string(),
+                };
+                let step_s = match step {
+                    Some(v) => v.to_string(),
+                    None => "None".to_string(),
+                };
+                write!(f, "(ForLoop {} {} {} {})", init_s, cond_s, step_s, body)
             }
             For {
                 bindings,
@@ -694,10 +771,7 @@ impl fmt::Display for AST {
                 }
                 write!(f, " {})", body)
             }
-            Union {
-                generics,
-                variants,
-            } => {
+            Union { generics, variants } => {
                 write!(f, "(Union")?;
                 if !generics.is_empty() {
                     write!(f, " <{}>", generics.len())?;
@@ -722,12 +796,9 @@ impl fmt::Display for AST {
                 underlying,
                 constraint,
             } => {
-                write!(
-                    f,
-                    "(Newtype {} {:?})",
-                    quote_type(underlying.as_ref()),
-                    constraint
-                )
+                write!(f, "(Newtype {} ", quote_type(underlying.as_ref()))?;
+                write_opt_dbg(f, constraint)?;
+                write!(f, ")")
             }
             Alias { underlying } => {
                 write!(f, "(Alias {})", quote_type(underlying.as_ref()))

@@ -1,3 +1,9 @@
+package main
+
+use core.io
+use core.data.vector
+use core.data.heap as dheap
+
 a += 1 + 2 * 3 + 4
 a.b.c
 ((-(&'a &mut &'b mut +-identifier))) + 123
@@ -14,6 +20,13 @@ if my_condition {
 } * 4
 
 for &a, b in my_iter {
+}
+
+for condition {
+}
+
+for i := mut 0; i < M; i += 1 {
+	ret[i] = vector[parse_rune(format[i])]
 }
 
 a, b := 230
