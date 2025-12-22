@@ -1,6 +1,7 @@
 use crate::frontend::{
     AST, ASTValue, EnsuresClause, FnBody, FnParam, GenericArg, GenericParam, Keyword, Lexer,
-    LexerError, Operator, PostClause, SourceLocation, Token, TokenValue, Type,
+    LexerError, MatchBinder, MatchCase, MatchCasePattern, Operator, PostClause, SourceLocation,
+    Token, TokenValue, Type,
 };
 
 pub struct Parser<'a> {
@@ -205,11 +206,12 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_binary_expressions(&mut self) -> ParseResult {
-        let parse_member =
-            |s: &mut Self| s.parse_binary_expression(&[Operator::Dot], false, Self::parse_factor);
-
         let parse_mul = |s: &mut Self| {
-            s.parse_binary_expression(&[Operator::Mul, Operator::Divide], false, parse_member)
+            s.parse_binary_expression(
+                &[Operator::Mul, Operator::Divide],
+                false,
+                Self::parse_factor,
+            )
         };
 
         let parse_add = |s: &mut Self| {
@@ -269,16 +271,12 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_binary_expressions_with_stop(&mut self, stop: &[TokenValue]) -> ParseResult {
-        let parse_member = |s: &mut Self| {
-            s.parse_binary_expression_with_stop(&[Operator::Dot], false, stop, Self::parse_factor)
-        };
-
         let parse_mul = |s: &mut Self| {
             s.parse_binary_expression_with_stop(
                 &[Operator::Mul, Operator::Divide],
                 false,
                 stop,
-                parse_member,
+                Self::parse_factor,
             )
         };
 
@@ -362,10 +360,10 @@ impl<'a> Parser<'a> {
         parse_assign_eq(self)
     }
 
-    fn parse_factor(&mut self) -> ParseResult {
-        let mut l = self.cur.location.clone();
+    fn parse_primary(&mut self) -> ParseResult {
+        let l = self.cur.location.clone();
 
-        let mut node: Box<AST> = match &self.cur.v {
+        let node = match &self.cur.v {
             TokenValue::Id(v) => {
                 let should_parse_multi_id = self.enable_multi_id_parse
                     && match &self.next.v {
@@ -410,12 +408,8 @@ impl<'a> Parser<'a> {
                 Keyword::While => return self.parse_while(),
                 Keyword::For => return self.parse_for(),
                 Keyword::Return => return self.parse_return(),
-                Keyword::Mut => {
-                    self.next()?; // consume `mut`
-                    let inner = self.parse_factor()?;
-                    l.range.end = inner.location.range.end;
-                    AST::from(l, ASTValue::Mut(inner))
-                }
+                Keyword::Throw => return self.parse_throw(),
+                Keyword::Match => return self.parse_match(),
                 Keyword::Fn => return self.parse_fn(),
                 Keyword::Struct => return self.parse_struct(),
                 Keyword::Union => return self.parse_union(),
@@ -425,61 +419,7 @@ impl<'a> Parser<'a> {
                 _ => todo!("Unimplemented keyword: {:?}", k),
             },
 
-            TokenValue::Op {
-                op,
-                has_equals: false,
-            } => match op {
-                Operator::BinAnd => {
-                    self.next()?;
-
-                    let mut lifetime: Option<char> = None;
-                    if let TokenValue::Lifetime(c) = self.cur.v {
-                        lifetime = Some(c);
-                        self.next()?;
-                    }
-
-                    let is_mut = self.cur.v == TokenValue::Keyword(crate::frontend::Keyword::Mut);
-                    if is_mut {
-                        self.next()?;
-                    }
-
-                    // & [ 'a ] [ mut ] <expr>
-                    let inner = self.parse_expression()?;
-                    l.range.end = (*inner).location.range.end;
-
-                    AST::from(
-                        l,
-                        ASTValue::Ref {
-                            mutable: is_mut,
-                            lifetime,
-                            v: inner,
-                        },
-                    )
-                }
-                Operator::Add => {
-                    self.next()?;
-                    return self.parse_factor();
-                }
-                Operator::Sub => {
-                    self.next()?;
-                    let ast = self.parse_factor()?;
-                    l.range.end = (*ast).location.range.end;
-                    AST::from(
-                        l.clone(),
-                        ASTValue::BinExpr {
-                            op: Operator::Mul,
-                            lhs: ast,
-                            rhs: AST::from(l, ASTValue::Float(-1.0)),
-                            has_eq: false,
-                        },
-                    )
-                }
-                _ => return Err(ParseError::InvalidUnaryOperator(self.cur.clone())),
-            },
-
-            TokenValue::Op {
-                has_equals: true, ..
-            } => return Err(ParseError::InvalidUnaryOperator(self.cur.clone())),
+            TokenValue::Op { .. } => return Err(ParseError::InvalidFactorToken(self.cur.clone())),
 
             TokenValue::LParen => {
                 self.next()?;
@@ -500,8 +440,44 @@ impl<'a> Parser<'a> {
             _ => return Err(ParseError::InvalidFactorToken(self.cur.clone())),
         };
 
+        Ok(node)
+    }
+
+    fn parse_postfix(&mut self) -> ParseResult {
+        let mut node = self.parse_primary()?;
+
         loop {
             match self.cur.v {
+                TokenValue::Op {
+                    op: Operator::Dot,
+                    has_equals: false,
+                } => {
+                    self.next()?; // consume '.'
+                    let rhs_loc = self.cur.location.clone();
+                    let member = match &self.cur.v {
+                        TokenValue::Id(name) => name.clone(),
+                        _ => {
+                            return Err(ParseError::ExpectedToken(
+                                self.cur.clone(),
+                                TokenValue::Id("<identifier>".to_string()),
+                            ));
+                        }
+                    };
+                    self.next()?; // consume id
+
+                    let rhs = AST::from(rhs_loc, ASTValue::Id(member));
+                    let mut loc = node.location.clone();
+                    loc.range.end = rhs.location.range.end;
+                    node = AST::from(
+                        loc,
+                        ASTValue::BinExpr {
+                            op: Operator::Dot,
+                            lhs: node,
+                            rhs,
+                            has_eq: false,
+                        },
+                    );
+                }
                 TokenValue::LParen => {
                     self.next()?; // consume '('
                     let args_list = self.parse_expression_list(&[TokenValue::RParen], true)?;
@@ -540,13 +516,112 @@ impl<'a> Parser<'a> {
 
                     let mut index_loc = node.location.clone();
                     index_loc.range.end = end;
-                    node = AST::from(index_loc, ASTValue::Index { target: node, index });
+                    node = AST::from(
+                        index_loc,
+                        ASTValue::Index {
+                            target: node,
+                            index,
+                        },
+                    );
+                }
+                TokenValue::Op {
+                    op: Operator::BinXOR,
+                    has_equals: false,
+                } => {
+                    // Postfix dereference: (expr^)
+                    if Self::token_starts_factor(&self.next.v) {
+                        break;
+                    }
+                    let end = self.cur.location.range.end;
+                    self.next()?; // consume '^'
+                    let mut deref_loc = node.location.clone();
+                    deref_loc.range.end = end;
+                    node = AST::from(deref_loc, ASTValue::Deref(node));
                 }
                 _ => break,
             }
         }
 
         Ok(node)
+    }
+
+    fn parse_unary(&mut self) -> ParseResult {
+        let mut l = self.cur.location.clone();
+
+        match &self.cur.v {
+            TokenValue::Keyword(Keyword::Mut) => {
+                self.next()?; // consume `mut`
+                let inner = self.parse_unary()?;
+                l.range.end = inner.location.range.end;
+                Ok(AST::from(l, ASTValue::Mut(inner)))
+            }
+
+            TokenValue::Op {
+                op,
+                has_equals: false,
+            } => match op {
+                Operator::BinAnd => {
+                    self.next()?; // consume '&'
+
+                    let mut lifetime: Option<char> = None;
+                    if let TokenValue::Lifetime(c) = self.cur.v {
+                        lifetime = Some(c);
+                        self.next()?;
+                    }
+
+                    let is_mut = self.cur.v == TokenValue::Keyword(crate::frontend::Keyword::Mut);
+                    if is_mut {
+                        self.next()?;
+                    }
+
+                    let inner = self.parse_unary()?;
+                    l.range.end = inner.location.range.end;
+                    Ok(AST::from(
+                        l,
+                        ASTValue::Ref {
+                            mutable: is_mut,
+                            lifetime,
+                            v: inner,
+                        },
+                    ))
+                }
+                Operator::BinXOR => {
+                    self.next()?; // consume '^'
+                    let inner = self.parse_unary()?;
+                    l.range.end = inner.location.range.end;
+                    Ok(AST::from(l, ASTValue::PtrOf(inner)))
+                }
+                Operator::Add => {
+                    self.next()?; // consume '+'
+                    self.parse_unary()
+                }
+                Operator::Sub => {
+                    self.next()?; // consume '-'
+                    let ast = self.parse_unary()?;
+                    l.range.end = (*ast).location.range.end;
+                    Ok(AST::from(
+                        l.clone(),
+                        ASTValue::BinExpr {
+                            op: Operator::Mul,
+                            lhs: ast,
+                            rhs: AST::from(l, ASTValue::Float(-1.0)),
+                            has_eq: false,
+                        },
+                    ))
+                }
+                _ => Err(ParseError::InvalidUnaryOperator(self.cur.clone())),
+            },
+
+            TokenValue::Op {
+                has_equals: true, ..
+            } => Err(ParseError::InvalidUnaryOperator(self.cur.clone())),
+
+            _ => self.parse_postfix(),
+        }
+    }
+
+    fn parse_factor(&mut self) -> ParseResult {
+        self.parse_unary()
     }
 
     fn parse_return(&mut self) -> ParseResult {
@@ -567,6 +642,180 @@ impl<'a> Parser<'a> {
         };
 
         Ok(AST::from(loc, ASTValue::Return(v)))
+    }
+
+    fn parse_throw(&mut self) -> ParseResult {
+        let mut loc = self.cur.location.clone();
+        self.next()?; // consume 'throw'
+
+        let v = self.parse_expression()?;
+        loc.range.end = v.location.range.end;
+        Ok(AST::from(loc, ASTValue::Throw(v)))
+    }
+
+    fn parse_match(&mut self) -> ParseResult {
+        let mut loc = self.cur.location.clone();
+        self.next()?; // consume 'match'
+
+        let snapshot = self.snapshot();
+        let binder = match self.try_parse_match_binder() {
+            Ok(Some(b)) if self.cur.v == TokenValue::Keyword(Keyword::In) => {
+                self.next()?; // consume 'in'
+                Some(b)
+            }
+            Ok(_) => {
+                self.restore(snapshot);
+                None
+            }
+            Err(_) => {
+                self.restore(snapshot);
+                None
+            }
+        };
+
+        let scrutinee = self.parse_expression()?;
+
+        if self.cur.v != TokenValue::LSquirly {
+            return Err(ParseError::ExpectedToken(
+                self.cur.clone(),
+                TokenValue::LSquirly,
+            ));
+        }
+        self.next()?; // consume '{'
+
+        let mut cases: Vec<MatchCase> = Vec::new();
+        self.consume_semicolons()?;
+
+        while self.cur.v != TokenValue::RSquirly {
+            if self.cur.v != TokenValue::Keyword(Keyword::Case) {
+                return Err(ParseError::ExpectedToken(
+                    self.cur.clone(),
+                    TokenValue::Keyword(Keyword::Case),
+                ));
+            }
+            cases.push(self.parse_match_case(binder.is_some())?);
+            self.consume_semicolons()?;
+        }
+
+        let end = self.cur.location.range.end;
+        self.next()?; // consume '}'
+        loc.range.end = end;
+
+        Ok(AST::from(
+            loc,
+            ASTValue::Match {
+                binder,
+                scrutinee,
+                cases,
+            },
+        ))
+    }
+
+    fn parse_match_case(&mut self, allow_type_pattern: bool) -> Result<MatchCase, ParseError> {
+        self.next()?; // consume 'case'
+
+        let mut pattern = MatchCasePattern::Default;
+        let mut guard: Option<Box<AST>> = None;
+
+        if self.cur.v != TokenValue::Arrow {
+            if allow_type_pattern && self.token_starts_type(&self.cur.v) {
+                let ty = self.parse_type_inner()?;
+                pattern = MatchCasePattern::Type(ty);
+                if self.cur.v == TokenValue::Keyword(Keyword::If) {
+                    self.next()?; // consume 'if'
+                    guard = Some(self.parse_expression_with_stop(&[TokenValue::Arrow])?);
+                }
+            } else {
+                let expr = self.parse_expression_with_stop(&[
+                    TokenValue::Keyword(Keyword::If),
+                    TokenValue::Arrow,
+                ])?;
+                pattern = MatchCasePattern::Exprs(vec![expr]);
+                if self.cur.v == TokenValue::Keyword(Keyword::If) {
+                    self.next()?; // consume 'if'
+                    guard = Some(self.parse_expression_with_stop(&[TokenValue::Arrow])?);
+                }
+            }
+        }
+
+        if self.cur.v != TokenValue::Arrow {
+            return Err(ParseError::ExpectedToken(
+                self.cur.clone(),
+                TokenValue::Arrow,
+            ));
+        }
+        self.next()?; // consume '->'
+
+        let body =
+            self.parse_expression_with_stop(&[TokenValue::Semicolon, TokenValue::RSquirly])?;
+
+        Ok(MatchCase {
+            pattern,
+            guard,
+            body,
+        })
+    }
+
+    fn try_parse_match_binder(&mut self) -> Result<Option<MatchBinder>, ParseError> {
+        match &self.cur.v {
+            TokenValue::Id(name) => {
+                let name = name.clone();
+                self.next()?; // consume id
+                Ok(Some(MatchBinder {
+                    by_ref: false,
+                    mutable: false,
+                    lifetime: None,
+                    name,
+                }))
+            }
+            TokenValue::Op {
+                op: Operator::BinAnd,
+                has_equals: false,
+            } => {
+                self.next()?; // consume '&'
+                let mut lifetime: Option<char> = None;
+                if let TokenValue::Lifetime(c) = self.cur.v {
+                    lifetime = Some(c);
+                    self.next()?;
+                }
+                let mutable = self.cur.v == TokenValue::Keyword(Keyword::Mut);
+                if mutable {
+                    self.next()?; // consume 'mut'
+                }
+                let TokenValue::Id(name) = &self.cur.v else {
+                    return Ok(None);
+                };
+                let name = name.clone();
+                self.next()?; // consume id
+                Ok(Some(MatchBinder {
+                    by_ref: true,
+                    mutable,
+                    lifetime,
+                    name,
+                }))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    fn token_starts_factor(v: &TokenValue) -> bool {
+        matches!(
+            v,
+            TokenValue::Id(_)
+                | TokenValue::String(_)
+                | TokenValue::Char(_)
+                | TokenValue::Integer(_)
+                | TokenValue::Float(_)
+                | TokenValue::LParen
+                | TokenValue::ListInit
+                | TokenValue::Keyword(_)
+        ) || matches!(
+            v,
+            TokenValue::Op {
+                op: Operator::BinAnd | Operator::BinXOR | Operator::Add | Operator::Sub,
+                has_equals: false
+            }
+        )
     }
 
     fn parse_dotted_path(&mut self) -> Result<(Vec<String>, SourceLocation), ParseError> {
@@ -1986,6 +2235,12 @@ impl<'a> Parser<'a> {
         self.enable_multi_id_parse = false;
 
         let mut params: Vec<GenericParam> = Vec::new();
+        #[derive(Copy, Clone, PartialEq, Eq)]
+        enum GenericSection {
+            Lifetime,
+            NonLifetime,
+        }
+        let mut section: Option<GenericSection> = None;
         if Self::is_gt(&self.cur.v) {
             self.next()?; // consume '>'
             self.enable_multi_id_parse = enable_multi_id_parse_prev;
@@ -1993,12 +2248,29 @@ impl<'a> Parser<'a> {
         }
 
         while !Self::is_gt(&self.cur.v) {
+            if let Some(section_kind) = section {
+                let current_kind = match &self.cur.v {
+                    TokenValue::Lifetime(_) => GenericSection::Lifetime,
+                    TokenValue::Id(_) => GenericSection::NonLifetime,
+                    _ => section_kind,
+                };
+                if current_kind != section_kind {
+                    self.enable_multi_id_parse = enable_multi_id_parse_prev;
+                    return Err(ParseError::UnexpectedToken(
+                        self.cur.clone(),
+                        TokenValue::Semicolon,
+                    ));
+                }
+            }
+
             match &self.cur.v {
                 TokenValue::Lifetime(c) => {
+                    section.get_or_insert(GenericSection::Lifetime);
                     params.push(GenericParam::Lifetime(*c));
                     self.next()?;
                 }
                 TokenValue::Id(_) => {
+                    section.get_or_insert(GenericSection::NonLifetime);
                     let name = match &self.cur.v {
                         TokenValue::Id(name) => name.clone(),
                         _ => unreachable!("checked by match"),
@@ -2040,8 +2312,16 @@ impl<'a> Parser<'a> {
             }
 
             match &self.cur.v {
-                TokenValue::Comma | TokenValue::Semicolon => {
+                TokenValue::Comma => {
                     self.next()?;
+                    if Self::is_gt(&self.cur.v) {
+                        break;
+                    }
+                    continue;
+                }
+                TokenValue::Semicolon => {
+                    self.next()?;
+                    section = None;
                     if Self::is_gt(&self.cur.v) {
                         break;
                     }
@@ -2447,6 +2727,241 @@ mod tests {
                 expected, value
             ),
             _ => panic!("expected Integer({})", expected),
+        }
+    }
+
+    #[test]
+    fn throw_parses_as_expression() {
+        let ast = parse_expr(Lexer::new(
+            "throw core.Exception()".to_string(),
+            "<test>".to_string(),
+        ))
+        .expect("ok");
+        match &ast.v {
+            ASTValue::Throw(inner) => {
+                let has_call = matches!(inner.v, ASTValue::Call { .. })
+                    || matches!(
+                        inner.v,
+                        ASTValue::BinExpr {
+                            op: Operator::Dot,
+                            rhs: _,
+                            ..
+                        }
+                    ) && inner.to_string().contains("(Call");
+                assert!(
+                    has_call,
+                    "expected throw payload to contain a call, got {}",
+                    inner
+                );
+            }
+            _ => panic!("expected Throw, got {}", ast),
+        }
+    }
+
+    #[test]
+    fn match_parses_with_cases_and_default() {
+        let ast = parse_expr(Lexer::new(
+            "match r { case \"x\" if 0 < N -> 0; case -> throw e; }".to_string(),
+            "<test>".to_string(),
+        ))
+        .expect("ok");
+
+        match &ast.v {
+            ASTValue::Match {
+                binder,
+                scrutinee,
+                cases,
+            } => {
+                assert!(binder.is_none());
+                expect_id(scrutinee, "r");
+                assert_eq!(cases.len(), 2);
+
+                match &cases[0].pattern {
+                    MatchCasePattern::Exprs(pats) => assert_eq!(pats.len(), 1),
+                    _ => panic!("expected Exprs pattern"),
+                }
+                assert!(cases[0].guard.is_some());
+                expect_integer(&cases[0].body, 0);
+
+                assert!(matches!(cases[1].pattern, MatchCasePattern::Default));
+                assert!(cases[1].guard.is_none());
+                match &cases[1].body.v {
+                    ASTValue::Throw(_) => {}
+                    _ => panic!(
+                        "expected default case body to be Throw, got {}",
+                        cases[1].body
+                    ),
+                }
+            }
+            _ => panic!("expected Match, got {}", ast),
+        }
+    }
+
+    #[test]
+    fn match_parses_with_binder_and_type_cases() {
+        let ast = parse_expr(Lexer::new(
+            "match &v in expr { case core.Foo -> 1; case -> 0; }".to_string(),
+            "<test>".to_string(),
+        ))
+        .expect("ok");
+
+        match &ast.v {
+            ASTValue::Match {
+                binder,
+                scrutinee,
+                cases,
+            } => {
+                let b = binder.as_ref().expect("expected binder");
+                assert!(b.by_ref);
+                assert_eq!(b.name, "v");
+                expect_id(scrutinee, "expr");
+                assert_eq!(cases.len(), 2);
+                assert!(matches!(cases[0].pattern, MatchCasePattern::Type(_)));
+                assert!(matches!(cases[1].pattern, MatchCasePattern::Default));
+            }
+            _ => panic!("expected Match, got {}", ast),
+        }
+    }
+
+    #[test]
+    fn pointer_prefix_and_postfix_parse() {
+        let ast = parse_expr(Lexer::new("(^x)^".to_string(), "<test>".to_string())).expect("ok");
+        match &ast.v {
+            ASTValue::Deref(inner) => match &inner.v {
+                ASTValue::PtrOf(ptr_inner) => {
+                    expect_id(ptr_inner, "x");
+                }
+                _ => panic!("expected PtrOf inside Deref, got {}", inner),
+            },
+            _ => panic!("expected Deref, got {}", ast),
+        }
+    }
+
+    #[test]
+    fn pointer_of_binds_tighter_than_equality() {
+        fn expect_ptr_of_deref_id(ast: &AST, name: &str) {
+            match &ast.v {
+                ASTValue::PtrOf(inner) => match &inner.v {
+                    ASTValue::Deref(inner) => expect_id(inner, name),
+                    _ => panic!("expected Deref inside PtrOf, got {}", inner),
+                },
+                _ => panic!("expected PtrOf, got {}", ast),
+            }
+        }
+
+        let ast =
+            parse_expr(Lexer::new("^p^ == ^(p^)".to_string(), "<test>".to_string())).expect("ok");
+
+        match &ast.v {
+            ASTValue::BinExpr {
+                op: Operator::Set,
+                has_eq: true,
+                lhs,
+                rhs,
+            } => {
+                expect_ptr_of_deref_id(lhs, "p");
+                expect_ptr_of_deref_id(rhs, "p");
+            }
+            _ => panic!("expected == expression, got {}", ast),
+        }
+    }
+
+    #[test]
+    fn pointer_of_can_wrap_member_expressions() {
+        fn expect_ptr_of_deref_dot_deref_id(ast: &AST, lhs_name: &str, rhs_name: &str) {
+            match &ast.v {
+                ASTValue::PtrOf(inner) => match &inner.v {
+                    ASTValue::Deref(inner) => match &inner.v {
+                        ASTValue::BinExpr {
+                            op: Operator::Dot,
+                            has_eq: false,
+                            lhs,
+                            rhs,
+                        } => {
+                            match &lhs.v {
+                                ASTValue::Deref(inner) => expect_id(inner, lhs_name),
+                                _ => panic!("expected Deref on dot lhs, got {}", lhs),
+                            }
+                            expect_id(rhs, rhs_name);
+                        }
+                        _ => panic!("expected Dot inside Deref, got {}", inner),
+                    },
+                    _ => panic!("expected Deref inside PtrOf, got {}", inner),
+                },
+                _ => panic!("expected PtrOf, got {}", ast),
+            }
+        }
+
+        let ast = parse_expr(Lexer::new(
+            "^p^.b^ == ^(p^.b^)".to_string(),
+            "<test>".to_string(),
+        ))
+        .expect("ok");
+
+        match &ast.v {
+            ASTValue::BinExpr {
+                op: Operator::Set,
+                has_eq: true,
+                lhs,
+                rhs,
+            } => {
+                expect_ptr_of_deref_dot_deref_id(lhs, "p", "b");
+                expect_ptr_of_deref_dot_deref_id(rhs, "p", "b");
+            }
+            _ => panic!("expected == expression, got {}", ast),
+        }
+    }
+
+    #[test]
+    fn ref_binds_tighter_than_equality() {
+        let ast =
+            parse_expr(Lexer::new("&a == &(a)".to_string(), "<test>".to_string())).expect("ok");
+
+        match &ast.v {
+            ASTValue::BinExpr {
+                op: Operator::Set,
+                has_eq: true,
+                lhs,
+                rhs,
+            } => {
+                match &lhs.v {
+                    ASTValue::Ref { v, .. } => expect_id(v, "a"),
+                    _ => panic!("expected Ref on lhs, got {}", lhs),
+                }
+                match &rhs.v {
+                    ASTValue::Ref { v, .. } => expect_id(v, "a"),
+                    _ => panic!("expected Ref on rhs, got {}", rhs),
+                }
+            }
+            _ => panic!("expected == expression, got {}", ast),
+        }
+    }
+
+    #[test]
+    fn generic_params_require_semicolon_to_switch_kinds() {
+        let err = match parse_expr(Lexer::new(
+            "fn<T, 'a>() do 1".to_string(),
+            "<test>".to_string(),
+        )) {
+            Ok(ast) => panic!("expected error, got {}", ast),
+            Err(e) => e,
+        };
+        match err {
+            ParseError::UnexpectedToken(tok, TokenValue::Semicolon) => match tok.v {
+                TokenValue::Lifetime('a') => {}
+                _ => panic!("expected lifetime token, got {:?}", tok.v),
+            },
+            _ => panic!("expected UnexpectedToken(..., Semicolon)"),
+        }
+
+        let ok = parse_expr(Lexer::new(
+            "fn<T; 'a>() do 1".to_string(),
+            "<test>".to_string(),
+        ))
+        .expect("ok");
+        match &ok.v {
+            ASTValue::Fn { generics, .. } => assert_eq!(generics.len(), 2),
+            _ => panic!("expected Fn, got {}", ok),
         }
     }
 
@@ -3769,7 +4284,10 @@ mod tests {
 
     #[test]
     fn return_statement_parses_with_and_without_value() {
-        let lx = Lexer::new("fn() { return 1; return; }".to_string(), "<test>".to_string());
+        let lx = Lexer::new(
+            "fn() { return 1; return; }".to_string(),
+            "<test>".to_string(),
+        );
         let ast = parse_one(lx).expect("ok");
 
         match &ast.v {

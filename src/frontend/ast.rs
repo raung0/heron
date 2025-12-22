@@ -79,11 +79,10 @@ fn write_param_list(f: &mut fmt::Formatter<'_>, params: &[FnParam]) -> fmt::Resu
     write!(f, " (ParamList")?;
 
     for p in params {
-        let ty_s = p
-            .ty
-            .as_ref()
-            .map(|t| t.to_string())
-            .unwrap_or_else(|| "infer".to_string());
+        let ty_s =
+            p.ty.as_ref()
+                .map(|t| t.to_string())
+                .unwrap_or_else(|| "infer".to_string());
 
         for name in &p.names {
             write!(f, " (Param ")?;
@@ -118,6 +117,25 @@ pub struct EnsuresClause {
 pub struct PostClause {
     pub return_id: Option<String>,
     pub conditions: Vec<Box<AST>>,
+}
+
+pub struct MatchBinder {
+    pub by_ref: bool,
+    pub mutable: bool,
+    pub lifetime: Option<char>,
+    pub name: String,
+}
+
+pub enum MatchCasePattern {
+    Default,
+    Exprs(Vec<Box<AST>>),
+    Type(Box<Type>),
+}
+
+pub struct MatchCase {
+    pub pattern: MatchCasePattern,
+    pub guard: Option<Box<AST>>,
+    pub body: Box<AST>,
 }
 
 pub enum FnBody {
@@ -323,6 +341,7 @@ pub enum ASTValue {
         callee: Box<AST>,
         args: Vec<Box<AST>>,
     },
+    PtrOf(Box<AST>),
     Index {
         target: Box<AST>,
         index: Box<AST>,
@@ -330,6 +349,12 @@ pub enum ASTValue {
     ExprList(Vec<Box<AST>>),
     ExprListNoScope(Vec<Box<AST>>),
     Return(Option<Box<AST>>),
+    Throw(Box<AST>),
+    Match {
+        binder: Option<MatchBinder>,
+        scrutinee: Box<AST>,
+        cases: Vec<MatchCase>,
+    },
     If {
         cond: Box<AST>,
         decl: Option<Box<AST>>,
@@ -341,7 +366,6 @@ pub enum ASTValue {
         decl: Option<Box<AST>>,
         body: Box<AST>,
     },
-    // `for { ... }`, `for cond { ... }`, and `for init; cond; step { ... }` (all clauses optional)
     ForLoop {
         init: Option<Box<AST>>,
         cond: Option<Box<AST>>,
@@ -685,6 +709,9 @@ impl fmt::Display for AST {
                 }
                 write!(f, ")")
             }
+            PtrOf(v) => {
+                write!(f, "(PtrOf {})", v)
+            }
             Index { target, index } => {
                 write!(f, "(Index {} {})", target, index)
             }
@@ -710,6 +737,52 @@ impl fmt::Display for AST {
                 } else {
                     write!(f, "(Return)")
                 }
+            }
+            Throw(v) => {
+                write!(f, "(Throw {})", v)
+            }
+            Match {
+                binder,
+                scrutinee,
+                cases,
+            } => {
+                write!(f, "(Match")?;
+                if let Some(b) = binder {
+                    write!(f, " (Binder")?;
+                    if b.by_ref {
+                        write!(f, " &")?;
+                    }
+                    if let Some(l) = b.lifetime {
+                        write!(f, " '{}'", l)?;
+                    }
+                    if b.mutable {
+                        write!(f, " mut")?;
+                    }
+                    write!(f, " {:?})", b.name)?;
+                }
+                write!(f, " {} (Cases", scrutinee)?;
+                for case in cases {
+                    write!(f, " (Case")?;
+                    match &case.pattern {
+                        MatchCasePattern::Default => write!(f, " (Default)")?,
+                        MatchCasePattern::Exprs(pats) => {
+                            write!(f, " (Patterns")?;
+                            for pat in pats {
+                                write!(f, " {}", pat)?;
+                            }
+                            write!(f, ")")?;
+                        }
+                        MatchCasePattern::Type(t) => {
+                            write!(f, " (TypePattern \"{}\")", t)?;
+                        }
+                    }
+                    if let Some(guard) = &case.guard {
+                        write!(f, " (Guard {})", guard)?;
+                    }
+                    write!(f, " (Body {})", case.body)?;
+                    write!(f, ")")?;
+                }
+                write!(f, "))")
             }
             If {
                 cond,

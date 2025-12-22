@@ -75,9 +75,24 @@ Adder :: alias fn(int, int) -> int
 divide :: fn(a, b: f32) -> f32
 	pre b != 0
 	post result: result * b == a
-	do a / b
+do a / b
 
 add :: fn<T>(a, b: T) -> T {
 	return a + b
 }
+
+match &v in a {
+	case int -> core.io.println("Integer: {}", v)
+	case []int -> core.io.println("Integer array: {}", v)
+}
+
+ptr^.member^.function(123, 456, "hello", 'c')
+ptr^.member^.empty_function()
+ptr_to_slice^[123]
+slice[index]
+^value_im_taking_pointer_of
+
+^p^ == ^(p^)
+^p^.b^ == ^(p^.b^)
+&a == &(a)
 
