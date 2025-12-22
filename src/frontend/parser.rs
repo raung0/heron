@@ -1046,6 +1046,19 @@ impl<'a> Parser<'a> {
                 }
             }
 
+            TokenValue::LParen => {
+                // (T)
+                self.next()?;
+                let t = self.parse_type_inner()?;
+                if self.cur.v != TokenValue::RBracket {
+                    return Err(ParseError::ExpectedToken(
+                        self.cur.clone(),
+                        TokenValue::RBracket,
+                    ));
+                }
+                Ok(t)
+            }
+
             TokenValue::Id(_) => self.parse_type_idish(),
 
             _ => Err(ParseError::UnexpectedToken(
