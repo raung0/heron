@@ -12,7 +12,7 @@ Number :: struct<T> {
 	operator+ :: fn (this, other: &Self) -> Self {
 		return Self(number + other.number)
 	}
-	
+
 	operator[] :: fn (this: &Self) -> T do this.number
 }
 

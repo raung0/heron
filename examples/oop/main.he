@@ -7,7 +7,7 @@ Vehicle :: struct {
 	pub name: core.String
 	pub speed: int
 
-	pub accelerate := fn(this: &mut Vehicle; amount: i32) {
+	pub accelerate := fn (this: &mut Vehicle; amount: i32) {
 		this.speed += amount
 		core.io.println("{} has accelerated to {} km/h", name, speed)
 	}
@@ -16,12 +16,12 @@ Vehicle :: struct {
 Car :: struct extends Vehicle {
 	pub seats: int
 
-	pub __construct := fn(this: &mut Self; name: core.String; seats : i32 = 4) {
+	pub __construct := fn (this: &mut Self; name: core.String; seats: i32 = 4) {
 		this.name = name
 		this.seats = seats
 	}
 
-	pub honk := fn(this: &Self) {
+	pub honk := fn (this: &Self) {
 		core.io.println("{} goes beep beep!", this.name)
 	}
 }
@@ -33,4 +33,3 @@ pub main := fn {
 	c.accelerate(10)
 	c.accelerate(10)
 }
-

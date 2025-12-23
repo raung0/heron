@@ -2073,6 +2073,8 @@ impl<'a> Parser<'a> {
                 TokenValue::RSquirly,
             ));
         }
+        let mut ast = ast;
+        ast.location.range.end = self.cur.location.range.end;
         self.next()?;
 
         Ok(ast)

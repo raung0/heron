@@ -1,9 +1,11 @@
 use crate::frontend::{
     AST, ASTValue, EnsuresClause, FnBody, FnParam, GenericArg, GenericParam, InitializerItem,
-    MatchBinder, MatchCase, MatchCasePattern, Operator, PostClause, Trivia, TriviaKind, Type,
+    MatchBinder, MatchCase, MatchCasePattern, Operator, PostClause, SourceLocation, Trivia,
+    TriviaKind, Type,
 };
 use serde::de::{self, Visitor};
 use serde::{Deserialize, Deserializer};
+use std::cell::Cell;
 
 #[derive(Clone, Debug)]
 pub struct FormatOptions {
@@ -12,6 +14,7 @@ pub struct FormatOptions {
     pub separate_imports: bool,
     pub collapse_empty_lines: bool,
     pub line_width: usize,
+    pub trailing_newline: bool,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -26,6 +29,8 @@ pub struct FormatConfig {
     pub collapse_empty_lines: Option<bool>,
     #[serde(default, deserialize_with = "deserialize_usize_opt")]
     pub line_width: Option<usize>,
+    #[serde(default, deserialize_with = "deserialize_bool_opt")]
+    pub trailing_newline: Option<bool>,
 }
 
 impl Default for FormatOptions {
@@ -33,9 +38,10 @@ impl Default for FormatOptions {
         Self {
             use_tabs: true,
             tab_size: 4,
-            separate_imports: true,
+            separate_imports: false,
             collapse_empty_lines: true,
             line_width: 80,
+            trailing_newline: false,
         }
     }
 }
@@ -62,6 +68,9 @@ impl FormatOptions {
                 return Err("line_width must be greater than 0".to_string());
             }
             self.line_width = line_width;
+        }
+        if let Some(trailing_newline) = config.trailing_newline {
+            self.trailing_newline = trailing_newline;
         }
         Ok(())
     }
@@ -165,7 +174,7 @@ struct Formatter {
     out: String,
     indent: usize,
     comments: Vec<Trivia>,
-    comment_idx: usize,
+    comment_idx: Cell<usize>,
     options: FormatOptions,
 }
 
@@ -183,13 +192,13 @@ impl Formatter {
             out: String::new(),
             indent: 0,
             comments,
-            comment_idx: 0,
+            comment_idx: Cell::new(0),
             options: options.clone(),
         }
     }
 
     fn finish(mut self) -> String {
-        if !self.out.ends_with('\n') {
+        if self.options.trailing_newline && !self.out.ends_with('\n') {
             self.out.push('\n');
         }
         self.out
@@ -1066,9 +1075,11 @@ impl Formatter {
                 self.wrap_if_needed(out, prec, parent_prec)
             }
 
-            ASTValue::InitializerList(items) => self.format_initializer_list(items, None),
+            ASTValue::InitializerList(items) => {
+                self.format_initializer_list(items, None, &ast.location)
+            }
             ASTValue::TypedInitializerList { ty, items } => {
-                self.format_initializer_list(items, Some(ty.as_ref()))
+                self.format_initializer_list(items, Some(ty.as_ref()), &ast.location)
             }
 
             ASTValue::ExprList(items) => {
@@ -1131,35 +1142,145 @@ impl Formatter {
         }
     }
 
-    fn format_initializer_list(&self, items: &[InitializerItem], ty: Option<&Type>) -> String {
-        let mut out = String::new();
+    fn format_initializer_list(
+        &self,
+        items: &[InitializerItem],
+        ty: Option<&Type>,
+        loc: &SourceLocation,
+    ) -> String {
+        let mut prefix = String::new();
 
         if let Some(ty) = ty {
-            out.push_str(&self.format_type(ty));
-            out.push(' ');
+            prefix.push_str(&self.format_type(ty));
+            prefix.push(' ');
         }
 
-        out.push_str(".{ ");
         if items.is_empty() {
-            out.push_str("}");
+            let mut out = String::new();
+            out.push_str(&prefix);
+            out.push_str(".{ }");
             return out;
         }
 
         let named_items = items
             .iter()
             .all(|item| matches!(item, InitializerItem::Named { .. }));
-        let mut rendered = Vec::new();
+        let inline_items = self.render_initializer_items(items, named_items, false);
+        let inline = format!("{}.{{ {} }}", prefix, inline_items.join(", "));
+        let list_start_line = loc.range.begin.1;
+        let list_end_line = loc.range.end.1;
+        let item_ranges = items
+            .iter()
+            .map(Self::initializer_item_range)
+            .collect::<Vec<_>>();
+        let comments_in_range = self.take_comments_in_range(list_start_line, list_end_line);
 
-        if named_items {
-            let max_name = items
+        if comments_in_range.is_empty() && !self.line_width_exceeded(self.indent, &inline) {
+            return inline;
+        }
+
+        let base_indent = if self.options.use_tabs {
+            "\t".repeat(self.indent)
+        } else {
+            " ".repeat(self.options.tab_size.max(1) * self.indent)
+        };
+        let item_indent = if self.options.use_tabs {
+            "\t".repeat(self.indent + 1)
+        } else {
+            " ".repeat(self.options.tab_size.max(1) * (self.indent + 1))
+        };
+
+        let multiline_items = self.render_initializer_items(items, named_items, true);
+        let item_lines = item_ranges
+            .iter()
+            .map(|(line, _)| *line)
+            .collect::<Vec<_>>();
+        let mut out = String::new();
+        out.push_str(&prefix);
+        out.push_str(".{\n");
+        let mut comment_idx = 0;
+        let mut last_line = list_start_line;
+        for (idx, item) in multiline_items.iter().enumerate() {
+            let item_line = item_lines.get(idx).copied().unwrap_or(list_start_line);
+            while comment_idx < comments_in_range.len()
+                && comments_in_range[comment_idx].location.range.begin.1 < item_line
+            {
+                let comment = &comments_in_range[comment_idx];
+                let comment_line = comment.location.range.begin.1;
+                let gap = comment_line - last_line - 1;
+                if gap > 0 {
+                    let mut emit = gap;
+                    if self.options.collapse_empty_lines && emit > 1 {
+                        emit = 1;
+                    }
+                    for _ in 0..emit {
+                        out.push('\n');
+                    }
+                }
+                for line_text in self.wrap_comment_lines(&comment.text, self.indent + 1) {
+                    out.push_str(&item_indent);
+                    out.push_str(&line_text);
+                    out.push('\n');
+                }
+                last_line = comment_line;
+                comment_idx += 1;
+            }
+
+            out.push_str(&item_indent);
+            out.push_str(item);
+            if idx + 1 < multiline_items.len() {
+                out.push(',');
+            }
+            out.push('\n');
+            last_line = item_line;
+        }
+        while comment_idx < comments_in_range.len() {
+            let comment = &comments_in_range[comment_idx];
+            let comment_line = comment.location.range.begin.1;
+            let gap = comment_line - last_line - 1;
+            if gap > 0 {
+                let mut emit = gap;
+                if self.options.collapse_empty_lines && emit > 1 {
+                    emit = 1;
+                }
+                for _ in 0..emit {
+                    out.push('\n');
+                }
+            }
+            for line_text in self.wrap_comment_lines(&comment.text, self.indent + 1) {
+                out.push_str(&item_indent);
+                out.push_str(&line_text);
+                out.push('\n');
+            }
+            last_line = comment_line;
+            comment_idx += 1;
+        }
+        out.push_str(&base_indent);
+        out.push('}');
+        out
+    }
+
+    fn render_initializer_items(
+        &self,
+        items: &[InitializerItem],
+        named_items: bool,
+        align_names: bool,
+    ) -> Vec<String> {
+        let mut rendered = Vec::new();
+        let max_name = if align_names && named_items {
+            items
                 .iter()
                 .filter_map(|item| match item {
                     InitializerItem::Named { name, .. } => Some(name.len()),
                     _ => None,
                 })
                 .max()
-                .unwrap_or(0);
+                .unwrap_or(0)
+        } else {
+            0
+        };
 
+        if named_items {
             for item in items {
                 if let InitializerItem::Named { name, value } = item {
                     if let ASTValue::Id(id) = &value.v {
@@ -1168,14 +1289,18 @@ impl Formatter {
                             continue;
                         }
                     }
-                    let pad = max_name.saturating_sub(name.len());
-                    let padding = " ".repeat(pad + 1);
-                    rendered.push(format!(
-                        ".{}{}= {}",
-                        name,
-                        padding,
-                        self.format_expr(value, 0)
-                    ));
+                    if align_names {
+                        let pad = max_name.saturating_sub(name.len());
+                        let padding = " ".repeat(pad + 1);
+                        rendered.push(format!(
+                            ".{}{}= {}",
+                            name,
+                            padding,
+                            self.format_expr(value, 0)
+                        ));
+                    } else {
+                        rendered.push(format!(".{} = {}", name, self.format_expr(value, 0)));
+                    }
                 }
             }
         } else {
@@ -1189,9 +1314,36 @@ impl Formatter {
             }
         }
 
-        out.push_str(&rendered.join(", "));
-        out.push_str(" }");
-        out
+        rendered
+    }
+
+    fn initializer_item_range(item: &InitializerItem) -> (i32, i32) {
+        match item {
+            InitializerItem::Named { value, .. } | InitializerItem::Positional(value) => {
+                (value.location.range.begin.1, value.location.range.end.1)
+            }
+        }
+    }
+
+    fn take_comments_in_range(&self, start_line: i32, end_line: i32) -> Vec<Trivia> {
+        let mut taken = Vec::new();
+        let mut idx = self.comment_idx.get();
+        while idx < self.comments.len() {
+            let comment = &self.comments[idx];
+            let line = comment.location.range.begin.1;
+            if line < start_line {
+                break;
+            }
+            if line > end_line {
+                break;
+            }
+            taken.push(comment.clone());
+            idx += 1;
+        }
+        if !taken.is_empty() {
+            self.comment_idx.set(idx);
+        }
+        taken
     }
 
     fn format_generic_args(&self, args: &[GenericArg]) -> String {
@@ -1298,13 +1450,7 @@ impl Formatter {
                 .map(|v| self.statement_end_line(v))
                 .unwrap_or(ast.location.range.end.1),
 
-            ASTValue::ExprList(items) => {
-                let inner_end = items
-                    .last()
-                    .map(|item| self.statement_end_line(item))
-                    .unwrap_or(ast.location.range.end.1);
-                inner_end + 1
-            }
+            ASTValue::ExprList(_) => ast.location.range.end.1,
 
             ASTValue::Fn { body, .. } => match body {
                 FnBody::Block(block) => self.statement_end_line(block),
@@ -1314,7 +1460,7 @@ impl Formatter {
             ASTValue::Struct { body, .. } | ASTValue::RawUnion { body, .. } => {
                 self.statement_end_line(body)
             }
-            ASTValue::Enum { .. } | ASTValue::Union { .. } => ast.location.range.end.1 + 1,
+            ASTValue::Enum { .. } | ASTValue::Union { .. } => ast.location.range.end.1,
 
             ASTValue::Match { cases, .. } => {
                 let inner_end = cases
@@ -1343,8 +1489,9 @@ impl Formatter {
     fn emit_comments_until(&mut self, stop_line: Option<i32>, last_line: &mut i32) -> bool {
         let mut emitted = false;
 
-        while self.comment_idx < self.comments.len() {
-            let comment_line = self.comments[self.comment_idx].location.range.begin.1;
+        while self.comment_idx.get() < self.comments.len() {
+            let idx = self.comment_idx.get();
+            let comment_line = self.comments[idx].location.range.begin.1;
             if stop_line.is_some_and(|l| comment_line >= l) {
                 break;
             }
@@ -1366,7 +1513,8 @@ impl Formatter {
             *last_line += gap;
         }
 
-        let text = self.comments[self.comment_idx].text.clone();
+        let idx = self.comment_idx.get();
+        let text = self.comments[idx].text.clone();
         let lines = self.wrap_comment_lines(&text, self.indent);
 
         for line_text in &lines {
@@ -1376,7 +1524,7 @@ impl Formatter {
         }
 
         *last_line = comment_line + (lines.len().saturating_sub(1) as i32);
-        self.comment_idx += 1;
+        self.comment_idx.set(idx + 1);
     }
 
     fn emit_blank_lines(&mut self, count: usize) {
