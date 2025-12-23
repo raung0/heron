@@ -979,21 +979,15 @@ impl<'a> Parser<'a> {
                 }
                 Operator::Add => {
                     self.next()?; // consume '+'
-                    self.parse_unary()
+                    let inner = self.parse_unary()?;
+                    l.range.end = inner.location.range.end;
+                    Ok(AST::from(l, ASTValue::UnaryPlus(inner)))
                 }
                 Operator::Sub => {
                     self.next()?; // consume '-'
-                    let ast = self.parse_unary()?;
-                    l.range.end = (*ast).location.range.end;
-                    Ok(AST::from(
-                        l.clone(),
-                        ASTValue::BinExpr {
-                            op: Operator::Mul,
-                            lhs: ast,
-                            rhs: AST::from(l, ASTValue::Float(-1.0)),
-                            has_eq: false,
-                        },
-                    ))
+                    let inner = self.parse_unary()?;
+                    l.range.end = inner.location.range.end;
+                    Ok(AST::from(l, ASTValue::UnaryMinus(inner)))
                 }
                 _ => Err(ParseError::InvalidUnaryOperator(self.cur.clone())),
             },
@@ -4048,41 +4042,26 @@ mod tests {
         let ast = parse_one(lx).expect("ok");
         match *ast {
             AST { ref v, .. } => match v {
-                ASTValue::Integer(n) => assert_eq!(*n, 42),
-                _ => panic!("expected Integer after unary +"),
+                ASTValue::UnaryPlus(inner) => match inner.v {
+                    ASTValue::Integer(n) => assert_eq!(n, 42),
+                    _ => panic!("expected Integer after unary +"),
+                },
+                _ => panic!("expected UnaryPlus after unary +"),
             },
         }
     }
 
     #[test]
-    fn unary_minus_as_mul_by_neg_one() {
+    fn unary_minus_is_unary_op() {
         let lx = Lexer::new("-7".to_string(), "<test>".to_string());
         let ast = parse_one(lx).expect("ok");
         match *ast {
             AST { ref v, .. } => match v {
-                ASTValue::BinExpr {
-                    op,
-                    lhs,
-                    rhs,
-                    has_eq: false,
-                } => {
-                    assert!(matches!(op, Operator::Mul));
-                    // left should be the original factor (7)
-                    match **lhs {
-                        AST { ref v, .. } => match v {
-                            ASTValue::Integer(n) => assert_eq!(*n, 7),
-                            _ => panic!("left should be Integer(7)"),
-                        },
-                    }
-                    // right should be Float(-1.0)
-                    match **rhs {
-                        AST { ref v, .. } => match v {
-                            ASTValue::Float(f) => assert!((*f + 1.0).abs() < 1e-9),
-                            _ => panic!("right should be Float(-1.0)"),
-                        },
-                    }
-                }
-                _ => panic!("expected BinaryExpression(*, x, -1.0)"),
+                ASTValue::UnaryMinus(inner) => match inner.v {
+                    ASTValue::Integer(n) => assert_eq!(n, 7),
+                    _ => panic!("expected Integer after unary -"),
+                },
+                _ => panic!("expected UnaryMinus after unary -"),
             },
         }
     }

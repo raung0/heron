@@ -337,6 +337,8 @@ pub enum ASTValue {
         has_eq: bool,
     },
     Not(Box<AST>),
+    UnaryPlus(Box<AST>),
+    UnaryMinus(Box<AST>),
     Ref {
         mutable: bool,
         lifetime: Option<char>,
@@ -755,6 +757,12 @@ impl fmt::Display for AST {
             }
             Not(v) => {
                 write!(f, "(Not {})", v)
+            }
+            UnaryPlus(v) => {
+                write!(f, "(UnaryPlus {})", v)
+            }
+            UnaryMinus(v) => {
+                write!(f, "(UnaryMinus {})", v)
             }
             Ref {
                 mutable,

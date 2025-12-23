@@ -994,6 +994,16 @@ impl Formatter {
                 self.unary_prec(),
                 parent_prec,
             ),
+            ASTValue::UnaryPlus(inner) => self.wrap_if_needed(
+                format!("+{}", self.format_expr(inner, self.unary_prec())),
+                self.unary_prec(),
+                parent_prec,
+            ),
+            ASTValue::UnaryMinus(inner) => self.wrap_if_needed(
+                format!("-{}", self.format_expr(inner, self.unary_prec())),
+                self.unary_prec(),
+                parent_prec,
+            ),
             ASTValue::Mut(inner) => self.wrap_if_needed(
                 format!("mut {}", self.format_expr(inner, self.unary_prec())),
                 self.unary_prec(),
