@@ -8,9 +8,10 @@ fn main() {
         .about("Heron formatter")
         .arg(
             Arg::new("file")
-                .help("Path to the Heron source file to format")
+                .help("Path(s) to the Heron source file(s) to format")
                 .required(true)
-                .value_name("FILE"),
+                .value_name("FILE")
+                .num_args(1..),
         )
         .arg(
             Arg::new("option")
@@ -28,10 +29,11 @@ fn main() {
         )
         .get_matches();
 
-    let file = matches
-        .get_one::<String>("file")
+    let files: Vec<String> = matches
+        .get_many::<String>("file")
         .expect("clap enforces required argument")
-        .to_owned();
+        .map(|s| s.to_owned())
+        .collect();
     let in_place = matches.get_flag("in_place");
     let mut options = FormatOptions::default();
     if let Some(config_str) = load_format_config() {
@@ -57,42 +59,44 @@ fn main() {
         }
     }
 
-    let input = match std::fs::read_to_string(&file) {
-        Ok(input) => input,
-        Err(e) => {
-            eprintln!("error: failed to read `{file}`: {e}");
-            std::process::exit(1);
-        }
-    };
+    for file in files {
+        let input = match std::fs::read_to_string(&file) {
+            Ok(input) => input,
+            Err(e) => {
+                eprintln!("error: failed to read `{file}`: {e}");
+                std::process::exit(1);
+            }
+        };
 
-    let mut lexer = frontend::Lexer::new(input, file.clone());
-    let input = lexer.get_input();
-    let mut parser = frontend::Parser::new(&mut lexer).unwrap();
-    let ast = parser.parse();
-    let errors = parser.take_errors();
-    if errors.is_empty() {
-        match ast {
-            Ok(ast) => {
-                let formatted = format_ast_with_options(&ast, &options);
-                if in_place {
-                    if let Err(e) = std::fs::write(&file, formatted) {
-                        eprintln!("error: failed to write `{file}`: {e}");
-                        std::process::exit(1);
+        let mut lexer = frontend::Lexer::new(input, file.clone());
+        let input = lexer.get_input();
+        let mut parser = frontend::Parser::new(&mut lexer).unwrap();
+        let ast = parser.parse();
+        let errors = parser.take_errors();
+        if errors.is_empty() {
+            match ast {
+                Ok(ast) => {
+                    let formatted = format_ast_with_options(&ast, &options);
+                    if in_place {
+                        if let Err(e) = std::fs::write(&file, formatted) {
+                            eprintln!("error: failed to write `{file}`: {e}");
+                            std::process::exit(1);
+                        }
+                    } else {
+                        print!("{formatted}");
                     }
-                } else {
-                    print!("{formatted}");
                 }
+                Err(e) => pretty_print_parser_error(e, input.as_str()),
             }
-            Err(e) => pretty_print_parser_error(e, input.as_str()),
-        }
-    } else {
-        let mut first = true;
-        for err in errors {
-            if !first {
-                eprintln!();
+        } else {
+            let mut first = true;
+            for err in errors {
+                if !first {
+                    eprintln!();
+                }
+                pretty_print_parser_error(err, input.as_str());
+                first = false;
             }
-            pretty_print_parser_error(err, input.as_str());
-            first = false;
         }
     }
 }
