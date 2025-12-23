@@ -14,7 +14,6 @@ swizzle :: fn<'a; T; N; M: u32> (
 	format: [M]rune
 ) -> core.math.Vector<&'a T, M>
 	throws core.Exception
-	pre among + us
 {
 	parse_rune :: fn (r: rune) -> u32 throws core.Exception {
 		match r {
