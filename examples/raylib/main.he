@@ -22,12 +22,14 @@ for !rl.raw.window_should_close() {
 		if rl.is_key_down(.LEFT) do player_pos -= .{ 1, 0 }
 		if rl.is_key_down(.RIGHT) do player_pos += .{ 1, 0 }
 
+
+
 		{
 			rl.begin_drawing()
 			defer rl.end_drawing()
 
 			// Similarly to init_window, PLAYER_RADIUS resolves to an f32.
-			rl.draw_circle_v(position: player_pos, radius: PLAYER_RADIUS, color: rl::RED)
+			rl.draw_circle_v(position: player_pos, radius: PLAYER_RADIUS, color: rl.RED)
 		}
 	}
 }

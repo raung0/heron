@@ -4,9 +4,9 @@ package main
 use core.io
 // The way you access it can be also changed like so:
 //   use core.io as io
-//   io::println("...", ...)
+//   io.println("...", ...)
 
 // main is not a compile-time function, hence :=. If it were a compile-time function, it would be ::.
 pub main := fn {
-	core::io::println("Hello world!")
+	core.io.println("Hello world!")
 }

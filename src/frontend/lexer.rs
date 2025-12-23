@@ -1,13 +1,13 @@
 use std::fmt;
 use std::fs::read_to_string;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct LocationRange {
     pub begin: (i32, i32),
     pub end: (i32, i32),
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct SourceLocation {
     pub file: String,
     pub range: LocationRange,
@@ -23,6 +23,20 @@ impl SourceLocation {
             },
         }
     }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum TriviaKind {
+    LineComment,
+    Whitespace,
+    Newline,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Trivia {
+    pub location: SourceLocation,
+    pub kind: TriviaKind,
+    pub text: String,
 }
 
 #[derive(PartialEq, Clone, Debug)]
@@ -112,6 +126,8 @@ pub enum TokenValue {
 pub struct Token {
     pub location: SourceLocation,
     pub v: TokenValue,
+    pub leading_trivia: Vec<Trivia>,
+    pub trailing_trivia: Vec<Trivia>,
 }
 
 impl Token {
@@ -119,6 +135,8 @@ impl Token {
         Self {
             location: SourceLocation::new_from_file("".to_string()),
             v: TokenValue::EOF,
+            leading_trivia: Vec::new(),
+            trailing_trivia: Vec::new(),
         }
     }
 }
@@ -139,6 +157,7 @@ pub struct Lexer {
     next_ch: char,
     next_is_semicolon: bool,
     last_token: Token,
+    trivia: Vec<Trivia>,
 }
 
 fn parse_escape(c: &str) -> Option<char> {
@@ -179,7 +198,10 @@ impl Lexer {
             last_token: Token {
                 location: SourceLocation::new_from_file(file),
                 v: TokenValue::EOF,
+                leading_trivia: Vec::new(),
+                trailing_trivia: Vec::new(),
             },
+            trivia: Vec::new(),
         };
         lexer.ch = lexer.peek(0);
         lexer.next_ch = lexer.peek(1);
@@ -190,23 +212,20 @@ impl Lexer {
         self.input.clone()
     }
 
+    pub fn take_trivia(&mut self) -> Vec<Trivia> {
+        std::mem::take(&mut self.trivia)
+    }
+
     pub fn next(&mut self) -> Result<Token, LexerError> {
-        self.skip_whitespace();
-
-        if self.ch == '/' && self.peek(1) == '/' {
-            while self.ch != '\n' && self.ch != '\0' {
-                self.advance();
-            }
-            return self.next();
-        }
-
-        self.skip_whitespace();
+        let leading_trivia = self.collect_leading_trivia();
 
         if self.next_is_semicolon {
             self.next_is_semicolon = false;
             let mut tok = Token {
                 location: self.snapshot_location(),
                 v: TokenValue::Semicolon,
+                leading_trivia,
+                trailing_trivia: Vec::new(),
             };
             self.finalize_location(&mut tok.location);
             self.last_token = tok.clone();
@@ -217,6 +236,8 @@ impl Lexer {
             let mut tok = Token {
                 location: self.snapshot_location(),
                 v: TokenValue::EOF,
+                leading_trivia,
+                trailing_trivia: Vec::new(),
             };
             self.finalize_location(&mut tok.location);
             self.last_token = tok.clone();
@@ -234,22 +255,29 @@ impl Lexer {
             let mut tok = Token {
                 location: end_loc,
                 v,
+                leading_trivia,
+                trailing_trivia: Vec::new(),
             };
             self.finalize_location(&mut tok.location);
+            tok.trailing_trivia = self.collect_trailing_trivia();
             self.last_token = tok.clone();
             return Ok(tok);
         }
 
         if self.ch.is_ascii_digit() {
             let mut tok = self.read_number()?;
+            tok.leading_trivia = leading_trivia;
             self.finalize_location(&mut tok.location);
+            tok.trailing_trivia = self.collect_trailing_trivia();
             self.last_token = tok.clone();
             return Ok(tok);
         }
 
         if self.ch == '"' {
             let mut tok = self.read_string()?;
+            tok.leading_trivia = leading_trivia;
             self.finalize_location(&mut tok.location);
+            tok.trailing_trivia = self.collect_trailing_trivia();
             self.last_token = tok.clone();
             return Ok(tok);
         }
@@ -257,6 +285,8 @@ impl Lexer {
         let mut tok = Token {
             location: start_loc,
             v: TokenValue::EOF,
+            leading_trivia,
+            trailing_trivia: Vec::new(),
         };
 
         match self.ch {
@@ -579,6 +609,7 @@ impl Lexer {
         }
 
         self.finalize_location(&mut tok.location);
+        tok.trailing_trivia = self.collect_trailing_trivia();
         self.last_token = tok.clone();
         Ok(tok)
     }
@@ -635,14 +666,105 @@ impl Lexer {
             || self.last_token.v == TokenValue::LSquirly)
     }
 
-    fn skip_whitespace(&mut self) {
-        while (self.ch == '\n' || self.ch == ' ' || self.ch == '\t') && self.ch != '\0' {
-            if self.ch == '\n' && self.should_emit_semicolon() {
-                self.next_is_semicolon = true;
-                self.advance();
-                return;
+    fn collect_leading_trivia(&mut self) -> Vec<Trivia> {
+        let mut trivia = Vec::new();
+        loop {
+            match self.ch {
+                ' ' | '\t' => {
+                    let t = self.collect_whitespace();
+                    self.push_trivia(&mut trivia, t);
+                }
+                '\n' | '\r' => {
+                    let t = self.collect_newline();
+                    self.push_trivia(&mut trivia, t);
+                    if self.should_emit_semicolon() {
+                        self.next_is_semicolon = true;
+                        break;
+                    }
+                }
+                '/' if self.peek(1) == '/' => {
+                    let t = self.collect_line_comment();
+                    self.push_trivia(&mut trivia, t);
+                }
+                _ => break,
             }
-            self.advance();
+        }
+        trivia
+    }
+
+    fn collect_trailing_trivia(&mut self) -> Vec<Trivia> {
+        let mut trivia = Vec::new();
+        loop {
+            match self.ch {
+                ' ' | '\t' => {
+                    let t = self.collect_whitespace();
+                    self.push_trivia(&mut trivia, t);
+                }
+                '/' if self.peek(1) == '/' => {
+                    let t = self.collect_line_comment();
+                    self.push_trivia(&mut trivia, t);
+                    break;
+                }
+                _ => break,
+            }
+        }
+        trivia
+    }
+
+    fn push_trivia(&mut self, list: &mut Vec<Trivia>, trivia: Trivia) {
+        self.trivia.push(trivia.clone());
+        list.push(trivia);
+    }
+
+    fn collect_whitespace(&mut self) -> Trivia {
+        let mut loc = self.snapshot_location();
+        let mut buf = String::new();
+        while self.ch == ' ' || self.ch == '\t' {
+            buf.push(self.ch);
+            self.advance_with_progress(&mut loc);
+        }
+        self.finalize_location(&mut loc);
+        Trivia {
+            location: loc,
+            kind: TriviaKind::Whitespace,
+            text: buf,
+        }
+    }
+
+    fn collect_newline(&mut self) -> Trivia {
+        let mut loc = self.snapshot_location();
+        let mut buf = String::new();
+        if self.ch == '\r' {
+            buf.push(self.ch);
+            self.advance_with_progress(&mut loc);
+            if self.ch == '\n' {
+                buf.push(self.ch);
+                self.advance_with_progress(&mut loc);
+            }
+        } else {
+            buf.push(self.ch);
+            self.advance_with_progress(&mut loc);
+        }
+        self.finalize_location(&mut loc);
+        Trivia {
+            location: loc,
+            kind: TriviaKind::Newline,
+            text: buf,
+        }
+    }
+
+    fn collect_line_comment(&mut self) -> Trivia {
+        let mut loc = self.snapshot_location();
+        let mut buf = String::new();
+        while self.ch != '\n' && self.ch != '\0' {
+            buf.push(self.ch);
+            self.advance_with_progress(&mut loc);
+        }
+        self.finalize_location(&mut loc);
+        Trivia {
+            location: loc,
+            kind: TriviaKind::LineComment,
+            text: buf,
         }
     }
 
@@ -707,6 +829,8 @@ impl Lexer {
         Ok(Token {
             location: src,
             v: TokenValue::String(data),
+            leading_trivia: Vec::new(),
+            trailing_trivia: Vec::new(),
         })
     }
 
@@ -747,6 +871,8 @@ impl Lexer {
                 return Ok(Token {
                     location: src,
                     v: TokenValue::Integer(val),
+                    leading_trivia: Vec::new(),
+                    trailing_trivia: Vec::new(),
                 });
             } else if n1 == 'b' || n1 == 'B' {
                 raw.push_str("0b");
@@ -761,6 +887,8 @@ impl Lexer {
                 return Ok(Token {
                     location: src,
                     v: TokenValue::Integer(val),
+                    leading_trivia: Vec::new(),
+                    trailing_trivia: Vec::new(),
                 });
             } else if n1 == 'o' || n1 == 'O' {
                 raw.push_str("0o");
@@ -775,6 +903,8 @@ impl Lexer {
                 return Ok(Token {
                     location: src,
                     v: TokenValue::Integer(val),
+                    leading_trivia: Vec::new(),
+                    trailing_trivia: Vec::new(),
                 });
             }
         }
@@ -814,6 +944,8 @@ impl Lexer {
             Ok(Token {
                 location: src,
                 v: TokenValue::Float(val),
+                leading_trivia: Vec::new(),
+                trailing_trivia: Vec::new(),
             })
         } else {
             let val = match base {
@@ -824,6 +956,8 @@ impl Lexer {
             Ok(Token {
                 location: src,
                 v: TokenValue::Integer(val),
+                leading_trivia: Vec::new(),
+                trailing_trivia: Vec::new(),
             })
         }
     }

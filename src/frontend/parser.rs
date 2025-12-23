@@ -31,6 +31,8 @@ pub enum ParseError {
     PostReturnIdAlreadyDefined(Token),
     MixedInitializerListStyles(Token),
     MissingInitializerDot(Token),
+    UnsupportedIncrement(Token),
+    UnsupportedDecrement(Token),
 }
 
 type ParseResult = Result<Box<AST>, ParseError>;
@@ -60,7 +62,8 @@ impl<'a> Parser<'a> {
     }
 
     pub fn parse(&mut self) -> ParseResult {
-        let ast = self.parse_expression_list(&[TokenValue::EOF], false)?;
+        let mut ast = self.parse_expression_list(&[TokenValue::EOF], false)?;
+        ast.trivia = self.lexer.take_trivia();
         if self.errors.is_empty() {
             Ok(ast)
         } else {
@@ -424,10 +427,7 @@ impl<'a> Parser<'a> {
                     };
                     let mut loc = type_start;
                     loc.range.end = list_ast.location.range.end;
-                    return Ok(AST::from(
-                        loc,
-                        ASTValue::TypedInitializerList { ty, items },
-                    ));
+                    return Ok(AST::from(loc, ASTValue::TypedInitializerList { ty, items }));
                 }
             }
             self.restore(snap);
@@ -493,13 +493,13 @@ impl<'a> Parser<'a> {
                     return Err(ParseError::UnexpectedToken(
                         self.cur.clone(),
                         TokenValue::Id("expression".to_string()),
-                    ))
+                    ));
                 }
                 Keyword::Throws => {
                     return Err(ParseError::UnexpectedToken(
                         self.cur.clone(),
                         TokenValue::Id("expression".to_string()),
-                    ))
+                    ));
                 }
                 _ => todo!("Unimplemented keyword: {:?}", k),
             },
@@ -575,8 +575,15 @@ impl<'a> Parser<'a> {
                 ));
             }
 
-            let is_named_item = matches!((&self.cur.v, &self.next.v),
-                (TokenValue::Op { op: Operator::Dot, has_equals: false }, TokenValue::Id(_))
+            let is_named_item = matches!(
+                (&self.cur.v, &self.next.v),
+                (
+                    TokenValue::Op {
+                        op: Operator::Dot,
+                        has_equals: false
+                    },
+                    TokenValue::Id(_)
+                )
             );
 
             let item_style = if is_named_item {
@@ -587,9 +594,15 @@ impl<'a> Parser<'a> {
 
             match style {
                 Some(InitStyle::Named)
-                    if matches!((&self.cur.v, &self.next.v),
-                        (TokenValue::Id(_), TokenValue::Op { op: Operator::Set, has_equals: false })
-                            | (TokenValue::Id(_), TokenValue::Comma)
+                    if matches!(
+                        (&self.cur.v, &self.next.v),
+                        (
+                            TokenValue::Id(_),
+                            TokenValue::Op {
+                                op: Operator::Set,
+                                has_equals: false
+                            }
+                        ) | (TokenValue::Id(_), TokenValue::Comma)
                             | (TokenValue::Id(_), TokenValue::RSquirly)
                     ) =>
                 {
@@ -708,9 +721,7 @@ impl<'a> Parser<'a> {
     }
 
     fn should_commit_generic_apply(target: &AST, args: &[GenericArg]) -> bool {
-        let args_have_unambiguous_syntax = args
-            .iter()
-            .any(|a| !matches!(a, GenericArg::Name(_)));
+        let args_have_unambiguous_syntax = args.iter().any(|a| !matches!(a, GenericArg::Name(_)));
         if args_have_unambiguous_syntax {
             return true;
         }
@@ -802,13 +813,7 @@ impl<'a> Parser<'a> {
 
                     let mut generic_loc = node.location.clone();
                     generic_loc.range.end = gt_end;
-                    node = AST::from(
-                        generic_loc,
-                        ASTValue::GenericApply {
-                            target: node,
-                            args,
-                        },
-                    );
+                    node = AST::from(generic_loc, ASTValue::GenericApply { target: node, args });
                 }
                 TokenValue::LParen => {
                     self.next()?; // consume '('
@@ -859,6 +864,18 @@ impl<'a> Parser<'a> {
                     let mut deref_loc = node.location.clone();
                     deref_loc.range.end = end;
                     node = AST::from(deref_loc, ASTValue::Deref(node));
+                }
+                TokenValue::Op {
+                    op: Operator::Add,
+                    has_equals: false,
+                } if self.is_adjacent_duplicate_op(Operator::Add) => {
+                    return Err(ParseError::UnsupportedIncrement(self.cur.clone()));
+                }
+                TokenValue::Op {
+                    op: Operator::Sub,
+                    has_equals: false,
+                } if self.is_adjacent_duplicate_op(Operator::Sub) => {
+                    return Err(ParseError::UnsupportedDecrement(self.cur.clone()));
                 }
                 _ => break,
             }
@@ -1825,7 +1842,10 @@ impl<'a> Parser<'a> {
         let mut loc = self.cur.location.clone();
         self.next()?;
 
-        if matches!(self.cur.v, TokenValue::LSquirly | TokenValue::Keyword(Keyword::Do)) {
+        if matches!(
+            self.cur.v,
+            TokenValue::LSquirly | TokenValue::Keyword(Keyword::Do)
+        ) {
             let body = self.parse_block_or_do(&[
                 TokenValue::Semicolon,
                 TokenValue::EOF,
@@ -1892,7 +1912,10 @@ impl<'a> Parser<'a> {
 
                 self.next()?; // consume `in`
 
-                if matches!(self.cur.v, TokenValue::LSquirly | TokenValue::Keyword(Keyword::Do)) {
+                if matches!(
+                    self.cur.v,
+                    TokenValue::LSquirly | TokenValue::Keyword(Keyword::Do)
+                ) {
                     return Err(ParseError::ExpectedExpression(self.cur.clone()));
                 }
 
@@ -1956,7 +1979,10 @@ impl<'a> Parser<'a> {
                     ])?)
                 };
 
-                if matches!(self.cur.v, TokenValue::LSquirly | TokenValue::Keyword(Keyword::Do)) {
+                if matches!(
+                    self.cur.v,
+                    TokenValue::LSquirly | TokenValue::Keyword(Keyword::Do)
+                ) {
                     let body = self.parse_block_or_do(&[
                         TokenValue::Semicolon,
                         TokenValue::EOF,
@@ -1982,7 +2008,10 @@ impl<'a> Parser<'a> {
                 }
                 self.next()?; // consume second `;`
 
-                let step = if matches!(self.cur.v, TokenValue::LSquirly | TokenValue::Keyword(Keyword::Do)) {
+                let step = if matches!(
+                    self.cur.v,
+                    TokenValue::LSquirly | TokenValue::Keyword(Keyword::Do)
+                ) {
                     None
                 } else {
                     Some(self.parse_expression_with_stop(&[TokenValue::LSquirly])?)
@@ -2517,12 +2546,6 @@ impl<'a> Parser<'a> {
             ));
         }
         Ok(GenericArg::Expr(expr.to_string()))
-    }
-
-    fn parse_type(&mut self) -> ParseResult {
-        let loc = self.cur.location.clone();
-        let t = self.parse_type_inner()?;
-        Ok(AST::from(loc, ASTValue::Type(t)))
     }
 
     fn parse_multi_id(&mut self) -> ParseResult {
@@ -3068,11 +3091,7 @@ impl<'a> Parser<'a> {
                 None
             };
 
-            params.push(FnParam {
-                names,
-                ty,
-                default,
-            });
+            params.push(FnParam { names, ty, default });
 
             match &self.cur.v {
                 TokenValue::Semicolon => {
@@ -3128,6 +3147,31 @@ impl<'a> Parser<'a> {
                 _ => return Ok(false),
             }
         }
+    }
+
+    fn is_adjacent_duplicate_op(&self, op: Operator) -> bool {
+        let TokenValue::Op {
+            op: cur_op,
+            has_equals: false,
+        } = &self.cur.v
+        else {
+            return false;
+        };
+        if *cur_op != op {
+            return false;
+        }
+        let TokenValue::Op {
+            op: next_op,
+            has_equals: false,
+        } = &self.next.v
+        else {
+            return false;
+        };
+        if *next_op != op {
+            return false;
+        }
+        self.cur.location.range.end.1 == self.next.location.range.begin.1
+            && self.cur.location.range.end.0 == self.next.location.range.begin.0
     }
 
     fn token_to_sourceish(v: &TokenValue) -> String {
@@ -3390,7 +3434,10 @@ mod tests {
 
     fn expect_typed_initializer_list<'a>(
         ast: &'a AST,
-    ) -> (&'a crate::frontend::Type, &'a [crate::frontend::InitializerItem]) {
+    ) -> (
+        &'a crate::frontend::Type,
+        &'a [crate::frontend::InitializerItem],
+    ) {
         match &ast.v {
             ASTValue::TypedInitializerList { ty, items } => (ty.as_ref(), items.as_slice()),
             _ => panic!("expected TypedInitializerList, got {}", ast),
@@ -3427,9 +3474,11 @@ mod tests {
 
     #[test]
     fn defer_parses_as_expression() {
-        let ast =
-            parse_expr(Lexer::new("defer cleanup()".to_string(), "<test>".to_string()))
-                .expect("ok");
+        let ast = parse_expr(Lexer::new(
+            "defer cleanup()".to_string(),
+            "<test>".to_string(),
+        ))
+        .expect("ok");
         match &ast.v {
             ASTValue::Defer(inner) => {
                 let has_call = matches!(inner.v, ASTValue::Call { .. })
@@ -4112,11 +4161,8 @@ mod tests {
 
     #[test]
     fn comparison_wins_over_ambiguous_single_name_generic_call() {
-        let ast = parse_expr(Lexer::new(
-            "a < b > (c)".to_string(),
-            "<test>".to_string(),
-        ))
-        .expect("ok");
+        let ast =
+            parse_expr(Lexer::new("a < b > (c)".to_string(), "<test>".to_string())).expect("ok");
         let s = ast.to_string();
         assert!(
             s.contains("BinExp [op: LessThan") && s.contains("BinExp [op: GreaterThan"),
@@ -4145,8 +4191,8 @@ mod tests {
 
     #[test]
     fn initializer_list_positional_parses() {
-        let ast = parse_expr(Lexer::new(".{1, 2, 3}".to_string(), "<test>".to_string()))
-            .expect("ok");
+        let ast =
+            parse_expr(Lexer::new(".{1, 2, 3}".to_string(), "<test>".to_string())).expect("ok");
         let items = expect_initializer_list(ast.as_ref());
         assert_eq!(items.len(), 3);
         match &items[0] {
@@ -4157,9 +4203,11 @@ mod tests {
 
     #[test]
     fn initializer_list_named_uses_equals() {
-        let ast =
-            parse_expr(Lexer::new(".{ .x = 1, .y = 2 }".to_string(), "<test>".to_string()))
-                .expect("ok");
+        let ast = parse_expr(Lexer::new(
+            ".{ .x = 1, .y = 2 }".to_string(),
+            "<test>".to_string(),
+        ))
+        .expect("ok");
         let items = expect_initializer_list(ast.as_ref());
         assert_eq!(items.len(), 2);
         match &items[0] {
@@ -4173,8 +4221,7 @@ mod tests {
 
     #[test]
     fn initializer_list_named_shorthand_uses_identifier_value() {
-        let ast = parse_expr(Lexer::new(".{ .x }".to_string(), "<test>".to_string()))
-            .expect("ok");
+        let ast = parse_expr(Lexer::new(".{ .x }".to_string(), "<test>".to_string())).expect("ok");
         let items = expect_initializer_list(ast.as_ref());
         assert_eq!(items.len(), 1);
         match &items[0] {

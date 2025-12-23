@@ -1,6 +1,6 @@
 use std::fmt;
 
-use crate::frontend::{Operator, SourceLocation};
+use crate::frontend::{Operator, SourceLocation, Trivia};
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum GenericArg {
@@ -452,12 +452,17 @@ pub enum ASTValue {
 
 pub struct AST {
     pub location: SourceLocation,
+    pub trivia: Vec<Trivia>,
     pub v: ASTValue,
 }
 
 impl AST {
     pub fn from(location: SourceLocation, v: ASTValue) -> Box<Self> {
-        Box::new(Self { location, v })
+        Box::new(Self {
+            location,
+            trivia: Vec::new(),
+            v,
+        })
     }
 
     pub fn pretty_format(s: &str) -> String {
@@ -674,7 +679,10 @@ impl fmt::Display for AST {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         use ASTValue::*;
         let quote_type = |t: &crate::frontend::Type| format!("\"{}\"", t);
-        fn write_generic_arg(f: &mut fmt::Formatter<'_>, a: &crate::frontend::GenericArg) -> fmt::Result {
+        fn write_generic_arg(
+            f: &mut fmt::Formatter<'_>,
+            a: &crate::frontend::GenericArg,
+        ) -> fmt::Result {
             match a {
                 crate::frontend::GenericArg::Type(t) => write!(f, "(Type \"{}\")", t),
                 crate::frontend::GenericArg::Expr(e) => write!(f, "(Expr {})", e),
