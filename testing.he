@@ -130,8 +130,8 @@ Direction :: enum {
 
 // Valid parse, but invalid AST
 
-dirs :: [Direction^]int .{}
-
+dirs :: [Direction]int .{}
+^var
 cast<int>34.2
 cast<>var
 cast<int>34.2 > cast<>var

@@ -28,6 +28,7 @@ pub enum ParseError {
     ExpectedBody(SourceLocation),
     ExpectedExpression(Token),
     InvalidDeclarationType(Token),
+    InvalidArraySize(SourceLocation),
     PostReturnIdAlreadyDefined(Token),
     MixedInitializerListStyles(Token),
     MissingInitializerDot(Token),
@@ -143,8 +144,23 @@ impl<'a> Parser<'a> {
                         self.record_error(e.clone());
                         return Err(e);
                     }
-                    self.record_error(e);
-                    if let Err(e) = self.recover_to(list_end, only_comma) {
+                    let should_record = match (&e, self.errors.last()) {
+                        (
+                            ParseError::InvalidArraySize(loc),
+                            Some(ParseError::InvalidArraySize(prev)),
+                        ) if loc == prev => false,
+                        _ => true,
+                    };
+                    if should_record {
+                        self.record_error(e);
+                    }
+                    let recover = match self.errors.last() {
+                        Some(ParseError::InvalidArraySize(_)) => {
+                            self.recover_after_invalid_array_size(only_comma)
+                        }
+                        _ => self.recover_to(list_end, only_comma),
+                    };
+                    if let Err(e) = recover {
                         self.record_error(e.clone());
                         return Err(e);
                     }
@@ -417,17 +433,27 @@ impl<'a> Parser<'a> {
 
         if self.token_starts_type(&self.cur.v) {
             let snap = self.snapshot();
+            let snap_starts_bracket = matches!(snap.1.v, TokenValue::LBracket);
             let type_start = self.cur.location.clone();
-            if let Ok(ty) = self.parse_type_inner() {
-                if self.cur.v == TokenValue::ListInit {
-                    let list_ast = self.parse_initializer_list()?;
-                    let items = match list_ast.v {
-                        ASTValue::InitializerList(items) => items,
-                        _ => unreachable!("initializer list parse must produce InitializerList"),
-                    };
-                    let mut loc = type_start;
-                    loc.range.end = list_ast.location.range.end;
-                    return Ok(AST::from(loc, ASTValue::TypedInitializerList { ty, items }));
+            match self.parse_type_inner() {
+                Ok(ty) => {
+                    if self.cur.v == TokenValue::ListInit {
+                        let list_ast = self.parse_initializer_list()?;
+                        let items = match list_ast.v {
+                            ASTValue::InitializerList(items) => items,
+                            _ => {
+                                unreachable!("initializer list parse must produce InitializerList")
+                            }
+                        };
+                        let mut loc = type_start;
+                        loc.range.end = list_ast.location.range.end;
+                        return Ok(AST::from(loc, ASTValue::TypedInitializerList { ty, items }));
+                    }
+                }
+                Err(err) => {
+                    if snap_starts_bracket {
+                        return Err(err);
+                    }
                 }
             }
             self.restore(snap);
@@ -2261,17 +2287,24 @@ impl<'a> Parser<'a> {
                         }))
                     }
                     _ => {
-                        // [<expr>]T
-                        let enable_multi_id_parse_prev = self.enable_multi_id_parse;
-                        self.enable_multi_id_parse = false;
-                        let size_expr = self.parse_expression()?;
-                        self.enable_multi_id_parse = enable_multi_id_parse_prev;
-                        let size = size_expr.to_string();
+                        // [<id>]T or [<id>.<id>...]T
+                        let size = match self.parse_array_size_idish() {
+                            Ok(size) => size,
+                            Err(err) => {
+                                let _ = self.recover_to(&[TokenValue::RBracket], false);
+                                if self.cur.v == TokenValue::RBracket {
+                                    let _ = self.next();
+                                }
+                                return Err(err);
+                            }
+                        };
                         if self.cur.v != TokenValue::RBracket {
-                            return Err(ParseError::ExpectedToken(
-                                self.cur.clone(),
-                                TokenValue::RBracket,
-                            ));
+                            let err = ParseError::InvalidArraySize(self.cur.location.clone());
+                            let _ = self.recover_to(&[TokenValue::RBracket], false);
+                            if self.cur.v == TokenValue::RBracket {
+                                let _ = self.next();
+                            }
+                            return Err(err);
                         }
                         self.next()?;
                         Ok(Box::new(Type::Array {
@@ -2302,6 +2335,34 @@ impl<'a> Parser<'a> {
                 TokenValue::Id("type".to_string()),
             )),
         }
+    }
+
+    fn parse_array_size_idish(&mut self) -> Result<String, ParseError> {
+        let mut size = String::new();
+
+        let TokenValue::Id(name) = &self.cur.v else {
+            return Err(ParseError::InvalidArraySize(self.cur.location.clone()));
+        };
+        size.push_str(name);
+        self.next()?;
+
+        while matches!(
+            self.cur.v,
+            TokenValue::Op {
+                op: Operator::Dot,
+                has_equals: false
+            }
+        ) {
+            self.next()?; // consume '.'
+            let TokenValue::Id(name) = &self.cur.v else {
+                return Err(ParseError::InvalidArraySize(self.cur.location.clone()));
+            };
+            size.push('.');
+            size.push_str(name);
+            self.next()?;
+        }
+
+        Ok(size)
     }
 
     fn parse_fn_type(&mut self) -> Result<Box<Type>, ParseError> {
@@ -2481,6 +2542,28 @@ impl<'a> Parser<'a> {
             };
             if is_separator {
                 self.next()?;
+                break;
+            }
+            self.next()?;
+        }
+        Ok(())
+    }
+
+    fn recover_after_invalid_array_size(&mut self, only_comma: bool) -> Result<(), ParseError> {
+        loop {
+            if self.cur.v == TokenValue::EOF {
+                break;
+            }
+            let is_separator = if only_comma {
+                self.cur.v == TokenValue::Comma
+            } else {
+                matches!(self.cur.v, TokenValue::Comma | TokenValue::Semicolon)
+            };
+            if is_separator {
+                self.next()?;
+                break;
+            }
+            if matches!(self.cur.v, TokenValue::RSquirly | TokenValue::RParen) {
                 break;
             }
             self.next()?;
@@ -5356,6 +5439,20 @@ mod tests {
                 _ => panic!("expected [Idx]Entity type"),
             },
             _ => panic!("expected Alias"),
+        }
+    }
+
+    #[test]
+    fn array_size_must_be_idish() {
+        let err = parse_expr(Lexer::new(
+            "x: [Direction^]int".to_string(),
+            "<test>".to_string(),
+        ))
+        .err()
+        .expect("expected error");
+        match err {
+            ParseError::InvalidArraySize(_) => {}
+            _ => panic!("expected InvalidArraySize"),
         }
     }
 

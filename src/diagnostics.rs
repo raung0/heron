@@ -96,6 +96,11 @@ pub fn emit_parser_error<W: WriteColor>(
                 describe_token_value(&tok.v)
             )
         }
+        ParserError::InvalidArraySize(loc) => {
+            label = Some("array size must be identifier or dotted path".to_string());
+            location = Some(loc);
+            format!("invalid array size expression")
+        }
         ParserError::PostReturnIdAlreadyDefined(tok) => {
             label = Some("post return identifier already defined".to_string());
             location = Some(tok.location);
