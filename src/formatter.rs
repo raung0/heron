@@ -1005,7 +1005,6 @@ impl Formatter {
                     out.push_str(&self.format_type(ty.as_ref()));
                 }
                 out.push('>');
-                out.push(' ');
                 out.push_str(&self.format_expr(value, self.unary_prec()));
                 self.wrap_if_needed(out, self.unary_prec(), parent_prec)
             }
@@ -1015,7 +1014,6 @@ impl Formatter {
                     out.push_str(&self.format_type(ty.as_ref()));
                 }
                 out.push('>');
-                out.push(' ');
                 out.push_str(&self.format_expr(value, self.unary_prec()));
                 self.wrap_if_needed(out, self.unary_prec(), parent_prec)
             }
