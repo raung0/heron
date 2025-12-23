@@ -575,6 +575,11 @@ impl<'a> Parser<'a> {
                 ));
             }
 
+            if self.cur.v == TokenValue::Semicolon {
+                self.next()?;
+                continue;
+            }
+
             let is_named_item = matches!(
                 (&self.cur.v, &self.next.v),
                 (
@@ -603,6 +608,7 @@ impl<'a> Parser<'a> {
                                 has_equals: false
                             }
                         ) | (TokenValue::Id(_), TokenValue::Comma)
+                            | (TokenValue::Id(_), TokenValue::Semicolon)
                             | (TokenValue::Id(_), TokenValue::RSquirly)
                     ) =>
                 {
@@ -632,11 +638,15 @@ impl<'a> Parser<'a> {
                         let name = name.clone();
                         self.next()?; // consume name
                         self.next()?; // consume '='
-                        let stop = &[TokenValue::Comma, TokenValue::RSquirly];
+                        let stop = &[
+                            TokenValue::Comma,
+                            TokenValue::Semicolon,
+                            TokenValue::RSquirly,
+                        ];
                         let value = self.parse_expression_with_stop(stop)?;
                         items.push(crate::frontend::InitializerItem::Named { name, value });
                     }
-                    TokenValue::Comma | TokenValue::RSquirly => {
+                    TokenValue::Comma | TokenValue::Semicolon | TokenValue::RSquirly => {
                         let name = name.clone();
                         let value =
                             AST::from(self.cur.location.clone(), ASTValue::Id(name.clone()));
@@ -646,13 +656,17 @@ impl<'a> Parser<'a> {
                     _ => unreachable!("named style detection should have matched"),
                 }
             } else {
-                let stop = &[TokenValue::Comma, TokenValue::RSquirly];
+                let stop = &[
+                    TokenValue::Comma,
+                    TokenValue::Semicolon,
+                    TokenValue::RSquirly,
+                ];
                 let value = self.parse_expression_with_stop(stop)?;
                 items.push(crate::frontend::InitializerItem::Positional(value));
             }
 
             match self.cur.v {
-                TokenValue::Comma => {
+                TokenValue::Comma | TokenValue::Semicolon => {
                     self.next()?;
                     continue;
                 }
@@ -4214,6 +4228,24 @@ mod tests {
             crate::frontend::InitializerItem::Named { name, value } => {
                 assert_eq!(name, "x");
                 expect_integer(value.as_ref(), 1);
+            }
+            _ => panic!("expected named item"),
+        }
+    }
+
+    #[test]
+    fn initializer_list_named_allows_semicolons() {
+        let ast = parse_expr(Lexer::new(
+            ".{ .x = 1; .y = 2 }".to_string(),
+            "<test>".to_string(),
+        ))
+        .expect("ok");
+        let items = expect_initializer_list(ast.as_ref());
+        assert_eq!(items.len(), 2);
+        match &items[1] {
+            crate::frontend::InitializerItem::Named { name, value } => {
+                assert_eq!(name, "y");
+                expect_integer(value.as_ref(), 2);
             }
             _ => panic!("expected named item"),
         }
