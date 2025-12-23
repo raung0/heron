@@ -211,6 +211,8 @@ fn keyword_lexeme(keyword: &Keyword) -> &'static str {
         Keyword::While => "while",
         Keyword::Pub => "pub",
         Keyword::Mut => "mut",
+        Keyword::Cast => "cast",
+        Keyword::Transmute => "transmute",
         Keyword::Defer => "defer",
         Keyword::Where => "where",
         Keyword::Pre => "pre",

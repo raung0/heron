@@ -1035,7 +1035,71 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_factor(&mut self) -> ParseResult {
-        self.parse_unary()
+        match self.cur.v {
+            TokenValue::Keyword(Keyword::Cast) => self.parse_cast_like(false),
+            TokenValue::Keyword(Keyword::Transmute) => self.parse_cast_like(true),
+            _ => self.parse_unary(),
+        }
+    }
+
+    fn parse_cast_like(&mut self, is_transmute: bool) -> ParseResult {
+        let mut loc = self.cur.location.clone();
+        self.next()?; // consume keyword
+
+        if !matches!(
+            self.cur.v,
+            TokenValue::Op {
+                op: Operator::LessThan,
+                has_equals: false
+            }
+        ) {
+            return Err(ParseError::ExpectedToken(
+                self.cur.clone(),
+                TokenValue::Op {
+                    op: Operator::LessThan,
+                    has_equals: false,
+                },
+            ));
+        }
+        self.next()?; // consume '<'
+
+        let ty = if matches!(
+            self.cur.v,
+            TokenValue::Op {
+                op: Operator::GreaterThan,
+                has_equals: false
+            }
+        ) {
+            None
+        } else {
+            Some(self.parse_type_inner()?)
+        };
+
+        if !matches!(
+            self.cur.v,
+            TokenValue::Op {
+                op: Operator::GreaterThan,
+                has_equals: false
+            }
+        ) {
+            return Err(ParseError::ExpectedToken(
+                self.cur.clone(),
+                TokenValue::Op {
+                    op: Operator::GreaterThan,
+                    has_equals: false,
+                },
+            ));
+        }
+        self.next()?; // consume '>'
+
+        let value = self.parse_unary()?;
+        loc.range.end = value.location.range.end;
+
+        if is_transmute {
+            Ok(AST::from(loc, ASTValue::Transmute { ty, value }))
+        } else {
+            Ok(AST::from(loc, ASTValue::Cast { ty, value }))
+        }
     }
 
     fn parse_return(&mut self) -> ParseResult {

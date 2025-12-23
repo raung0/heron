@@ -999,6 +999,26 @@ impl Formatter {
                 self.unary_prec(),
                 parent_prec,
             ),
+            ASTValue::Cast { ty, value } => {
+                let mut out = String::from("cast<");
+                if let Some(ty) = ty {
+                    out.push_str(&self.format_type(ty.as_ref()));
+                }
+                out.push('>');
+                out.push(' ');
+                out.push_str(&self.format_expr(value, self.unary_prec()));
+                self.wrap_if_needed(out, self.unary_prec(), parent_prec)
+            }
+            ASTValue::Transmute { ty, value } => {
+                let mut out = String::from("transmute<");
+                if let Some(ty) = ty {
+                    out.push_str(&self.format_type(ty.as_ref()));
+                }
+                out.push('>');
+                out.push(' ');
+                out.push_str(&self.format_expr(value, self.unary_prec()));
+                self.wrap_if_needed(out, self.unary_prec(), parent_prec)
+            }
 
             ASTValue::Ref {
                 mutable,

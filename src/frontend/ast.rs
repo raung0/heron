@@ -362,6 +362,14 @@ pub enum ASTValue {
         items: Vec<InitializerItem>,
     },
     PtrOf(Box<AST>),
+    Cast {
+        ty: Option<Box<Type>>,
+        value: Box<AST>,
+    },
+    Transmute {
+        ty: Option<Box<Type>>,
+        value: Box<AST>,
+    },
     Index {
         target: Box<AST>,
         indices: Vec<Box<AST>>,
@@ -706,6 +714,13 @@ impl fmt::Display for AST {
                 None => write!(f, "None"),
             }
         }
+        let write_opt_type =
+            |f: &mut fmt::Formatter<'_>, v: &Option<Box<crate::frontend::Type>>| -> fmt::Result {
+                match v {
+                    Some(t) => write!(f, "{}", quote_type(t.as_ref())),
+                    None => write!(f, "None"),
+                }
+            };
         match &self.v {
             Package { path } => {
                 write!(f, "(Package {:?})", path)
@@ -792,6 +807,16 @@ impl fmt::Display for AST {
             }
             PtrOf(v) => {
                 write!(f, "(PtrOf {})", v)
+            }
+            Cast { ty, value } => {
+                write!(f, "(Cast ")?;
+                write_opt_type(f, ty)?;
+                write!(f, " {})", value)
+            }
+            Transmute { ty, value } => {
+                write!(f, "(Transmute ")?;
+                write_opt_type(f, ty)?;
+                write!(f, " {})", value)
             }
             Index { target, indices } => {
                 write!(f, "(Index {}", target)?;
