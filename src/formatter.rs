@@ -6,6 +6,7 @@ use crate::frontend::{
 use serde::de::{self, Visitor};
 use serde::{Deserialize, Deserializer};
 use std::cell::Cell;
+use std::fs::read_to_string;
 
 #[derive(Clone, Debug)]
 pub struct FormatOptions {
@@ -165,7 +166,8 @@ pub fn format_ast(ast: &AST) -> String {
 }
 
 pub fn format_ast_with_options(ast: &AST, options: &FormatOptions) -> String {
-    let mut formatter = Formatter::new(&ast.trivia, options);
+    let source = read_to_string(&ast.location.file).ok();
+    let mut formatter = Formatter::new(&ast.trivia, source, options);
     formatter.format_root(ast);
     formatter.finish()
 }
@@ -175,11 +177,14 @@ struct Formatter {
     indent: usize,
     comments: Vec<Trivia>,
     comment_idx: Cell<usize>,
+    source_lines: Option<Vec<String>>,
+    format_off_ranges: Vec<(i32, i32)>,
+    format_off_idx: Cell<usize>,
     options: FormatOptions,
 }
 
 impl Formatter {
-    fn new(trivia: &[Trivia], options: &FormatOptions) -> Self {
+    fn new(trivia: &[Trivia], source: Option<String>, options: &FormatOptions) -> Self {
         let mut comments: Vec<Trivia> = trivia
             .iter()
             .filter(|t| matches!(t.kind, TriviaKind::LineComment))
@@ -188,11 +193,22 @@ impl Formatter {
 
         comments.sort_by_key(|t| (t.location.range.begin.1, t.location.range.begin.0));
 
+        let source_lines = source.map(|src| {
+            src.split_inclusive('\n')
+                .map(|line| line.to_string())
+                .collect::<Vec<_>>()
+        });
+        let max_line = source_lines.as_ref().map(|lines| lines.len() as i32);
+        let format_off_ranges = Self::collect_format_off_ranges(&comments, max_line);
+
         Self {
             out: String::new(),
             indent: 0,
             comments,
             comment_idx: Cell::new(0),
+            source_lines,
+            format_off_ranges,
+            format_off_idx: Cell::new(0),
             options: options.clone(),
         }
     }
@@ -211,10 +227,30 @@ impl Formatter {
                 self.emit_comments_until(None, &mut last_line);
             }
             _ => {
-                self.write_indent();
-                self.format_stmt(ast);
-                self.out.push('\n');
-                let mut last_line = self.statement_end_line(ast);
+                let start_line = ast.location.range.begin.1;
+                let end_line = self.statement_end_line(ast);
+                let mut last_line = end_line;
+                self.skip_format_off_before(start_line);
+                if let Some((off_start, off_end)) = self.current_format_off_range() {
+                    let raw_start = off_start.min(start_line);
+                    let raw_end = off_end.max(end_line);
+                    if off_start <= start_line
+                        && off_end >= end_line
+                        && self.emit_source_range(raw_start, raw_end)
+                    {
+                        self.skip_comments_in_range(raw_start, raw_end);
+                        self.advance_format_off_ranges(raw_end);
+                        last_line = raw_end;
+                    } else {
+                        self.write_indent();
+                        self.format_stmt(ast);
+                        self.out.push('\n');
+                    }
+                } else {
+                    self.write_indent();
+                    self.format_stmt(ast);
+                    self.out.push('\n');
+                }
                 self.emit_comments_until(None, &mut last_line);
             }
         }
@@ -228,9 +264,29 @@ impl Formatter {
 
         let mut prev_was_package_use = false;
 
-        for item in items {
+        let mut idx = 0usize;
+        while idx < items.len() {
+            let item = &items[idx];
             let start_line = item.location.range.begin.1;
+            let end_line = self.statement_end_line(item);
             let is_package_use = matches!(item.v, ASTValue::Package { .. } | ASTValue::Use { .. });
+            self.skip_format_off_before(start_line);
+            let raw_range = self
+                .current_format_off_range()
+                .and_then(|(off_start, off_end)| {
+                    if off_start <= start_line && off_end >= end_line {
+                        Some((off_start.min(start_line), off_end.max(end_line)))
+                    } else {
+                        None
+                    }
+                });
+            let emit_start_line = if raw_range.is_some() && self.source_lines.is_some() {
+                raw_range
+                    .map(|(raw_start, _)| raw_start)
+                    .unwrap_or(start_line)
+            } else {
+                start_line
+            };
 
             if self.options.separate_imports
                 && self.indent == 0
@@ -241,9 +297,9 @@ impl Formatter {
                 last_line += 2;
             }
 
-            self.emit_comments_until(Some(start_line), &mut last_line);
+            self.emit_comments_until(Some(emit_start_line), &mut last_line);
 
-            let mut gap = start_line - last_line - 1;
+            let mut gap = emit_start_line - last_line - 1;
             if self.options.collapse_empty_lines && gap > 1 {
                 gap = 1;
             }
@@ -251,12 +307,33 @@ impl Formatter {
                 self.emit_blank_lines(gap as usize);
             }
 
+            if let Some((raw_start, raw_end)) = raw_range {
+                if self.emit_source_range(raw_start, raw_end) {
+                    self.skip_comments_in_range(raw_start, raw_end);
+                    self.advance_format_off_ranges(raw_end);
+                    last_line = raw_end;
+                    let mut scan = idx;
+                    let mut last_package_use = prev_was_package_use;
+                    while scan < items.len() && items[scan].location.range.begin.1 <= raw_end {
+                        last_package_use = matches!(
+                            items[scan].v,
+                            ASTValue::Package { .. } | ASTValue::Use { .. }
+                        );
+                        scan += 1;
+                    }
+                    prev_was_package_use = last_package_use;
+                    idx = scan;
+                    continue;
+                }
+            }
+
             self.write_indent();
             self.format_stmt(item);
             self.out.push('\n');
 
-            last_line = self.statement_end_line(item);
+            last_line = end_line;
             prev_was_package_use = is_package_use;
+            idx += 1;
         }
 
         last_line
@@ -380,7 +457,32 @@ impl Formatter {
                         self.out.push_str(if *constexpr { " : " } else { " = " });
                     }
                     let value = &values.as_ref().unwrap()[0];
-                    self.format_stmt(value);
+                    match &value.v {
+                        ASTValue::Fn {
+                            generics,
+                            params,
+                            return_type,
+                            throws,
+                            pre,
+                            post,
+                            where_clause,
+                            ensures,
+                            body,
+                        } => self.format_fn(
+                            &value.location,
+                            true,
+                            generics,
+                            params,
+                            return_type.as_deref(),
+                            throws,
+                            pre,
+                            post.as_ref(),
+                            where_clause.as_deref(),
+                            ensures,
+                            body,
+                        ),
+                        _ => self.format_stmt(value),
+                    }
                 } else {
                     self.format_declaration_multi(names, types, values.as_deref(), *constexpr);
                 }
@@ -390,7 +492,32 @@ impl Formatter {
                 self.out.push_str(name);
                 self.out.push_str(" := ");
                 if self.is_stmt_value(value) {
-                    self.format_stmt(value);
+                    match &value.v {
+                        ASTValue::Fn {
+                            generics,
+                            params,
+                            return_type,
+                            throws,
+                            pre,
+                            post,
+                            where_clause,
+                            ensures,
+                            body,
+                        } => self.format_fn(
+                            &value.location,
+                            true,
+                            generics,
+                            params,
+                            return_type.as_deref(),
+                            throws,
+                            pre,
+                            post.as_ref(),
+                            where_clause.as_deref(),
+                            ensures,
+                            body,
+                        ),
+                        _ => self.format_stmt(value),
+                    }
                 } else {
                     self.out.push_str(&self.format_expr(value, 0));
                 }
@@ -399,7 +526,32 @@ impl Formatter {
                 self.out.push_str(name);
                 self.out.push_str(" :: ");
                 if self.is_stmt_value(value) {
-                    self.format_stmt(value);
+                    match &value.v {
+                        ASTValue::Fn {
+                            generics,
+                            params,
+                            return_type,
+                            throws,
+                            pre,
+                            post,
+                            where_clause,
+                            ensures,
+                            body,
+                        } => self.format_fn(
+                            &value.location,
+                            true,
+                            generics,
+                            params,
+                            return_type.as_deref(),
+                            throws,
+                            pre,
+                            post.as_ref(),
+                            where_clause.as_deref(),
+                            ensures,
+                            body,
+                        ),
+                        _ => self.format_stmt(value),
+                    }
                 } else {
                     self.out.push_str(&self.format_expr(value, 0));
                 }
@@ -416,6 +568,8 @@ impl Formatter {
                 ensures,
                 body,
             } => self.format_fn(
+                &ast.location,
+                false,
                 generics,
                 params,
                 return_type.as_deref(),
@@ -633,6 +787,8 @@ impl Formatter {
 
     fn format_fn(
         &mut self,
+        loc: &SourceLocation,
+        inline_prefix: bool,
         generics: &[GenericParam],
         params: &[FnParam],
         return_type: Option<&Type>,
@@ -643,6 +799,44 @@ impl Formatter {
         ensures: &[EnsuresClause],
         body: &FnBody,
     ) {
+        let fn_start_line = loc.range.begin.1;
+        let fn_start_col = loc.range.begin.0;
+        let body_start_line = match body {
+            FnBody::Block(block) => block.location.range.begin.1,
+            FnBody::Expr(expr) => expr.location.range.begin.1,
+        };
+        let header_end_line = body_start_line.saturating_sub(1);
+        if header_end_line >= fn_start_line
+            && self.source_lines.is_some()
+            && self.format_off_overlaps_range(fn_start_line, header_end_line)
+        {
+            let mut raw_end_line = header_end_line;
+            if let FnBody::Block(_) = body {
+                if let Some(lines) = self.source_lines.as_ref() {
+                    if raw_end_line > 0 {
+                        let idx = (raw_end_line - 1) as usize;
+                        if idx < lines.len() && lines[idx].trim() == "{" {
+                            raw_end_line = raw_end_line.saturating_sub(1);
+                        }
+                    }
+                }
+            }
+            if raw_end_line < fn_start_line {
+                raw_end_line = header_end_line;
+            }
+            self.trim_trailing_indent();
+            let emitted = if inline_prefix {
+                self.emit_source_range_from_col(fn_start_line, fn_start_col, raw_end_line)
+            } else {
+                self.emit_source_range(fn_start_line, raw_end_line)
+            };
+            if emitted {
+                self.skip_comments_in_range(fn_start_line, raw_end_line);
+                self.advance_format_off_ranges(raw_end_line);
+                self.format_fn_body(true, body);
+                return;
+            }
+        }
         let params_entries = self.format_param_entries(params);
 
         let mut signature_inline = String::from("fn");
@@ -712,91 +906,17 @@ impl Formatter {
 
         let clause_indent = self.indent + 1;
 
-        if !throws.is_empty() {
-            let throws_s = throws
-                .iter()
-                .map(|t| self.format_type(t))
-                .collect::<Vec<_>>()
-                .join(", ");
-            self.emit_clause(multiline_clauses, clause_indent, "throws ", |f| {
-                f.out.push_str(&throws_s);
-            });
-        }
+        self.format_fn_clauses(
+            multiline_clauses,
+            clause_indent,
+            throws,
+            pre,
+            post,
+            where_clause,
+            ensures,
+        );
 
-        if !pre.is_empty() {
-            let pre_s = self.format_expr_list_inline(pre, ", ");
-            self.emit_clause(multiline_clauses, clause_indent, "pre ", |f| {
-                f.out.push_str(&pre_s);
-            });
-        }
-
-        if let Some(post) = post {
-            self.emit_clause(multiline_clauses, clause_indent, "post ", |f| {
-                if let Some(ret) = &post.return_id {
-                    f.out.push_str(ret);
-                    f.out.push_str(": ");
-                }
-                f.out
-                    .push_str(&f.format_expr_list_inline(&post.conditions, ", "));
-            });
-        }
-
-        if let Some(where_clause) = where_clause {
-            let where_s = self.format_expr(where_clause, 0);
-            self.emit_clause(multiline_clauses, clause_indent, "where ", |f| {
-                f.out.push_str(&where_s);
-            });
-        }
-
-        for ensures_clause in ensures {
-            self.emit_clause(multiline_clauses, clause_indent, "ensures", |f| {
-                if !ensures_clause.binders.is_empty() {
-                    f.out.push('<');
-                    f.out.push_str(&ensures_clause.binders.join(", "));
-                    f.out.push('>');
-                }
-                f.out.push(' ');
-                f.out.push_str(&f.format_expr(&ensures_clause.condition, 0));
-            });
-        }
-
-        match body {
-            FnBody::Block(block) => {
-                let is_block = matches!(block.v, ASTValue::ExprList(_));
-                match (multiline_clauses, is_block) {
-                    (true, true) => {
-                        self.out.push('\n');
-                        self.write_indent();
-                        self.format_block(block);
-                    }
-                    (false, true) => {
-                        self.out.push(' ');
-                        self.format_block(block);
-                    }
-                    (true, false) => {
-                        self.out.push('\n');
-                        self.write_indent();
-                        self.out.push_str("do ");
-                        self.out.push_str(&self.format_expr(block, 0));
-                    }
-                    (false, false) => {
-                        self.out.push_str(" do ");
-                        self.out.push_str(&self.format_expr(block, 0));
-                    }
-                }
-            }
-            FnBody::Expr(expr) => {
-                if multiline_clauses {
-                    self.out.push('\n');
-                    self.write_indent();
-                    self.out.push_str("do ");
-                    self.out.push_str(&self.format_expr(expr, 0));
-                } else {
-                    self.out.push_str(" do ");
-                    self.out.push_str(&self.format_expr(expr, 0));
-                }
-            }
-        }
+        self.format_fn_body(multiline_clauses, body);
     }
 
     fn format_struct(&mut self, generics: &[GenericParam], extends: Option<&Type>, body: &AST) {
@@ -1176,6 +1296,8 @@ impl Formatter {
         ty: Option<&Type>,
         loc: &SourceLocation,
     ) -> String {
+        let list_start_line = loc.range.begin.1;
+        let list_end_line = loc.range.end.1;
         let mut prefix = String::new();
 
         if let Some(ty) = ty {
@@ -1195,15 +1317,23 @@ impl Formatter {
             .all(|item| matches!(item, InitializerItem::Named { .. }));
         let inline_items = self.render_initializer_items(items, named_items, false);
         let inline = format!("{}.{{ {} }}", prefix, inline_items.join(", "));
-        let list_start_line = loc.range.begin.1;
-        let list_end_line = loc.range.end.1;
         let item_ranges = items
             .iter()
             .map(Self::initializer_item_range)
             .collect::<Vec<_>>();
-        let comments_in_range = self.take_comments_in_range(list_start_line, list_end_line);
+        let off_ranges = self.collect_off_ranges_in_list(list_start_line, list_end_line);
+        let mut comments_in_range = self.take_comments_in_range(list_start_line, list_end_line);
+        if !off_ranges.is_empty() {
+            comments_in_range.retain(|comment| {
+                let line = comment.location.range.begin.1;
+                !self.line_in_ranges(line, &off_ranges)
+            });
+        }
 
-        if comments_in_range.is_empty() && !self.line_width_exceeded(self.indent, &inline) {
+        if comments_in_range.is_empty()
+            && off_ranges.is_empty()
+            && !self.line_width_exceeded(self.indent, &inline)
+        {
             return inline;
         }
 
@@ -1227,9 +1357,54 @@ impl Formatter {
         out.push_str(&prefix);
         out.push_str(".{\n");
         let mut comment_idx = 0;
+        let mut range_idx = 0;
         let mut last_line = list_start_line;
         for (idx, item) in multiline_items.iter().enumerate() {
             let item_line = item_lines.get(idx).copied().unwrap_or(list_start_line);
+            let (item_start, item_end) = item_ranges[idx];
+            while range_idx < off_ranges.len() && off_ranges[range_idx].0 <= item_line {
+                let (off_start, off_end) = off_ranges[range_idx];
+                while comment_idx < comments_in_range.len()
+                    && comments_in_range[comment_idx].location.range.begin.1 < off_start
+                {
+                    let comment = &comments_in_range[comment_idx];
+                    let comment_line = comment.location.range.begin.1;
+                    let gap = comment_line - last_line - 1;
+                    if gap > 0 {
+                        let mut emit = gap;
+                        if self.options.collapse_empty_lines && emit > 1 {
+                            emit = 1;
+                        }
+                        for _ in 0..emit {
+                            out.push('\n');
+                        }
+                    }
+                    for line_text in self.wrap_comment_lines(&comment.text, self.indent + 1) {
+                        out.push_str(&item_indent);
+                        out.push_str(&line_text);
+                        out.push('\n');
+                    }
+                    last_line = comment_line;
+                    comment_idx += 1;
+                }
+                let gap = off_start - last_line - 1;
+                if gap > 0 {
+                    let mut emit = gap;
+                    if self.options.collapse_empty_lines && emit > 1 {
+                        emit = 1;
+                    }
+                    for _ in 0..emit {
+                        out.push('\n');
+                    }
+                }
+                if self.append_source_range(&mut out, off_start, off_end) {
+                    last_line = off_end;
+                }
+                range_idx += 1;
+            }
+            if self.range_overlaps_any(item_start, item_end, &off_ranges) {
+                continue;
+            }
             while comment_idx < comments_in_range.len()
                 && comments_in_range[comment_idx].location.range.begin.1 < item_line
             {
@@ -1282,6 +1457,23 @@ impl Formatter {
             }
             last_line = comment_line;
             comment_idx += 1;
+        }
+        while range_idx < off_ranges.len() {
+            let (off_start, off_end) = off_ranges[range_idx];
+            let gap = off_start - last_line - 1;
+            if gap > 0 {
+                let mut emit = gap;
+                if self.options.collapse_empty_lines && emit > 1 {
+                    emit = 1;
+                }
+                for _ in 0..emit {
+                    out.push('\n');
+                }
+            }
+            if self.append_source_range(&mut out, off_start, off_end) {
+                last_line = off_end;
+            }
+            range_idx += 1;
         }
         out.push_str(&base_indent);
         out.push('}');
@@ -1372,6 +1564,22 @@ impl Formatter {
             self.comment_idx.set(idx);
         }
         taken
+    }
+
+    fn skip_comments_in_range(&self, start_line: i32, end_line: i32) {
+        let mut idx = self.comment_idx.get();
+        while idx < self.comments.len() {
+            let line = self.comments[idx].location.range.begin.1;
+            if line < start_line {
+                idx += 1;
+                continue;
+            }
+            if line > end_line {
+                break;
+            }
+            idx += 1;
+        }
+        self.comment_idx.set(idx);
     }
 
     fn format_generic_args(&self, args: &[GenericArg]) -> String {
@@ -1561,6 +1769,301 @@ impl Formatter {
         }
     }
 
+    fn collect_format_off_ranges(comments: &[Trivia], max_line: Option<i32>) -> Vec<(i32, i32)> {
+        let mut ranges = Vec::new();
+        let mut start: Option<i32> = None;
+
+        for comment in comments {
+            let text = comment.text.trim();
+            let line = comment.location.range.begin.1;
+            if text.contains("heron-format off") {
+                if start.is_none() {
+                    start = Some(line);
+                }
+            } else if text.contains("heron-format on") {
+                if let Some(begin) = start.take() {
+                    ranges.push((begin, line));
+                }
+            }
+        }
+
+        if let Some(begin) = start {
+            let end = max_line.unwrap_or(begin);
+            ranges.push((begin, end));
+        }
+
+        ranges
+    }
+
+    fn advance_format_off_ranges(&self, end_line: i32) {
+        let mut idx = self.format_off_idx.get();
+        while idx < self.format_off_ranges.len() {
+            let (_, off_end) = self.format_off_ranges[idx];
+            if off_end <= end_line {
+                idx += 1;
+                continue;
+            }
+            break;
+        }
+        self.format_off_idx.set(idx);
+    }
+
+    fn current_format_off_range(&self) -> Option<(i32, i32)> {
+        self.format_off_ranges
+            .get(self.format_off_idx.get())
+            .copied()
+    }
+
+    fn skip_format_off_before(&self, start_line: i32) {
+        let mut idx = self.format_off_idx.get();
+        while idx < self.format_off_ranges.len() {
+            let (_, off_end) = self.format_off_ranges[idx];
+            if off_end < start_line {
+                idx += 1;
+                continue;
+            }
+            break;
+        }
+        self.format_off_idx.set(idx);
+    }
+
+    fn trim_trailing_indent(&mut self) {
+        let indent = self.indent_string(self.indent);
+        if indent.is_empty() {
+            return;
+        }
+        if let Some(line_start) = self.out.rfind('\n').map(|idx| idx + 1) {
+            if self.out[line_start..].ends_with(&indent) {
+                self.out
+                    .truncate(self.out.len().saturating_sub(indent.len()));
+            }
+        } else if self.out.ends_with(&indent) {
+            self.out
+                .truncate(self.out.len().saturating_sub(indent.len()));
+        }
+    }
+
+    fn indent_string(&self, level: usize) -> String {
+        if self.options.use_tabs {
+            "\t".repeat(level)
+        } else {
+            " ".repeat(self.options.tab_size.max(1) * level)
+        }
+    }
+
+    fn ensure_newline(&mut self) {
+        if !self.out.ends_with('\n') {
+            self.out.push('\n');
+        }
+    }
+
+    fn format_fn_body(&mut self, multiline_clauses: bool, body: &FnBody) {
+        match body {
+            FnBody::Block(block) => {
+                let is_block = matches!(block.v, ASTValue::ExprList(_));
+                match (multiline_clauses, is_block) {
+                    (true, true) => {
+                        self.ensure_newline();
+                        self.write_indent();
+                        self.format_block(block);
+                    }
+                    (false, true) => {
+                        self.out.push(' ');
+                        self.format_block(block);
+                    }
+                    (true, false) => {
+                        self.ensure_newline();
+                        self.write_indent();
+                        self.out.push_str("do ");
+                        self.out.push_str(&self.format_expr(block, 0));
+                    }
+                    (false, false) => {
+                        self.out.push_str(" do ");
+                        self.out.push_str(&self.format_expr(block, 0));
+                    }
+                }
+            }
+            FnBody::Expr(expr) => {
+                if multiline_clauses {
+                    self.ensure_newline();
+                    self.write_indent();
+                    self.out.push_str("do ");
+                    self.out.push_str(&self.format_expr(expr, 0));
+                } else {
+                    self.out.push_str(" do ");
+                    self.out.push_str(&self.format_expr(expr, 0));
+                }
+            }
+        }
+    }
+
+    fn format_fn_clauses(
+        &mut self,
+        multiline_clauses: bool,
+        clause_indent: usize,
+        throws: &[Box<Type>],
+        pre: &[Box<AST>],
+        post: Option<&PostClause>,
+        where_clause: Option<&AST>,
+        ensures: &[EnsuresClause],
+    ) {
+        if !throws.is_empty() {
+            let throws_s = throws
+                .iter()
+                .map(|t| self.format_type(t))
+                .collect::<Vec<_>>()
+                .join(", ");
+            self.emit_clause(multiline_clauses, clause_indent, "throws ", |f| {
+                f.out.push_str(&throws_s);
+            });
+        }
+
+        if !pre.is_empty() {
+            let pre_s = self.format_expr_list_inline(pre, ", ");
+            self.emit_clause(multiline_clauses, clause_indent, "pre ", |f| {
+                f.out.push_str(&pre_s);
+            });
+        }
+
+        if let Some(post) = post {
+            self.emit_clause(multiline_clauses, clause_indent, "post ", |f| {
+                if let Some(ret) = &post.return_id {
+                    f.out.push_str(ret);
+                    f.out.push_str(": ");
+                }
+                f.out
+                    .push_str(&f.format_expr_list_inline(&post.conditions, ", "));
+            });
+        }
+
+        if let Some(where_clause) = where_clause {
+            let where_s = self.format_expr(where_clause, 0);
+            self.emit_clause(multiline_clauses, clause_indent, "where ", |f| {
+                f.out.push_str(&where_s);
+            });
+        }
+
+        for ensures_clause in ensures {
+            self.emit_clause(multiline_clauses, clause_indent, "ensures", |f| {
+                if !ensures_clause.binders.is_empty() {
+                    f.out.push('<');
+                    f.out.push_str(&ensures_clause.binders.join(", "));
+                    f.out.push('>');
+                }
+                f.out.push(' ');
+                f.out.push_str(&f.format_expr(&ensures_clause.condition, 0));
+            });
+        }
+    }
+
+    fn collect_off_ranges_in_list(&self, start_line: i32, end_line: i32) -> Vec<(i32, i32)> {
+        self.format_off_ranges
+            .iter()
+            .filter_map(|(off_start, off_end)| {
+                if *off_end < start_line || *off_start > end_line {
+                    None
+                } else {
+                    Some(((*off_start).max(start_line), (*off_end).min(end_line)))
+                }
+            })
+            .collect()
+    }
+
+    fn format_off_overlaps_range(&self, start_line: i32, end_line: i32) -> bool {
+        self.format_off_ranges
+            .iter()
+            .any(|(off_start, off_end)| *off_end >= start_line && *off_start <= end_line)
+    }
+
+    fn line_in_ranges(&self, line: i32, ranges: &[(i32, i32)]) -> bool {
+        ranges
+            .iter()
+            .any(|(start, end)| *end >= line && *start <= line)
+    }
+
+    fn range_overlaps_any(&self, start: i32, end: i32, ranges: &[(i32, i32)]) -> bool {
+        ranges
+            .iter()
+            .any(|(r_start, r_end)| *r_end >= start && *r_start <= end)
+    }
+
+    fn append_source_range(&self, out: &mut String, start_line: i32, end_line: i32) -> bool {
+        let Some(lines) = self.source_lines.as_ref() else {
+            return false;
+        };
+        if start_line <= 0 || end_line <= 0 {
+            return false;
+        }
+        let start_idx = (start_line - 1) as usize;
+        let end_idx = (end_line - 1) as usize;
+        if start_idx >= lines.len() || end_idx < start_idx {
+            return false;
+        }
+        let end_idx = end_idx.min(lines.len() - 1);
+        for line in &lines[start_idx..=end_idx] {
+            out.push_str(line);
+        }
+        true
+    }
+
+    fn emit_source_range_from_col(
+        &mut self,
+        start_line: i32,
+        start_col: i32,
+        end_line: i32,
+    ) -> bool {
+        let Some(lines) = self.source_lines.as_ref() else {
+            return false;
+        };
+        if start_line <= 0 || end_line <= 0 {
+            return false;
+        }
+        let start_idx = (start_line - 1) as usize;
+        let end_idx = (end_line - 1) as usize;
+        if start_idx >= lines.len() || end_idx < start_idx {
+            return false;
+        }
+        let end_idx = end_idx.min(lines.len() - 1);
+        let first_line = &lines[start_idx];
+        self.out
+            .push_str(&self.slice_line_from_col(first_line, start_col));
+        for line in &lines[start_idx + 1..=end_idx] {
+            self.out.push_str(line);
+        }
+        true
+    }
+
+    fn emit_source_range(&mut self, start_line: i32, end_line: i32) -> bool {
+        let Some(lines) = self.source_lines.as_ref() else {
+            return false;
+        };
+        if start_line <= 0 || end_line <= 0 {
+            return false;
+        }
+        let start_idx = (start_line - 1) as usize;
+        let end_idx = (end_line - 1) as usize;
+        if start_idx >= lines.len() || end_idx < start_idx {
+            return false;
+        }
+        let end_idx = end_idx.min(lines.len() - 1);
+        for line in &lines[start_idx..=end_idx] {
+            self.out.push_str(line);
+        }
+        true
+    }
+
+    fn slice_line_from_col(&self, line: &str, start_col: i32) -> String {
+        let bytes = line.as_bytes();
+        let len = bytes.len();
+        let start = if start_col <= 1 {
+            0
+        } else {
+            (start_col - 1) as usize
+        }
+        .min(len);
+        String::from_utf8_lossy(&bytes[start..]).to_string()
+    }
+
     fn format_stmt_inline(ast: &AST) -> String {
         Formatter::format_stmt_inline_with_options(ast, 0, &FormatOptions::default())
     }
@@ -1574,7 +2077,7 @@ impl Formatter {
         indent: usize,
         options: &FormatOptions,
     ) -> String {
-        let mut formatter = Formatter::new(&[], options);
+        let mut formatter = Formatter::new(&[], None, options);
         formatter.indent = indent;
         formatter.format_stmt(ast);
         formatter.out

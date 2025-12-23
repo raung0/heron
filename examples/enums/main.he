@@ -12,8 +12,12 @@ Direction :: enum {
 DIRECTIONS_VECTOR :: [Direction]core.math.Vector<f32, 2> .{
 	// These initalizer lists values are passed to Vector's __construct.
 	// The initializer lists get their types from the __construct.
-	.Up    = .{ 0, 1 },
-	.Down  = .{ 0, 1 },
+	// heron-format off
+	.Up    = .{  0, 1 },
+	.Down  = .{  0, 1 },
+	.Left  = .{ -1, 0 },
+	.Right = .{  1, 0 },
+	// heron-format on
 	.Left  = .{ -1, 0 },
 	.Right = .{ 1, 0 }
 }
