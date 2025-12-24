@@ -136,3 +136,7 @@ cast<int>34.2
 cast<>var
 cast<int>34.2 > cast<>var
 
+main := fn() -> void {
+	core.io.println("Hello")
+}
+

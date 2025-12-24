@@ -2191,6 +2191,10 @@ impl<'a> Parser<'a> {
     fn parse_type_inner(&mut self) -> Result<Box<Type>, ParseError> {
         match &self.cur.v {
             TokenValue::Keyword(Keyword::Fn) => self.parse_fn_type(),
+            TokenValue::Keyword(Keyword::Void) => {
+                self.next()?;
+                Ok(Box::new(Type::Void))
+            }
             TokenValue::Op {
                 op: Operator::BinAnd,
                 has_equals: false,
@@ -2652,6 +2656,7 @@ impl<'a> Parser<'a> {
                 return Ok(match t.as_ref() {
                     Type::Bool
                     | Type::Rune
+                    | Type::Void
                     | Type::Integer { .. }
                     | Type::Float { .. }
                     | Type::Generic { .. }

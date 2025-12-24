@@ -192,6 +192,7 @@ pub enum Type {
         lifetime: Option<char>,
         underlying: Box<Type>,
     },
+    Void,
 }
 
 impl PartialEq for Type {
@@ -313,6 +314,7 @@ impl fmt::Display for Type {
                 }
                 write!(f, "{}", underlying)
             }
+            Type::Void => write!(f, "void"),
         }
     }
 }

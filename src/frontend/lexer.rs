@@ -97,6 +97,7 @@ pub enum Keyword {
     Enum,
     Union,
     RawUnion,
+    Void,
 }
 
 #[derive(PartialEq, Clone, Debug)]
@@ -1011,6 +1012,7 @@ fn keyword_from_str(s: &str) -> Option<Keyword> {
         "enum" => Keyword::Enum,
         "union" => Keyword::Union,
         "raw_union" => Keyword::RawUnion,
+        "void" => Keyword::Void,
         _ => return None,
     })
 }
