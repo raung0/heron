@@ -1,6 +1,6 @@
 use crate::frontend::{
     AST, ASTValue, EnsuresClause, EnumVariant, FnBody, FnParam, GenericArg, GenericParam, Keyword,
-    Lexer, LexerError, MatchBinder, MatchCase, MatchCasePattern, Operator, PostClause,
+    Lexer, MatchBinder, MatchCase, MatchCasePattern, Operator, ParseError, PostClause,
     SourceLocation, Token, TokenValue, Type,
 };
 
@@ -11,29 +11,6 @@ pub struct Parser<'a> {
 
     enable_multi_id_parse: bool,
     errors: Vec<ParseError>,
-}
-
-#[derive(Debug, Clone)]
-pub enum ParseError {
-    LexerError(LexerError),
-    InvalidUnaryOperator(Token),
-    InvalidBinaryOperator(Token),
-    UnexpectedToken(Token, TokenValue),
-    ExpectedToken(Token, TokenValue),
-    UnclosedOperatorName(Token, TokenValue),
-    InvalidOperatorName(Token),
-    InvalidFactorToken(Token),
-    ExpectedConditionExpression(Token),
-    InvalidForBinding(SourceLocation),
-    ExpectedBody(SourceLocation),
-    ExpectedExpression(Token),
-    InvalidDeclarationType(Token),
-    InvalidArraySize(SourceLocation),
-    PostReturnIdAlreadyDefined(Token),
-    MixedInitializerListStyles(Token),
-    MissingInitializerDot(Token),
-    UnsupportedIncrement(Token),
-    UnsupportedDecrement(Token),
 }
 
 type ParseResult = Result<Box<AST>, ParseError>;

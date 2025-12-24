@@ -1129,3 +1129,156 @@ impl fmt::Display for AST {
         }
     }
 }
+
+pub fn iterate_ast<F>(node: &Box<AST>, parent: Option<&Box<AST>>, predicate: &mut F)
+where
+    F: FnMut(&Box<AST>, Option<&Box<AST>>),
+{
+    predicate(node, parent);
+
+    match &node.v {
+        ASTValue::BinExpr { lhs, rhs, .. } => {
+            iterate_ast(lhs, Some(node), predicate);
+            iterate_ast(rhs, Some(node), predicate);
+        }
+
+        ASTValue::Not(v)
+        | ASTValue::UnaryPlus(v)
+        | ASTValue::UnaryMinus(v)
+        | ASTValue::Deref(v)
+        | ASTValue::Mut(v)
+        | ASTValue::PtrOf(v)
+        | ASTValue::Defer(v)
+        | ASTValue::Throw(v)
+        | ASTValue::Pub(v) => {
+            iterate_ast(v, Some(node), predicate);
+        }
+
+        ASTValue::Ref { v, .. } => {
+            iterate_ast(v, Some(node), predicate);
+        }
+
+        ASTValue::Call { callee, args } => {
+            iterate_ast(callee, Some(node), predicate);
+            for arg in args {
+                iterate_ast(arg, Some(node), predicate);
+            }
+        }
+
+        ASTValue::Index { target, indices } => {
+            iterate_ast(target, Some(node), predicate);
+            for idx in indices {
+                iterate_ast(idx, Some(node), predicate);
+            }
+        }
+
+        ASTValue::ExprList(exprs) | ASTValue::ExprListNoScope(exprs) => {
+            for e in exprs {
+                iterate_ast(e, Some(node), predicate);
+            }
+        }
+
+        ASTValue::Return(Some(v)) => {
+            iterate_ast(v, Some(node), predicate);
+        }
+
+        ASTValue::If {
+            cond,
+            decl,
+            body,
+            else_,
+        } => {
+            iterate_ast(cond, Some(node), predicate);
+            if let Some(d) = decl {
+                iterate_ast(d, Some(node), predicate);
+            }
+            iterate_ast(body, Some(node), predicate);
+            if let Some(e) = else_ {
+                iterate_ast(e, Some(node), predicate);
+            }
+        }
+
+        ASTValue::While { cond, decl, body } => {
+            iterate_ast(cond, Some(node), predicate);
+            if let Some(d) = decl {
+                iterate_ast(d, Some(node), predicate);
+            }
+            iterate_ast(body, Some(node), predicate);
+        }
+
+        ASTValue::ForLoop {
+            init,
+            cond,
+            step,
+            body,
+        } => {
+            if let Some(i) = init {
+                iterate_ast(i, Some(node), predicate);
+            }
+            if let Some(c) = cond {
+                iterate_ast(c, Some(node), predicate);
+            }
+            if let Some(s) = step {
+                iterate_ast(s, Some(node), predicate);
+            }
+            iterate_ast(body, Some(node), predicate);
+        }
+
+        ASTValue::For {
+            bindings,
+            iter,
+            body,
+        } => {
+            for b in bindings {
+                iterate_ast(b, Some(node), predicate);
+            }
+            iterate_ast(iter, Some(node), predicate);
+            iterate_ast(body, Some(node), predicate);
+        }
+
+        ASTValue::Set(_, v)
+        | ASTValue::Declaration(_, v)
+        | ASTValue::DeclarationConstexpr(_, v) => {
+            iterate_ast(v, Some(node), predicate);
+        }
+
+        ASTValue::SetMulti { values, .. } => {
+            for v in values {
+                iterate_ast(v, Some(node), predicate);
+            }
+        }
+
+        ASTValue::Fn {
+            pre,
+            where_clause,
+            body,
+            ..
+        } => {
+            for p in pre {
+                iterate_ast(p, Some(node), predicate);
+            }
+            if let Some(w) = where_clause {
+                iterate_ast(w, Some(node), predicate);
+            }
+            match body {
+                FnBody::Block(b) => iterate_ast(b, Some(node), predicate),
+                _ => {}
+            }
+        }
+
+        ASTValue::Struct { body, .. } | ASTValue::RawUnion { body, .. } => {
+            iterate_ast(body, Some(node), predicate);
+        }
+
+        ASTValue::Match {
+            scrutinee, cases, ..
+        } => {
+            iterate_ast(scrutinee, Some(node), predicate);
+            for c in cases {
+                iterate_ast(&c.body, Some(node), predicate);
+            }
+        }
+
+        _ => {}
+    }
+}
