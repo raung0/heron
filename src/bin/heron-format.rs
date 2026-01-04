@@ -88,7 +88,10 @@ fn main() {
                         print!("{formatted}");
                     }
                 }
-                Err(e) => pretty_print_error(e, input.as_str()),
+                Err(e) => pretty_print_error(
+                    heron::frontend::FrontendError::ParseError(e),
+                    input.as_str(),
+                ),
             }
         } else {
             let mut first = true;
@@ -96,7 +99,10 @@ fn main() {
                 if !first {
                     eprintln!();
                 }
-                pretty_print_error(err, input.as_str());
+                pretty_print_error(
+                    heron::frontend::FrontendError::ParseError(err),
+                    input.as_str(),
+                );
                 first = false;
             }
         }
