@@ -128,9 +128,13 @@ Direction :: enum {
 	Right
 }
 
-// Valid parse, but invalid AST
-
-dirs :: [Direction]int .{}
+dirs :: [Direction]Vector2 .{
+	.Up = .{ 1, 0 }
+	.Down = .{ -1, 0 }
+	.Left = .{ 0, -1 }
+	.Right = .{ 0, 1 }
+	.Right = .{ 0, 1 }
+}
 ^var
 cast<int>34.2
 cast<>var

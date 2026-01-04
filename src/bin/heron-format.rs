@@ -1,7 +1,9 @@
 use clap::{Arg, ArgAction, Command};
-use heron::diagnostics::pretty_print_parser_error;
-use heron::formatter::{FormatConfig, FormatOptions, format_ast_with_options};
 use heron::frontend;
+use heron::{
+    diagnostics::pretty_print_error,
+    formatter::{FormatConfig, FormatOptions, format_ast_with_options},
+};
 
 fn main() {
     let matches = Command::new("heron-format")
@@ -86,7 +88,7 @@ fn main() {
                         print!("{formatted}");
                     }
                 }
-                Err(e) => pretty_print_parser_error(e, input.as_str()),
+                Err(e) => pretty_print_error(e, input.as_str()),
             }
         } else {
             let mut first = true;
@@ -94,7 +96,7 @@ fn main() {
                 if !first {
                     eprintln!();
                 }
-                pretty_print_parser_error(err, input.as_str());
+                pretty_print_error(err, input.as_str());
                 first = false;
             }
         }

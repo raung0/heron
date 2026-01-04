@@ -1,130 +1,161 @@
 use std::io;
 
-use crate::frontend::{Keyword, LexerError, Operator, ParseError, SourceLocation, TokenValue};
+use crate::frontend::{
+    FrontendError, Keyword, LexerError, Operator, ParseError, SourceLocation, TokenValue,
+};
 use termcolor::{Color, ColorChoice, ColorSpec, StandardStream, WriteColor};
 
 type ParserError = ParseError;
 
-pub fn pretty_print_parser_error(err: ParserError, input: &str) {
+pub fn pretty_print_error(err: FrontendError, input: &str) {
     let mut stderr = StandardStream::stderr(ColorChoice::Auto);
-    let _ = emit_parser_error(&mut stderr, err, input);
+    let _ = emit_error(&mut stderr, err, input);
 }
 
-pub fn emit_parser_error<W: WriteColor>(
+pub fn emit_error<W: WriteColor>(
     writer: &mut W,
-    err: ParserError,
+    err: FrontendError,
     input: &str,
 ) -> io::Result<()> {
-    let mut label: Option<String> = None;
-    let mut location: Option<SourceLocation> = None;
+    let mut labels: Vec<Option<String>> = Vec::new();
+    let mut locations: Vec<SourceLocation> = Vec::new();
 
     let message = match err {
-        ParserError::LexerError(e) => {
-            format!("lexer error: {}", describe_lexer_error(&e))
+        FrontendError::ParseError(err) => match err {
+            ParserError::LexerError(e) => {
+                format!("lexer error: {}", describe_lexer_error(&e))
+            }
+            ParserError::InvalidUnaryOperator(tok) => {
+                labels.push(Some("invalid unary operator".to_string()));
+                locations.push(tok.location);
+                format!("invalid unary operator {}", describe_token_value(&tok.v))
+            }
+            ParserError::InvalidBinaryOperator(tok) => {
+                labels.push(Some("invalid binary operator".to_string()));
+                locations.push(tok.location);
+                format!("invalid binary operator {}", describe_token_value(&tok.v))
+            }
+            ParserError::UnexpectedToken(tok, expected) => {
+                labels.push(Some(format!("expected {}", describe_token_value(&expected))));
+                locations.push(tok.location);
+                format!(
+                    "unexpected {} (expected {})",
+                    describe_token_value(&tok.v),
+                    describe_token_value(&expected)
+                )
+            }
+            ParserError::ExpectedToken(tok, expected) => {
+                labels.push(Some(format!("expected {}", describe_token_value(&expected))));
+                locations.push(tok.location);
+                format!(
+                    "expected {} but found {}",
+                    describe_token_value(&expected),
+                    describe_token_value(&tok.v)
+                )
+            }
+            ParserError::UnclosedOperatorName(tok, expected) => {
+                labels.push(Some(format!(
+                    "operator name not closed (expected {})",
+                    describe_token_value(&expected)
+                )));
+                locations.push(tok.location);
+                format!(
+                    "operator name not closed (expected {})",
+                    describe_token_value(&expected)
+                )
+            }
+            ParserError::InvalidOperatorName(tok) => {
+                labels.push(Some("invalid operator".to_string()));
+                locations.push(tok.location);
+                format!("invalid operator")
+            }
+            ParserError::InvalidFactorToken(tok) => {
+                labels.push(None);
+                locations.push(tok.location);
+                format!("invalid factor token {}", describe_token_value(&tok.v))
+            }
+            ParserError::ExpectedConditionExpression(tok) => {
+                labels.push(None);
+                locations.push(tok.location);
+                format!("expected condition expression")
+            }
+            ParserError::InvalidForBinding(loc) => {
+                labels.push(None);
+                locations.push(loc);
+                format!("invalid for binding, must be identifier or reference to identifier")
+            }
+            ParserError::ExpectedBody(loc) => {
+                labels.push(None);
+                locations.push(loc);
+                format!("expected body")
+            }
+            ParserError::ExpectedExpression(tok) => {
+                labels.push(None);
+                locations.push(tok.location);
+                format!(
+                    "expected expression, but found {}",
+                    describe_token_value(&tok.v)
+                )
+            }
+            ParserError::InvalidDeclarationType(tok) => {
+                labels.push(None);
+                locations.push(tok.location);
+                format!(
+                    "invalid declaration type, found {}",
+                    describe_token_value(&tok.v)
+                )
+            }
+            ParserError::InvalidArraySize(loc) => {
+                labels.push(Some(
+                    "array size must be identifier or dotted path".to_string(),
+                ));
+                locations.push(loc);
+                format!("invalid array size expression")
+            }
+            ParserError::PostReturnIdAlreadyDefined(tok) => {
+                labels.push(Some("post return identifier already defined".to_string()));
+                locations.push(tok.location);
+                format!("post return identifier already defined")
+            }
+            ParserError::MixedInitializerListStyles(tok) => {
+                labels.push(Some(
+                    "initializer list items must be all named or all positional".to_string(),
+                ));
+                locations.push(tok.location);
+                format!("mixed initializer list styles")
+            }
+            ParserError::MissingInitializerDot(tok) => {
+                labels.push(Some(
+                    "named initializer items must start with '.'".to_string(),
+                ));
+                locations.push(tok.location);
+                format!("missing '.' before initializer item name")
+            }
+            ParserError::UnsupportedIncrement(tok) => {
+                labels.push(Some("`++` is not supported".to_string()));
+                locations.push(tok.location);
+                format!("`++` is not supported")
+            }
+            ParserError::UnsupportedDecrement(tok) => {
+                labels.push(Some("`--` is not supported".to_string()));
+                locations.push(tok.location);
+                format!("`--` is not supported")
+            }
+        },
+        FrontendError::InvalidEnumeratedArrayEnum(source_location) => {
+            labels.push(Some("invalid enumareted array enum".to_string()));
+            locations.push(source_location);
+            format!("invalid enumareted array enum")
         }
-        ParserError::InvalidUnaryOperator(tok) => {
-            label = Some("invalid unary operator".to_string());
-            location = Some(tok.location);
-            format!("invalid unary operator {}", describe_token_value(&tok.v))
-        }
-        ParserError::InvalidBinaryOperator(tok) => {
-            label = Some("invalid binary operator".to_string());
-            location = Some(tok.location);
-            format!("invalid binary operator {}", describe_token_value(&tok.v))
-        }
-        ParserError::UnexpectedToken(tok, expected) => {
-            label = Some(format!("expected {}", describe_token_value(&expected)));
-            location = Some(tok.location);
-            format!(
-                "unexpected {} (expected {})",
-                describe_token_value(&tok.v),
-                describe_token_value(&expected)
-            )
-        }
-        ParserError::ExpectedToken(tok, expected) => {
-            label = Some(format!("expected {}", describe_token_value(&expected)));
-            location = Some(tok.location);
-            format!(
-                "expected {} but found {}",
-                describe_token_value(&expected),
-                describe_token_value(&tok.v)
-            )
-        }
-        ParserError::UnclosedOperatorName(tok, expected) => {
-            label = Some(format!(
-                "operator name not closed (expected {})",
-                describe_token_value(&expected)
-            ));
-            location = Some(tok.location);
-            format!(
-                "operator name not closed (expected {})",
-                describe_token_value(&expected)
-            )
-        }
-        ParserError::InvalidOperatorName(tok) => {
-            label = Some("invalid operator".to_string());
-            location = Some(tok.location);
-            format!("invalid operator")
-        }
-        ParserError::InvalidFactorToken(tok) => {
-            location = Some(tok.location);
-            format!("invalid factor token {}", describe_token_value(&tok.v))
-        }
-        ParserError::ExpectedConditionExpression(tok) => {
-            location = Some(tok.location);
-            format!("expected condition expression")
-        }
-        ParserError::InvalidForBinding(loc) => {
-            location = Some(loc);
-            format!("invalid for binding, must be identifier or reference to identifier")
-        }
-        ParserError::ExpectedBody(loc) => {
-            location = Some(loc);
-            format!("expected body")
-        }
-        ParserError::ExpectedExpression(tok) => {
-            location = Some(tok.location);
-            format!(
-                "expected expression, but found {}",
-                describe_token_value(&tok.v)
-            )
-        }
-        ParserError::InvalidDeclarationType(tok) => {
-            location = Some(tok.location);
-            format!(
-                "invalid declaration type, found {}",
-                describe_token_value(&tok.v)
-            )
-        }
-        ParserError::InvalidArraySize(loc) => {
-            label = Some("array size must be identifier or dotted path".to_string());
-            location = Some(loc);
-            format!("invalid array size expression")
-        }
-        ParserError::PostReturnIdAlreadyDefined(tok) => {
-            label = Some("post return identifier already defined".to_string());
-            location = Some(tok.location);
-            format!("post return identifier already defined")
-        }
-        ParserError::MixedInitializerListStyles(tok) => {
-            label = Some("initializer list items must be all named or all positional".to_string());
-            location = Some(tok.location);
-            format!("mixed initializer list styles")
-        }
-        ParserError::MissingInitializerDot(tok) => {
-            label = Some("named initializer items must start with '.'".to_string());
-            location = Some(tok.location);
-            format!("missing '.' before initializer item name")
-        }
-        ParserError::UnsupportedIncrement(tok) => {
-            label = Some("`++` is not supported".to_string());
-            location = Some(tok.location);
-            format!("`++` is not supported")
-        }
-        ParserError::UnsupportedDecrement(tok) => {
-            label = Some("`--` is not supported".to_string());
-            location = Some(tok.location);
-            format!("`--` is not supported")
+        FrontendError::InitializerListHasDuplicateFields {
+            first_found_definition,
+            conflicting_definition,
+        } => {
+            labels.push(Some("first field".to_string()));
+            locations.push(first_found_definition);
+            labels.push(Some("conflicting field".to_string()));
+            locations.push(conflicting_definition);
+            format!("duplicate fields in initializer list")
         }
     };
 
@@ -133,7 +164,7 @@ pub fn emit_parser_error<W: WriteColor>(
     writer.set_color(&error_spec)?;
     write!(writer, "error")?;
     writer.reset()?;
-    if let Some(loc) = &location {
+    if let Some(loc) = locations.first() {
         let mut cyan_spec = ColorSpec::new();
         cyan_spec.set_fg(Some(Color::Cyan));
         write!(writer, ": {message} at ")?;
@@ -154,8 +185,8 @@ pub fn emit_parser_error<W: WriteColor>(
         writeln!(writer, ": {message}")?;
     }
 
-    if let Some(loc) = location {
-        highlight_location(writer, &loc, label.as_deref(), input)?;
+    if !locations.is_empty() {
+        highlight_locations(writer, &locations, &labels, input)?;
     }
 
     Ok(())
@@ -269,7 +300,23 @@ fn operator_symbol(op: &Operator, has_equals: bool) -> String {
     symbol
 }
 
-fn highlight_location<W: WriteColor>(
+fn highlight_locations<W: WriteColor>(
+    writer: &mut W,
+    locations: &[SourceLocation],
+    labels: &[Option<String>],
+    input: &str,
+) -> io::Result<()> {
+    for (idx, loc) in locations.iter().enumerate() {
+        let label = labels.get(idx).and_then(|l| l.as_deref());
+        highlight_single_location(writer, loc, label, input)?;
+        if idx + 1 != locations.len() {
+            writeln!(writer)?;
+        }
+    }
+    Ok(())
+}
+
+fn highlight_single_location<W: WriteColor>(
     writer: &mut W,
     loc: &SourceLocation,
     label: Option<&str>,
@@ -281,11 +328,7 @@ fn highlight_location<W: WriteColor>(
     let raw_line = fetch_line(input, line_number);
     let (visual_line, columns) = visualize_line(raw_line);
 
-    let multi_line = loc.range.end.1 != loc.range.begin.1;
-    let mut end_column = loc.range.end.0.max(loc.range.begin.0 + 1) as usize;
-    if multi_line {
-        end_column = columns.len();
-    }
+    let end_column = loc.range.end.0.max(loc.range.begin.0 + 1) as usize;
 
     let start_offset = column_to_visual_offset(column_number, &columns);
     let mut end_offset = column_to_visual_offset(end_column, &columns);
@@ -353,11 +396,6 @@ fn highlight_location<W: WriteColor>(
     writer.reset()?;
     if let Some(text) = label {
         write!(writer, " {text}")?;
-        if multi_line {
-            write!(writer, " (spans multiple lines)")?;
-        }
-    } else if multi_line {
-        write!(writer, " (spans multiple lines)")?;
     }
     writeln!(writer)?;
 
@@ -437,4 +475,15 @@ fn write_source_line<W: WriteColor>(
         writer.reset()?;
     }
     Ok(())
+}
+
+pub fn pretty_print_multiple_errors(input: String, errors: Vec<FrontendError>) {
+    let mut first = true;
+    for err in errors {
+        if !first {
+            eprintln!();
+        }
+        pretty_print_error(err, input.as_str());
+        first = false;
+    }
 }

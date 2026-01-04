@@ -1,8 +1,8 @@
 #![allow(dead_code)]
 
-use clap::{Arg, Command};
-use heron::diagnostics::pretty_print_parser_error;
-use heron::frontend;
+use clap::{Arg, ArgAction, Command};
+use heron::diagnostics::{pretty_print_error, pretty_print_multiple_errors};
+use heron::frontend::{self, FrontendError, run_passes};
 
 fn main() {
     let matches = Command::new("heron")
@@ -13,7 +13,16 @@ fn main() {
                 .required(true)
                 .value_name("FILE"),
         )
+        .arg(
+            Arg::new("dump_ast")
+                .short('A')
+                .long("dump-ast")
+                .help("Dump the parsed AST")
+                .action(ArgAction::SetTrue),
+        )
         .get_matches();
+
+    let dump_ast = matches.get_flag("dump_ast");
 
     let file = matches
         .get_one::<String>("file")
@@ -35,20 +44,26 @@ fn main() {
     let errors = parser.take_errors();
     if errors.is_empty() {
         match ast {
-            Ok(ast) => println!(
-                "{}",
-                frontend::AST::pretty_format(format!("{}", ast).as_str())
+            Ok(ast) => {
+                if dump_ast {
+                    println!(
+                        "{}",
+                        frontend::AST::pretty_format(format!("{}", ast).as_str())
+                    );
+                }
+                let errors = run_passes(ast);
+                pretty_print_multiple_errors(input, errors);
+            }
+            Err(e) => pretty_print_error(
+                heron::frontend::FrontendError::ParseError(e),
+                input.as_str(),
             ),
-            Err(e) => pretty_print_parser_error(e, input.as_str()),
         }
     } else {
-        let mut first = true;
-        for err in errors {
-            if !first {
-                eprintln!();
-            }
-            pretty_print_parser_error(err, input.as_str());
-            first = false;
-        }
+        let errors = errors
+            .iter()
+            .map(|x| FrontendError::ParseError(x.clone()))
+            .collect();
+        pretty_print_multiple_errors(input, errors);
     }
 }

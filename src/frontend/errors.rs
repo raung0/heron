@@ -23,6 +23,7 @@ pub enum ParseError {
     UnsupportedDecrement(Token),
 }
 
+#[derive(Debug)]
 pub enum FrontendError {
     ParseError(ParseError),
     InvalidEnumeratedArrayEnum(SourceLocation),
