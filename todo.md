@@ -1,10 +1,17 @@
 - [ ] Implement frontend passes
-    - [x] Pass 1: Validate AST
+    - [ ] Pass 1: Re-order declarations in AST
+        - [ ] Use statements first
+        - [ ] Struct, union, etc definitions second
+        - [ ] Comptime definitions third
+        - [ ] Non-comptime definitions last
+    - [x] Pass 2: Validate AST
         - [x] Check that in arrays indexed by enum the type is nothing but identifier
         - [x] Initializer lists must not have duplicate fields
-    - [ ] Pass 2: Module resolution
-    - [ ] Pass 3: Type resolution
-    - [ ] Pass 4: Constexpr evaluation
-    - [ ] Pass 5: IR generation
+        - [ ] Check for cyclic dependencies in structs and unions
+        - [ ] Structs, unions must be inside comptime declarations
+    - [ ] Pass 3: Module resolution
+    - [ ] Pass 4: Type resolution and evaluation
+    - [ ] Pass 5: Comptime evaluation
+    - [ ] Pass 6: IR generation
 - [ ] Implement backend
 
