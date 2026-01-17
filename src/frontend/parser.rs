@@ -926,12 +926,6 @@ impl<'a> Parser<'a> {
                 Operator::BinAnd => {
                     self.next()?; // consume '&'
 
-                    let mut lifetime: Option<char> = None;
-                    if let TokenValue::Lifetime(c) = self.cur.v {
-                        lifetime = Some(c);
-                        self.next()?;
-                    }
-
                     let is_mut = self.cur.v == TokenValue::Keyword(crate::frontend::Keyword::Mut);
                     if is_mut {
                         self.next()?;
@@ -943,7 +937,6 @@ impl<'a> Parser<'a> {
                         l,
                         ASTValue::Ref {
                             mutable: is_mut,
-                            lifetime,
                             v: inner,
                         },
                     ))

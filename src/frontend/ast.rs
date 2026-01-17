@@ -343,7 +343,6 @@ pub enum ASTValue {
     UnaryMinus(Box<AST>),
     Ref {
         mutable: bool,
-        lifetime: Option<char>,
         v: Box<AST>,
     },
     Deref(Box<AST>),
@@ -766,14 +765,8 @@ impl fmt::Display for AST {
             UnaryMinus(v) => {
                 write!(f, "(UnaryMinus {})", v)
             }
-            Ref {
-                mutable,
-                lifetime,
-                v,
-            } => {
-                write!(f, "(Ref [mut: {}, lifetime: ", mutable)?;
-                write_opt_dbg(f, lifetime)?;
-                write!(f, "] {})", v)
+            Ref { mutable, v } => {
+                write!(f, "(Ref [mut: {}] {})", mutable, v)
             }
             Deref(v) => {
                 write!(f, "(Deref {})", v)

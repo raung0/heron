@@ -1148,17 +1148,8 @@ impl Formatter {
                 self.wrap_if_needed(out, self.unary_prec(), parent_prec)
             }
 
-            ASTValue::Ref {
-                mutable,
-                lifetime,
-                v,
-            } => {
+            ASTValue::Ref { mutable, v } => {
                 let mut out = String::from("&");
-                if let Some(l) = lifetime {
-                    out.push('\'');
-                    out.push(*l);
-                    out.push(' ');
-                }
                 if *mutable {
                     out.push_str("mut ");
                 }
