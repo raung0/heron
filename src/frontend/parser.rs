@@ -4507,13 +4507,8 @@ mod tests {
         let ast = parse_one(lx).expect("ok");
         match *ast {
             AST { ref v, .. } => match v {
-                ASTValue::Ref {
-                    mutable,
-                    lifetime,
-                    v,
-                } => {
+                ASTValue::Ref { mutable, v } => {
                     assert_eq!(*mutable, false);
-                    assert_eq!(*lifetime, None);
                     match **v {
                         AST { ref v, .. } => match v {
                             ASTValue::Id(s) => assert_eq!(s, "x"),
@@ -4522,31 +4517,6 @@ mod tests {
                     }
                 }
                 _ => panic!("expected Reference"),
-            },
-        }
-    }
-
-    #[test]
-    fn reference_lifetime_mut() {
-        let lx = Lexer::new("&'a mut foo".to_string(), "<test>".to_string());
-        let ast = parse_one(lx).expect("ok");
-        match *ast {
-            AST { ref v, .. } => match v {
-                ASTValue::Ref {
-                    mutable,
-                    lifetime,
-                    v,
-                } => {
-                    assert_eq!(*mutable, true);
-                    assert_eq!(*lifetime, Some('a'));
-                    match **v {
-                        AST { ref v, .. } => match v {
-                            ASTValue::Id(s) => assert_eq!(s, "foo"),
-                            _ => panic!("&'a mut should wrap Id"),
-                        },
-                    }
-                }
-                _ => panic!("expected Reference with lifetime+mut"),
             },
         }
     }
@@ -4905,13 +4875,8 @@ mod tests {
 
         assert_eq!(bindings.len(), 2, "expected two bindings");
         match &bindings[0].as_ref().v {
-            ASTValue::Ref {
-                mutable,
-                lifetime,
-                v,
-            } => {
+            ASTValue::Ref { mutable, v } => {
                 assert!(!*mutable, "binding should not be mutable");
-                assert_eq!(*lifetime, None, "unexpected lifetime on binding");
                 expect_id(v.as_ref(), "a");
             }
             _ => panic!("first binding should be a reference"),
