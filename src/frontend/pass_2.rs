@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use crate::frontend::{AST, ASTValue, FrontendError, InitializerItem, Type, walk_ast};
+use crate::frontend::{walk_ast, ASTValue, FrontendError, InitializerItem, Type, AST};
 
 pub(crate) fn pass_2(ast: &Box<AST>) -> Vec<FrontendError> {
 	let mut errors = Vec::<FrontendError>::new();
