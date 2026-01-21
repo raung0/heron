@@ -3,6 +3,7 @@ mod errors;
 mod lexer;
 mod parser;
 mod pass_1;
+mod pass_2;
 mod passes;
 
 pub use ast::*;

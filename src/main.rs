@@ -49,7 +49,7 @@ fn main() {
 						)
 					);
 				}
-				let errors = run_passes(ast);
+				let (_ast, errors) = run_passes(ast);
 				pretty_print_multiple_errors(input, errors);
 			}
 			Err(e) => pretty_print_error(

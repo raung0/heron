@@ -1,9 +1,9 @@
 - [ ] Implement frontend passes
-    - [ ] Pass 1: Re-order declarations in AST
-        - [ ] Use statements first
-        - [ ] Struct, union, etc definitions second
-        - [ ] Comptime definitions third
-        - [ ] Non-comptime definitions last
+    - [x] Pass 1: Re-order declarations in AST
+        - [x] Use statements first
+        - [x] Struct, union, etc definitions second
+        - [x] Comptime definitions third
+        - [x] Non-comptime definitions last
     - [x] Pass 2: Validate AST
         - [x] Check that in arrays indexed by enum the type is nothing but identifier
         - [x] Initializer lists must not have duplicate fields

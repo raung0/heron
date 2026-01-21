@@ -128,6 +128,13 @@ Direction :: enum {
 	Right
 }
 
+
+dirs :: [scope.Direction]Vector2 .{
+	.Up = .{ 1, 0 }
+	.Down = .{ -1, 0 }
+	.Left = .{ 0, -1 }
+	.Right = .{ 0, 1 }
+}
 dirs :: [Direction]Vector2 .{
 	.Up = .{ 1, 0 }
 	.Down = .{ -1, 0 }
