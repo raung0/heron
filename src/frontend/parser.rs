@@ -528,7 +528,6 @@ impl<'a> Parser<'a> {
 				Keyword::While => return self.parse_while(),
 				Keyword::For => return self.parse_for(),
 				Keyword::Return => return self.parse_return(),
-				Keyword::Throw => return self.parse_throw(),
 				Keyword::Defer => return self.parse_defer(),
 				Keyword::Match => return self.parse_match(),
 				Keyword::Fn => return self.parse_fn(),
@@ -540,12 +539,6 @@ impl<'a> Parser<'a> {
 				Keyword::Alias => return self.parse_alias(),
 				Keyword::Pub => return self.parse_pub(),
 				Keyword::Operator => {
-					return Err(ParseError::UnexpectedToken(
-						self.cur.clone(),
-						TokenValue::Id("expression".to_string()),
-					));
-				}
-				Keyword::Throws => {
 					return Err(ParseError::UnexpectedToken(
 						self.cur.clone(),
 						TokenValue::Id("expression".to_string()),
@@ -1209,15 +1202,6 @@ impl<'a> Parser<'a> {
 		Ok(AST::from(loc, ASTValue::Return(v)))
 	}
 
-	fn parse_throw(&mut self) -> ParseResult {
-		let mut loc = self.cur.location.clone();
-		self.next()?; // consume 'throw'
-
-		let v = self.parse_expression()?;
-		loc.range.end = v.location.range.end;
-		Ok(AST::from(loc, ASTValue::Throw(v)))
-	}
-
 	fn parse_defer(&mut self) -> ParseResult {
 		let mut loc = self.cur.location.clone();
 		self.next()?; // consume 'defer'
@@ -1508,12 +1492,10 @@ impl<'a> Parser<'a> {
 		};
 		self.consume_semicolons()?;
 
-		let mut throws: Vec<Box<Type>> = Vec::new();
 		let mut pre: Vec<Box<AST>> = Vec::new();
 		let mut post: Option<PostClause> = None;
 
 		let contract_stop = &[
-			TokenValue::Keyword(Keyword::Throws),
 			TokenValue::Keyword(Keyword::Pre),
 			TokenValue::Keyword(Keyword::Post),
 			TokenValue::Keyword(Keyword::Where),
@@ -1525,38 +1507,9 @@ impl<'a> Parser<'a> {
 
 		while matches!(
 			self.cur.v,
-			TokenValue::Keyword(Keyword::Throws)
-				| TokenValue::Keyword(Keyword::Pre)
-				| TokenValue::Keyword(Keyword::Post)
+			TokenValue::Keyword(Keyword::Pre) | TokenValue::Keyword(Keyword::Post)
 		) {
 			match self.cur.v.clone() {
-				TokenValue::Keyword(Keyword::Throws) => {
-					self.next()?; // consume 'throws'
-					throws.push(self.parse_type_inner()?);
-					loop {
-						match self.cur.v {
-							TokenValue::Comma => {
-								self.next()?;
-								throws.push(
-									self.parse_type_inner()?
-								);
-							}
-							TokenValue::Semicolon => {
-								if self.token_starts_type(
-									&self.next.v,
-								) {
-									self.next()?; // consume ';'
-									throws.push(self
-										.parse_type_inner(
-										)?);
-								} else {
-									break;
-								}
-							}
-							_ => break,
-						}
-					}
-				}
 				TokenValue::Keyword(Keyword::Pre) => {
 					self.next()?; // consume 'pre'
 					let list_ast =
@@ -1694,7 +1647,6 @@ impl<'a> Parser<'a> {
 				generics,
 				params,
 				return_type,
-				throws,
 				pre,
 				post,
 				where_clause,
@@ -3759,34 +3711,6 @@ mod tests {
 	}
 
 	#[test]
-	fn throw_parses_as_expression() {
-		let ast = parse_expr(Lexer::new(
-			"throw core.Exception()".to_string(),
-			"<test>".to_string(),
-		))
-		.expect("ok");
-		match &ast.v {
-			ASTValue::Throw(inner) => {
-				let has_call = matches!(inner.v, ASTValue::Call { .. })
-					|| matches!(
-						inner.v,
-						ASTValue::BinExpr {
-							op: Operator::Dot,
-							rhs: _,
-							..
-						}
-					) && inner.to_string().contains("(Call");
-				assert!(
-					has_call,
-					"expected throw payload to contain a call, got {}",
-					inner
-				);
-			}
-			_ => panic!("expected Throw, got {}", ast),
-		}
-	}
-
-	#[test]
 	fn defer_parses_as_expression() {
 		let ast = parse_expr(Lexer::new(
 			"defer cleanup()".to_string(),
@@ -3817,7 +3741,7 @@ mod tests {
 	#[test]
 	fn match_parses_with_cases_and_default() {
 		let ast = parse_expr(Lexer::new(
-			"match r { case \"x\" if 0 < N -> 0; case -> throw e; }".to_string(),
+			"match r { case \"x\" if 0 < N -> 0; case -> e; }".to_string(),
 			"<test>".to_string(),
 		))
 		.expect("ok");
@@ -3841,13 +3765,6 @@ mod tests {
 
 				assert!(matches!(cases[1].pattern, MatchCasePattern::Default));
 				assert!(cases[1].guard.is_none());
-				match &cases[1].body.v {
-					ASTValue::Throw(_) => {}
-					_ => panic!(
-						"expected default case body to be Throw, got {}",
-						cases[1].body
-					),
-				}
 			}
 			_ => panic!("expected Match, got {}", ast),
 		}
@@ -5271,7 +5188,6 @@ mod tests {
 				generics,
 				params,
 				return_type,
-				throws,
 				pre,
 				post,
 				where_clause,
@@ -5285,7 +5201,6 @@ mod tests {
 					params[0].ty.as_ref().map(|t| t.as_ref()),
 					Some(&crate::frontend::Type::Id("int".to_string()))
 				);
-				assert!(throws.is_empty());
 				assert!(pre.is_empty());
 				assert!(post.is_none());
 				assert!(where_clause.is_none());
@@ -5659,51 +5574,6 @@ mod tests {
 	}
 
 	#[test]
-	fn type_fn_cannot_include_throws() {
-		let err = parse_expr(Lexer::new(
-			"f: fn() -> int throws core.Exception".to_string(),
-			"<test>".to_string(),
-		))
-		.err()
-		.expect("expected error");
-		match err {
-			ParseError::ExpectedToken(_, _)
-			| ParseError::UnexpectedToken(_, _)
-			| ParseError::InvalidDeclarationType(_) => {}
-			_ => panic!("expected a parse error about invalid type syntax"),
-		}
-	}
-
-	#[test]
-	fn fn_can_throw_multiple_with_comma_and_semicolon() {
-		let lx = Lexer::new("fn() throws A, B; C do 1".to_string(), "<test>".to_string());
-		let ast = parse_one(lx).expect("ok");
-
-		match &ast.v {
-			ASTValue::Fn { throws, body, .. } => {
-				assert_eq!(throws.len(), 3);
-				assert_eq!(
-					*throws[0].as_ref(),
-					crate::frontend::Type::Id("A".to_string())
-				);
-				assert_eq!(
-					*throws[1].as_ref(),
-					crate::frontend::Type::Id("B".to_string())
-				);
-				assert_eq!(
-					*throws[2].as_ref(),
-					crate::frontend::Type::Id("C".to_string())
-				);
-				match body {
-					FnBody::Expr(expr) => expect_integer(expr.as_ref(), 1),
-					_ => panic!("expected do-body expression"),
-				}
-			}
-			_ => panic!("expected Fn"),
-		}
-	}
-
-	#[test]
 	fn fn_contract_pre_parses_expression_list() {
 		let lx = Lexer::new("fn() pre 1, 2; 3 do 0".to_string(), "<test>".to_string());
 		let ast = parse_one(lx).expect("ok");
@@ -5711,40 +5581,6 @@ mod tests {
 		match &ast.v {
 			ASTValue::Fn { pre, body, .. } => {
 				assert_eq!(pre.len(), 3);
-				match body {
-					FnBody::Expr(expr) => expect_integer(expr.as_ref(), 0),
-					_ => panic!("expected do-body expression"),
-				}
-			}
-			_ => panic!("expected Fn"),
-		}
-	}
-
-	#[test]
-	fn fn_contract_order_of_throws_pre_post_does_not_matter() {
-		let lx = Lexer::new(
-			"fn() post r: r; r + 1 pre 1 throws A do 0".to_string(),
-			"<test>".to_string(),
-		);
-		let ast = parse_one(lx).expect("ok");
-
-		match &ast.v {
-			ASTValue::Fn {
-				throws,
-				pre,
-				post,
-				body,
-				..
-			} => {
-				assert_eq!(throws.len(), 1);
-				assert_eq!(
-					*throws[0].as_ref(),
-					crate::frontend::Type::Id("A".to_string())
-				);
-				assert_eq!(pre.len(), 1);
-				let post = post.as_ref().expect("post clause");
-				assert_eq!(post.return_id.as_deref(), Some("r"));
-				assert_eq!(post.conditions.len(), 2);
 				match body {
 					FnBody::Expr(expr) => expect_integer(expr.as_ref(), 0),
 					_ => panic!("expected do-body expression"),

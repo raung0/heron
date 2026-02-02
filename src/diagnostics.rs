@@ -267,8 +267,6 @@ fn keyword_lexeme(keyword: &Keyword) -> &'static str {
 		Keyword::Do => "do",
 		Keyword::Extends => "extends",
 		Keyword::Operator => "operator",
-		Keyword::Throws => "throws",
-		Keyword::Throw => "throw",
 		Keyword::Return => "return",
 		Keyword::Match => "match",
 		Keyword::Case => "case",

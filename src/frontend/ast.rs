@@ -385,7 +385,6 @@ pub enum ASTValue {
 	ExprList(Vec<Box<AST>>),
 	ExprListNoScope(Vec<Box<AST>>),
 	Return(Option<Box<AST>>),
-	Throw(Box<AST>),
 	Defer(Box<AST>),
 	DotId(String),
 	Match {
@@ -434,7 +433,6 @@ pub enum ASTValue {
 		generics: Vec<GenericParam>,
 		params: Vec<FnParam>,
 		return_type: Option<Box<Type>>,
-		throws: Vec<Box<Type>>,
 		pre: Vec<Box<AST>>,
 		post: Option<PostClause>,
 		where_clause: Option<Box<AST>>,
@@ -869,9 +867,6 @@ impl fmt::Display for AST {
 					write!(f, "(Return)")
 				}
 			}
-			Throw(v) => {
-				write!(f, "(Throw {})", v)
-			}
 			Defer(v) => {
 				write!(f, "(Defer {})", v)
 			}
@@ -1032,7 +1027,6 @@ impl fmt::Display for AST {
 				generics,
 				params,
 				return_type,
-				throws,
 				pre,
 				post,
 				where_clause,
@@ -1046,14 +1040,6 @@ impl fmt::Display for AST {
 				write_param_list(f, params)?;
 				if let Some(rt) = return_type {
 					write!(f, " [ret: {}]", quote_type(rt.as_ref()))?;
-				}
-				if !throws.is_empty() {
-					let throws_s = throws
-						.iter()
-						.map(|t| quote_type(t.as_ref()))
-						.collect::<Vec<_>>()
-						.join(", ");
-					write!(f, " [throws: {}]", throws_s)?;
 				}
 				if !pre.is_empty() {
 					write!(f, " (Pre")?;
@@ -1164,7 +1150,6 @@ where
 		| ASTValue::Mut(v)
 		| ASTValue::PtrOf(v)
 		| ASTValue::Defer(v)
-		| ASTValue::Throw(v)
 		| ASTValue::Pub(v) => {
 			walk_ast(v, Some(node), predicate);
 		}

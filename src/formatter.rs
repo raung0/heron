@@ -367,10 +367,6 @@ impl Formatter {
 					self.out.push_str(&self.format_expr(value, 0));
 				}
 			}
-			ASTValue::Throw(value) => {
-				self.out.push_str("throw ");
-				self.out.push_str(&self.format_expr(value, 0));
-			}
 			ASTValue::Defer(value) => {
 				self.out.push_str("defer ");
 				self.out.push_str(&self.format_expr(value, 0));
@@ -481,7 +477,6 @@ impl Formatter {
 							generics,
 							params,
 							return_type,
-							throws,
 							pre,
 							post,
 							where_clause,
@@ -493,7 +488,6 @@ impl Formatter {
 							generics,
 							params,
 							return_type.as_deref(),
-							throws,
 							pre,
 							post.as_ref(),
 							where_clause.as_deref(),
@@ -521,7 +515,6 @@ impl Formatter {
 							generics,
 							params,
 							return_type,
-							throws,
 							pre,
 							post,
 							where_clause,
@@ -533,7 +526,6 @@ impl Formatter {
 							generics,
 							params,
 							return_type.as_deref(),
-							throws,
 							pre,
 							post.as_ref(),
 							where_clause.as_deref(),
@@ -555,7 +547,6 @@ impl Formatter {
 							generics,
 							params,
 							return_type,
-							throws,
 							pre,
 							post,
 							where_clause,
@@ -567,7 +558,6 @@ impl Formatter {
 							generics,
 							params,
 							return_type.as_deref(),
-							throws,
 							pre,
 							post.as_ref(),
 							where_clause.as_deref(),
@@ -585,7 +575,6 @@ impl Formatter {
 				generics,
 				params,
 				return_type,
-				throws,
 				pre,
 				post,
 				where_clause,
@@ -597,7 +586,6 @@ impl Formatter {
 				generics,
 				params,
 				return_type.as_deref(),
-				throws,
 				pre,
 				post.as_ref(),
 				where_clause.as_deref(),
@@ -827,7 +815,6 @@ impl Formatter {
 		generics: &[GenericParam],
 		params: &[FnParam],
 		return_type: Option<&Type>,
-		throws: &[Box<Type>],
 		pre: &[Box<AST>],
 		post: Option<&PostClause>,
 		where_clause: Option<&AST>,
@@ -940,15 +927,13 @@ impl Formatter {
 		let multiline_clauses = wraps_signature
 			|| !pre.is_empty() || post.is_some()
 			|| where_clause.is_some()
-			|| !ensures.is_empty()
-			|| (throws.len() > 1);
+			|| !ensures.is_empty();
 
 		let clause_indent = self.indent + 1;
 
 		self.format_fn_clauses(
 			multiline_clauses,
 			clause_indent,
-			throws,
 			pre,
 			post,
 			where_clause,
@@ -1308,7 +1293,6 @@ impl Formatter {
 			| ASTValue::Set(..)
 			| ASTValue::SetMulti { .. }
 			| ASTValue::Return(..)
-			| ASTValue::Throw(..)
 			| ASTValue::Defer(..)
 			| ASTValue::Pub(..) => self.format_stmt_inline_at_indent(ast, self.indent),
 		}
@@ -1950,23 +1934,11 @@ impl Formatter {
 		&mut self,
 		multiline_clauses: bool,
 		clause_indent: usize,
-		throws: &[Box<Type>],
 		pre: &[Box<AST>],
 		post: Option<&PostClause>,
 		where_clause: Option<&AST>,
 		ensures: &[EnsuresClause],
 	) {
-		if !throws.is_empty() {
-			let throws_s = throws
-				.iter()
-				.map(|t| self.format_type(t))
-				.collect::<Vec<_>>()
-				.join(", ");
-			self.emit_clause(multiline_clauses, clause_indent, "throws ", |f| {
-				f.out.push_str(&throws_s);
-			});
-		}
-
 		if !pre.is_empty() {
 			let pre_s = self.format_expr_list_inline(pre, ", ");
 			self.emit_clause(multiline_clauses, clause_indent, "pre ", |f| {

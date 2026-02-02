@@ -45,8 +45,7 @@ generic_id :: fn<'a; T: type; N: u32>(
 	y: [N]T
 ) -> &'a T do x
 
-throws_fn :: fn() throws core.Exception, []int; YourMum
-{
+throws_fn :: fn() {
 	123
 }
 
