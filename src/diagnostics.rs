@@ -169,6 +169,13 @@ pub fn emit_error<W: WriteColor>(
 			locations.push(conflicting_definition);
 			format!("duplicate fields in initializer list")
 		}
+		FrontendError::StructOrUnionNotInComptimeDeclaration(source_location) => {
+			labels.push(Some(
+				"structs and unions must be in comptime declarations".to_string()
+			));
+			locations.push(source_location);
+			format!("structs and unions must be in comptime declarations")
+		}
 	};
 
 	let mut error_spec = ColorSpec::new();

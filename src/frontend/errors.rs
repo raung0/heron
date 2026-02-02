@@ -31,4 +31,5 @@ pub enum FrontendError {
 		first_found_definition: SourceLocation,
 		conflicting_definition: SourceLocation,
 	},
+	StructOrUnionNotInComptimeDeclaration(SourceLocation),
 }
