@@ -7,11 +7,12 @@
     - [x] Pass 2: Validate AST
         - [x] Check that in arrays indexed by enum the type is nothing but identifier
         - [x] Initializer lists must not have duplicate fields
-        - [ ] Check for cyclic dependencies in structs and unions
         - [ ] Structs, unions must be inside comptime declarations
     - [ ] Pass 3: Module resolution
     - [ ] Pass 4: Type resolution and evaluation
-    - [ ] Pass 5: Comptime evaluation
-    - [ ] Pass 6: IR generation
+    - [ ] Pass 5: Validate typed AST
+        - [ ] Check for cyclic dependencies in structs and unions
+    - [ ] Pass 6: Comptime evaluation
+    - [ ] Pass 7: IR generation
 - [ ] Implement backend
 
