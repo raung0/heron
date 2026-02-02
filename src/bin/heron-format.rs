@@ -2,7 +2,7 @@ use clap::{Arg, ArgAction, Command};
 use heron::frontend;
 use heron::{
 	diagnostics::pretty_print_error,
-	formatter::{FormatConfig, FormatOptions, format_ast_with_options},
+	formatter::{format_ast_with_options, FormatConfig, FormatOptions},
 };
 
 fn main() {
@@ -10,7 +10,7 @@ fn main() {
 		.about("Heron formatter")
 		.arg(Arg::new("file")
 			.help("Path(s) to the Heron source file(s) to format")
-			.required(true)
+			.required_unless_present("default_config")
 			.value_name("FILE")
 			.num_args(1..))
 		.arg(Arg::new("option")
@@ -23,7 +23,25 @@ fn main() {
 			.long("in-place")
 			.help("Overwrite the input file instead of writing to stdout")
 			.action(ArgAction::SetTrue))
+		.arg(Arg::new("default_config")
+			.long("default-config")
+			.help("Print the default .heron-format configuration")
+			.action(ArgAction::SetTrue))
 		.get_matches();
+
+	if matches.get_flag("default_config") {
+		let config_str =
+			FormatOptions::default()
+				.to_config_string()
+				.unwrap_or_else(|err| {
+					eprintln!(
+						"error: failed to serialize default config: {err}"
+					);
+					std::process::exit(1);
+				});
+		print!("{config_str}");
+		return;
+	}
 
 	let files: Vec<String> = matches
 		.get_many::<String>("file")

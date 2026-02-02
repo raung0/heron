@@ -1,14 +1,15 @@
 use crate::frontend::{
-	AST, ASTValue, EnsuresClause, FnBody, FnParam, GenericArg, GenericParam, InitializerItem,
+	ASTValue, EnsuresClause, FnBody, FnParam, GenericArg, GenericParam, InitializerItem,
 	MatchBinder, MatchCase, MatchCasePattern, Operator, PostClause, SourceLocation, Trivia,
-	TriviaKind, Type,
+	TriviaKind, Type, AST,
 };
 use serde::de::{self, Visitor};
-use serde::{Deserialize, Deserializer};
+use serde::ser::{self, SerializeStruct};
+use serde::{Deserialize, Deserializer, Serialize};
 use std::cell::Cell;
 use std::fs::read_to_string;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
 pub struct FormatOptions {
 	pub use_tabs: bool,
 	pub tab_size: usize,
@@ -48,6 +49,13 @@ impl Default for FormatOptions {
 }
 
 impl FormatOptions {
+	pub fn to_config_string(&self) -> Result<String, String> {
+		let mut serializer = IniSerializer::new();
+		self.serialize(&mut serializer)
+			.map_err(|err| err.to_string())?;
+		Ok(serializer.finish())
+	}
+
 	pub fn apply_config(&mut self, config: &FormatConfig) -> Result<(), String> {
 		if let Some(use_tabs) = config.use_tabs {
 			self.use_tabs = use_tabs;
@@ -74,6 +82,437 @@ impl FormatOptions {
 			self.trailing_newline = trailing_newline;
 		}
 		Ok(())
+	}
+}
+
+struct IniSerializer {
+	entries: Vec<(String, String)>,
+}
+
+impl IniSerializer {
+	fn new() -> Self {
+		Self {
+			entries: Vec::new(),
+		}
+	}
+
+	fn finish(self) -> String {
+		let mut out = String::new();
+		for (key, value) in self.entries {
+			out.push_str(&key);
+			out.push('=');
+			out.push_str(&value);
+			out.push('\n');
+		}
+		out
+	}
+}
+
+impl<'a> ser::Serializer for &'a mut IniSerializer {
+	type Ok = ();
+	type Error = IniSerializeError;
+	type SerializeSeq = ser::Impossible<(), IniSerializeError>;
+	type SerializeTuple = ser::Impossible<(), IniSerializeError>;
+	type SerializeTupleStruct = ser::Impossible<(), IniSerializeError>;
+	type SerializeTupleVariant = ser::Impossible<(), IniSerializeError>;
+	type SerializeMap = ser::Impossible<(), IniSerializeError>;
+	type SerializeStruct = IniSerializeStruct<'a>;
+	type SerializeStructVariant = ser::Impossible<(), IniSerializeError>;
+
+	fn serialize_struct(
+		self,
+		_name: &'static str,
+		_len: usize,
+	) -> Result<Self::SerializeStruct, Self::Error> {
+		Ok(IniSerializeStruct { serializer: self })
+	}
+
+	fn serialize_bool(self, _value: bool) -> Result<Self::Ok, Self::Error> {
+		Err(IniSerializeError::UnsupportedType("bool"))
+	}
+
+	fn serialize_i8(self, _value: i8) -> Result<Self::Ok, Self::Error> {
+		Err(IniSerializeError::UnsupportedType("i8"))
+	}
+
+	fn serialize_i16(self, _value: i16) -> Result<Self::Ok, Self::Error> {
+		Err(IniSerializeError::UnsupportedType("i16"))
+	}
+
+	fn serialize_i32(self, _value: i32) -> Result<Self::Ok, Self::Error> {
+		Err(IniSerializeError::UnsupportedType("i32"))
+	}
+
+	fn serialize_i64(self, _value: i64) -> Result<Self::Ok, Self::Error> {
+		Err(IniSerializeError::UnsupportedType("i64"))
+	}
+
+	fn serialize_i128(self, _value: i128) -> Result<Self::Ok, Self::Error> {
+		Err(IniSerializeError::UnsupportedType("i128"))
+	}
+
+	fn serialize_u8(self, _value: u8) -> Result<Self::Ok, Self::Error> {
+		Err(IniSerializeError::UnsupportedType("u8"))
+	}
+
+	fn serialize_u16(self, _value: u16) -> Result<Self::Ok, Self::Error> {
+		Err(IniSerializeError::UnsupportedType("u16"))
+	}
+
+	fn serialize_u32(self, _value: u32) -> Result<Self::Ok, Self::Error> {
+		Err(IniSerializeError::UnsupportedType("u32"))
+	}
+
+	fn serialize_u64(self, _value: u64) -> Result<Self::Ok, Self::Error> {
+		Err(IniSerializeError::UnsupportedType("u64"))
+	}
+
+	fn serialize_u128(self, _value: u128) -> Result<Self::Ok, Self::Error> {
+		Err(IniSerializeError::UnsupportedType("u128"))
+	}
+
+	fn serialize_f32(self, _value: f32) -> Result<Self::Ok, Self::Error> {
+		Err(IniSerializeError::UnsupportedType("f32"))
+	}
+
+	fn serialize_f64(self, _value: f64) -> Result<Self::Ok, Self::Error> {
+		Err(IniSerializeError::UnsupportedType("f64"))
+	}
+
+	fn serialize_char(self, _value: char) -> Result<Self::Ok, Self::Error> {
+		Err(IniSerializeError::UnsupportedType("char"))
+	}
+
+	fn serialize_str(self, _value: &str) -> Result<Self::Ok, Self::Error> {
+		Err(IniSerializeError::UnsupportedType("str"))
+	}
+
+	fn serialize_bytes(self, _value: &[u8]) -> Result<Self::Ok, Self::Error> {
+		Err(IniSerializeError::UnsupportedType("bytes"))
+	}
+
+	fn serialize_none(self) -> Result<Self::Ok, Self::Error> {
+		Err(IniSerializeError::UnsupportedType("none"))
+	}
+
+	fn serialize_some<T: ?Sized>(self, _value: &T) -> Result<Self::Ok, Self::Error>
+	where
+		T: Serialize,
+	{
+		Err(IniSerializeError::UnsupportedType("some"))
+	}
+
+	fn serialize_unit(self) -> Result<Self::Ok, Self::Error> {
+		Err(IniSerializeError::UnsupportedType("unit"))
+	}
+
+	fn serialize_unit_struct(self, _name: &'static str) -> Result<Self::Ok, Self::Error> {
+		Err(IniSerializeError::UnsupportedType("unit_struct"))
+	}
+
+	fn serialize_unit_variant(
+		self,
+		_name: &'static str,
+		_variant_index: u32,
+		_variant: &'static str,
+	) -> Result<Self::Ok, Self::Error> {
+		Err(IniSerializeError::UnsupportedType("unit_variant"))
+	}
+
+	fn serialize_newtype_struct<T: ?Sized>(
+		self,
+		_name: &'static str,
+		_value: &T,
+	) -> Result<Self::Ok, Self::Error>
+	where
+		T: Serialize,
+	{
+		Err(IniSerializeError::UnsupportedType("newtype_struct"))
+	}
+
+	fn serialize_newtype_variant<T: ?Sized>(
+		self,
+		_name: &'static str,
+		_variant_index: u32,
+		_variant: &'static str,
+		_value: &T,
+	) -> Result<Self::Ok, Self::Error>
+	where
+		T: Serialize,
+	{
+		Err(IniSerializeError::UnsupportedType("newtype_variant"))
+	}
+
+	fn serialize_seq(self, _len: Option<usize>) -> Result<Self::SerializeSeq, Self::Error> {
+		Err(IniSerializeError::UnsupportedType("seq"))
+	}
+
+	fn serialize_tuple(self, _len: usize) -> Result<Self::SerializeTuple, Self::Error> {
+		Err(IniSerializeError::UnsupportedType("tuple"))
+	}
+
+	fn serialize_tuple_struct(
+		self,
+		_name: &'static str,
+		_len: usize,
+	) -> Result<Self::SerializeTupleStruct, Self::Error> {
+		Err(IniSerializeError::UnsupportedType("tuple_struct"))
+	}
+
+	fn serialize_tuple_variant(
+		self,
+		_name: &'static str,
+		_variant_index: u32,
+		_variant: &'static str,
+		_len: usize,
+	) -> Result<Self::SerializeTupleVariant, Self::Error> {
+		Err(IniSerializeError::UnsupportedType("tuple_variant"))
+	}
+
+	fn serialize_map(self, _len: Option<usize>) -> Result<Self::SerializeMap, Self::Error> {
+		Err(IniSerializeError::UnsupportedType("map"))
+	}
+
+	fn serialize_struct_variant(
+		self,
+		_name: &'static str,
+		_variant_index: u32,
+		_variant: &'static str,
+		_len: usize,
+	) -> Result<Self::SerializeStructVariant, Self::Error> {
+		Err(IniSerializeError::UnsupportedType("struct_variant"))
+	}
+}
+
+struct IniSerializeStruct<'a> {
+	serializer: &'a mut IniSerializer,
+}
+
+impl<'a> SerializeStruct for IniSerializeStruct<'a> {
+	type Ok = ();
+	type Error = IniSerializeError;
+
+	fn serialize_field<T: ?Sized>(
+		&mut self,
+		key: &'static str,
+		value: &T,
+	) -> Result<(), Self::Error>
+	where
+		T: Serialize,
+	{
+		let rendered = value.serialize(IniValueSerializer)?;
+		self.serializer.entries.push((key.to_string(), rendered));
+		Ok(())
+	}
+
+	fn end(self) -> Result<Self::Ok, Self::Error> {
+		Ok(())
+	}
+}
+
+struct IniValueSerializer;
+
+impl ser::Serializer for IniValueSerializer {
+	type Ok = String;
+	type Error = IniSerializeError;
+	type SerializeSeq = ser::Impossible<String, IniSerializeError>;
+	type SerializeTuple = ser::Impossible<String, IniSerializeError>;
+	type SerializeTupleStruct = ser::Impossible<String, IniSerializeError>;
+	type SerializeTupleVariant = ser::Impossible<String, IniSerializeError>;
+	type SerializeMap = ser::Impossible<String, IniSerializeError>;
+	type SerializeStruct = ser::Impossible<String, IniSerializeError>;
+	type SerializeStructVariant = ser::Impossible<String, IniSerializeError>;
+
+	fn serialize_bool(self, value: bool) -> Result<Self::Ok, Self::Error> {
+		Ok(if value { "true" } else { "false" }.to_string())
+	}
+
+	fn serialize_i8(self, value: i8) -> Result<Self::Ok, Self::Error> {
+		Ok(value.to_string())
+	}
+
+	fn serialize_i16(self, value: i16) -> Result<Self::Ok, Self::Error> {
+		Ok(value.to_string())
+	}
+
+	fn serialize_i32(self, value: i32) -> Result<Self::Ok, Self::Error> {
+		Ok(value.to_string())
+	}
+
+	fn serialize_i64(self, value: i64) -> Result<Self::Ok, Self::Error> {
+		Ok(value.to_string())
+	}
+
+	fn serialize_i128(self, value: i128) -> Result<Self::Ok, Self::Error> {
+		Ok(value.to_string())
+	}
+
+	fn serialize_u8(self, value: u8) -> Result<Self::Ok, Self::Error> {
+		Ok(value.to_string())
+	}
+
+	fn serialize_u16(self, value: u16) -> Result<Self::Ok, Self::Error> {
+		Ok(value.to_string())
+	}
+
+	fn serialize_u32(self, value: u32) -> Result<Self::Ok, Self::Error> {
+		Ok(value.to_string())
+	}
+
+	fn serialize_u64(self, value: u64) -> Result<Self::Ok, Self::Error> {
+		Ok(value.to_string())
+	}
+
+	fn serialize_u128(self, value: u128) -> Result<Self::Ok, Self::Error> {
+		Ok(value.to_string())
+	}
+
+	fn serialize_f32(self, value: f32) -> Result<Self::Ok, Self::Error> {
+		Ok(value.to_string())
+	}
+
+	fn serialize_f64(self, value: f64) -> Result<Self::Ok, Self::Error> {
+		Ok(value.to_string())
+	}
+
+	fn serialize_char(self, value: char) -> Result<Self::Ok, Self::Error> {
+		Ok(value.to_string())
+	}
+
+	fn serialize_str(self, value: &str) -> Result<Self::Ok, Self::Error> {
+		Ok(value.to_string())
+	}
+
+	fn serialize_bytes(self, _value: &[u8]) -> Result<Self::Ok, Self::Error> {
+		Err(IniSerializeError::UnsupportedType("bytes"))
+	}
+
+	fn serialize_none(self) -> Result<Self::Ok, Self::Error> {
+		Err(IniSerializeError::UnsupportedType("none"))
+	}
+
+	fn serialize_some<T: ?Sized>(self, _value: &T) -> Result<Self::Ok, Self::Error>
+	where
+		T: Serialize,
+	{
+		Err(IniSerializeError::UnsupportedType("some"))
+	}
+
+	fn serialize_unit(self) -> Result<Self::Ok, Self::Error> {
+		Err(IniSerializeError::UnsupportedType("unit"))
+	}
+
+	fn serialize_unit_struct(self, _name: &'static str) -> Result<Self::Ok, Self::Error> {
+		Err(IniSerializeError::UnsupportedType("unit_struct"))
+	}
+
+	fn serialize_unit_variant(
+		self,
+		_name: &'static str,
+		_variant_index: u32,
+		_variant: &'static str,
+	) -> Result<Self::Ok, Self::Error> {
+		Err(IniSerializeError::UnsupportedType("unit_variant"))
+	}
+
+	fn serialize_newtype_struct<T: ?Sized>(
+		self,
+		_name: &'static str,
+		_value: &T,
+	) -> Result<Self::Ok, Self::Error>
+	where
+		T: Serialize,
+	{
+		Err(IniSerializeError::UnsupportedType("newtype_struct"))
+	}
+
+	fn serialize_newtype_variant<T: ?Sized>(
+		self,
+		_name: &'static str,
+		_variant_index: u32,
+		_variant: &'static str,
+		_value: &T,
+	) -> Result<Self::Ok, Self::Error>
+	where
+		T: Serialize,
+	{
+		Err(IniSerializeError::UnsupportedType("newtype_variant"))
+	}
+
+	fn serialize_seq(self, _len: Option<usize>) -> Result<Self::SerializeSeq, Self::Error> {
+		Err(IniSerializeError::UnsupportedType("seq"))
+	}
+
+	fn serialize_tuple(self, _len: usize) -> Result<Self::SerializeTuple, Self::Error> {
+		Err(IniSerializeError::UnsupportedType("tuple"))
+	}
+
+	fn serialize_tuple_struct(
+		self,
+		_name: &'static str,
+		_len: usize,
+	) -> Result<Self::SerializeTupleStruct, Self::Error> {
+		Err(IniSerializeError::UnsupportedType("tuple_struct"))
+	}
+
+	fn serialize_tuple_variant(
+		self,
+		_name: &'static str,
+		_variant_index: u32,
+		_variant: &'static str,
+		_len: usize,
+	) -> Result<Self::SerializeTupleVariant, Self::Error> {
+		Err(IniSerializeError::UnsupportedType("tuple_variant"))
+	}
+
+	fn serialize_map(self, _len: Option<usize>) -> Result<Self::SerializeMap, Self::Error> {
+		Err(IniSerializeError::UnsupportedType("map"))
+	}
+
+	fn serialize_struct(
+		self,
+		_name: &'static str,
+		_len: usize,
+	) -> Result<Self::SerializeStruct, Self::Error> {
+		Err(IniSerializeError::UnsupportedType("struct"))
+	}
+
+	fn serialize_struct_variant(
+		self,
+		_name: &'static str,
+		_variant_index: u32,
+		_variant: &'static str,
+		_len: usize,
+	) -> Result<Self::SerializeStructVariant, Self::Error> {
+		Err(IniSerializeError::UnsupportedType("struct_variant"))
+	}
+}
+
+#[derive(Debug)]
+enum IniSerializeError {
+	UnsupportedType(&'static str),
+	Custom(String),
+}
+
+impl std::fmt::Display for IniSerializeError {
+	fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		match self {
+			IniSerializeError::UnsupportedType(kind) => {
+				write!(
+					formatter,
+					"unsupported type for config serialization: {kind}"
+				)
+			}
+			IniSerializeError::Custom(message) => formatter.write_str(message),
+		}
+	}
+}
+
+impl std::error::Error for IniSerializeError {}
+
+impl ser::Error for IniSerializeError {
+	fn custom<T: std::fmt::Display>(msg: T) -> Self {
+		IniSerializeError::Custom(msg.to_string())
 	}
 }
 
