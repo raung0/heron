@@ -16,11 +16,11 @@ swizzle :: fn<'a; T; N; M: u32> (
 {
 	parse_rune :: fn (r: rune) -> Try<u32, core.GenericError> {
 		match r {
-			case 'x' | 'r' | 's' | 'u' if 0 < N -> Try.Ok(0)
-			case 'y' | 'g' | 't' | 'v' if 1 < N -> Try.Ok(1)
-			case 'z' | 'b' | 'p'       if 2 < N -> Try.Ok(2)
-			case 'w' | 'a' | 'q'       if 3 < N -> Try.Ok(3)
-			case -> Try.Error(core.GenericError("Invalid swizzle accessor"))
+			case 'x' | 'r' | 's' | 'u' if 0 < N -> Ok(0)
+			case 'y' | 'g' | 't' | 'v' if 1 < N -> Ok(1)
+			case 'z' | 'b' | 'p'       if 2 < N -> Ok(2)
+			case 'w' | 'a' | 'q'       if 3 < N -> Ok(3)
+			case -> Error(core.GenericError("Invalid swizzle accessor"))
 		}
 	}
 
@@ -28,7 +28,7 @@ swizzle :: fn<'a; T; N; M: u32> (
 	for i := mut 0; i < M; i += 1 {
 		ret[i] = vector[parse_rune(format[i])?]
 	}
-	Try.Ok(ret)
+	Ok(ret)
 }
 
 pub main := fn {
