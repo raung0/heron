@@ -176,6 +176,11 @@ pub fn emit_error<W: WriteColor>(
 			locations.push(source_location);
 			format!("structs and unions must be in comptime declarations")
 		}
+		FrontendError::InvalidDeclarationArity(source_location) => {
+			labels.push(Some("invalid multi declaration arity".to_string()));
+			locations.push(source_location);
+			format!("invalid multi declaration arity")
+		}
 	};
 
 	let mut error_spec = ColorSpec::new();

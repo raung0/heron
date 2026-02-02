@@ -1,11 +1,23 @@
 use std::collections::HashMap;
 
-use crate::frontend::{AST, ASTValue, FrontendError, InitializerItem, Type, walk_ast};
+use crate::frontend::{walk_ast, ASTValue, FrontendError, InitializerItem, Type, AST};
 
 pub(crate) fn pass_2(ast: &Box<AST>) -> Vec<FrontendError> {
 	let mut errors = Vec::<FrontendError>::new();
 
 	walk_ast(ast, None, &mut |node, parent| match &node.v {
+		ASTValue::DeclarationMulti {
+			names,
+			types,
+			values,
+			..
+		} => {
+			if has_invalid_declaration_arity(names.len(), types.len(), values) {
+				errors.push(FrontendError::InvalidDeclarationArity(
+					node.location.clone(),
+				));
+			}
+		}
 		ASTValue::TypedInitializerList { ty, items } => {
 			check_keyed_initializer_duplicates(items, &mut errors);
 			if let Type::Array { size, .. } = ty.as_ref() {
@@ -61,6 +73,17 @@ fn check_keyed_initializer_duplicates(items: &[InitializerItem], errors: &mut Ve
 			});
 		}
 	}
+}
+
+fn has_invalid_declaration_arity(
+	names_len: usize,
+	types_len: usize,
+	values: &Option<Vec<Box<AST>>>,
+) -> bool {
+	let types_ok = types_len == 0 || types_len == 1 || types_len == names_len;
+	let values_len = values.as_ref().map_or(0, |vals| vals.len());
+	let values_ok = values_len == 0 || values_len == 1 || values_len == names_len;
+	!types_ok || !values_ok
 }
 
 fn is_inside_comptime_declaration(parent: Option<&Box<AST>>) -> bool {

@@ -1,7 +1,8 @@
-use crate::frontend::{AST, ASTValue};
+use crate::frontend::{walk_ast_mut, ASTValue, SourceLocation, Trivia, AST};
 
 pub(crate) fn pass_1(mut ast: Box<AST>) -> Box<AST> {
 	reorder_declarations(&mut ast);
+	normalize_declarations(&mut ast);
 	ast
 }
 
@@ -19,6 +20,174 @@ fn reorder_declarations(ast: &mut AST) {
 	}
 
 	*exprs = buckets.into_iter().flatten().collect();
+}
+
+fn normalize_declarations(ast: &mut Box<AST>) {
+	walk_ast_mut(ast, &mut |node| match &mut node.v {
+		ASTValue::ExprList(exprs) | ASTValue::ExprListNoScope(exprs) => {
+			normalize_list(exprs);
+		}
+		_ => {}
+	});
+}
+
+fn normalize_list(exprs: &mut Vec<Box<AST>>) {
+	let items = std::mem::take(exprs);
+	let mut normalized: Vec<Box<AST>> = Vec::new();
+
+	for item in items {
+		let mut item = item;
+		match &mut item.v {
+			ASTValue::DeclarationMulti {
+				names,
+				types,
+				values,
+				constexpr,
+			} => {
+				let types_len = types.len();
+				let values_len = values.as_ref().map_or(0, |v| v.len());
+				if !can_expand_arity(names.len(), types_len, values_len)
+					|| (types_len == 0 && values.is_none())
+				{
+					normalized.push(item);
+				} else {
+					let names_owned = std::mem::take(names);
+					let types_owned = std::mem::take(types);
+					let values_owned = values.take();
+					let expanded = expand_declaration_multi(
+						item.location.clone(),
+						item.trivia.clone(),
+						names_owned,
+						types_owned,
+						values_owned,
+						*constexpr,
+						false,
+					);
+					normalized.extend(expanded);
+				}
+			}
+			ASTValue::Pub(inner) => {
+				if let ASTValue::DeclarationMulti {
+					names,
+					types,
+					values,
+					constexpr,
+				} = &mut inner.v
+				{
+					let types_len = types.len();
+					let values_len = values.as_ref().map_or(0, |v| v.len());
+					if !can_expand_arity(names.len(), types_len, values_len)
+						|| (types_len == 0 && values.is_none())
+					{
+						normalized.push(item);
+					} else {
+						let names_owned = std::mem::take(names);
+						let types_owned = std::mem::take(types);
+						let values_owned = values.take();
+						let expanded = expand_declaration_multi(
+							item.location.clone(),
+							item.trivia.clone(),
+							names_owned,
+							types_owned,
+							values_owned,
+							*constexpr,
+							true,
+						);
+						normalized.extend(expanded);
+					}
+				} else {
+					normalized.push(item);
+				}
+			}
+			_ => normalized.push(item),
+		}
+	}
+
+	*exprs = normalized;
+}
+
+fn expand_declaration_multi(
+	location: SourceLocation,
+	trivia: Vec<Trivia>,
+	names: Vec<String>,
+	types: Vec<Box<crate::frontend::Type>>,
+	values: Option<Vec<Box<AST>>>,
+	constexpr: bool,
+	wrap_pub: bool,
+) -> Vec<Box<AST>> {
+	let types_len = types.len();
+	let values_len = values.as_ref().map_or(0, |v| v.len());
+
+	let mut out = Vec::new();
+	let mut values_iter = values.unwrap_or_default().into_iter();
+	let mut shared_value = if values_len == 1 {
+		values_iter.next()
+	} else {
+		None
+	};
+
+	for (index, name) in names.into_iter().enumerate() {
+		let type_for = if types_len == 0 {
+			None
+		} else if types_len == 1 {
+			Some(types[0].clone())
+		} else {
+			Some(types[index].clone())
+		};
+		let value_for = if values_len == 0 {
+			None
+		} else if values_len == 1 {
+			if index == 0 {
+				shared_value.take()
+			} else {
+				shared_value.as_ref().map(|value| value.clone())
+			}
+		} else {
+			values_iter.next()
+		};
+
+		let mut decl = if type_for.is_none() {
+			let value = value_for.expect("declaration requires value");
+			if constexpr {
+				AST::from(
+					location.clone(),
+					ASTValue::DeclarationConstexpr(name.clone(), value),
+				)
+			} else {
+				AST::from(
+					location.clone(),
+					ASTValue::Declaration(name.clone(), value),
+				)
+			}
+		} else {
+			AST::from(
+				location.clone(),
+				ASTValue::DeclarationMulti {
+					names: vec![name.clone()],
+					types: vec![type_for.expect("type required")],
+					values: value_for.map(|v| vec![v]),
+					constexpr,
+				},
+			)
+		};
+		decl.trivia = trivia.clone();
+
+		if wrap_pub {
+			let mut pub_node = AST::from(location.clone(), ASTValue::Pub(decl));
+			pub_node.trivia = trivia.clone();
+			out.push(pub_node);
+		} else {
+			out.push(decl);
+		}
+	}
+
+	out
+}
+
+fn can_expand_arity(names_len: usize, types_len: usize, values_len: usize) -> bool {
+	let types_ok = types_len == 0 || types_len == 1 || types_len == names_len;
+	let values_ok = values_len == 0 || values_len == 1 || values_len == names_len;
+	types_ok && values_ok
 }
 
 fn declaration_bucket(node: &AST) -> usize {

@@ -32,4 +32,5 @@ pub enum FrontendError {
 		conflicting_definition: SourceLocation,
 	},
 	StructOrUnionNotInComptimeDeclaration(SourceLocation),
+	InvalidDeclarationArity(SourceLocation),
 }

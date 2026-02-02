@@ -101,22 +101,26 @@ fn write_param_list(f: &mut fmt::Formatter<'_>, params: &[FnParam]) -> fmt::Resu
 	write!(f, ")")
 }
 
+#[derive(Clone)]
 pub struct FnParam {
 	pub names: Vec<String>,
 	pub ty: Option<Box<Type>>,
 	pub default: Option<Box<AST>>,
 }
 
+#[derive(Clone)]
 pub struct EnsuresClause {
 	pub binders: Vec<String>,
 	pub condition: Box<AST>,
 }
 
+#[derive(Clone)]
 pub struct PostClause {
 	pub return_id: Option<String>,
 	pub conditions: Vec<Box<AST>>,
 }
 
+#[derive(Clone)]
 pub struct MatchBinder {
 	pub by_ref: bool,
 	pub mutable: bool,
@@ -124,28 +128,33 @@ pub struct MatchBinder {
 	pub name: String,
 }
 
+#[derive(Clone)]
 pub enum MatchCasePattern {
 	Default,
 	Exprs(Vec<Box<AST>>),
 	Type(Box<Type>),
 }
 
+#[derive(Clone)]
 pub struct MatchCase {
 	pub pattern: MatchCasePattern,
 	pub guard: Option<Box<AST>>,
 	pub body: Box<AST>,
 }
 
+#[derive(Clone)]
 pub enum FnBody {
 	Block(Box<AST>),
 	Expr(Box<AST>),
 }
 
+#[derive(Clone)]
 pub enum InitializerItem {
 	Positional(Box<AST>),
 	Named { name: String, value: Box<AST> },
 }
 
+#[derive(Clone)]
 pub struct EnumVariant {
 	pub name: String,
 	pub value: Option<Box<AST>>,
@@ -324,6 +333,7 @@ impl fmt::Display for Type {
 	}
 }
 
+#[derive(Clone)]
 pub enum ASTValue {
 	Package {
 		path: Vec<String>,
@@ -464,6 +474,7 @@ pub enum ASTValue {
 	},
 }
 
+#[derive(Clone)]
 pub struct AST {
 	pub location: SourceLocation,
 	pub trivia: Vec<Trivia>,
@@ -1287,5 +1298,205 @@ where
 		}
 
 		_ => {}
+	}
+}
+
+pub fn walk_ast_mut<F>(node: &mut Box<AST>, predicate: &mut F)
+where
+	F: FnMut(&mut Box<AST>),
+{
+	predicate(node);
+
+	match &mut node.v {
+		ASTValue::BinExpr { lhs, rhs, .. } => {
+			walk_ast_mut(lhs, predicate);
+			walk_ast_mut(rhs, predicate);
+		}
+
+		ASTValue::Not(v)
+		| ASTValue::UnaryPlus(v)
+		| ASTValue::UnaryMinus(v)
+		| ASTValue::Deref(v)
+		| ASTValue::Mut(v)
+		| ASTValue::PtrOf(v)
+		| ASTValue::Defer(v)
+		| ASTValue::Pub(v) => {
+			walk_ast_mut(v, predicate);
+		}
+
+		ASTValue::Ref { v, .. } => {
+			walk_ast_mut(v, predicate);
+		}
+
+		ASTValue::Call { callee, args } => {
+			walk_ast_mut(callee, predicate);
+			for arg in args {
+				walk_ast_mut(arg, predicate);
+			}
+		}
+
+		ASTValue::Index { target, indices } => {
+			walk_ast_mut(target, predicate);
+			for idx in indices {
+				walk_ast_mut(idx, predicate);
+			}
+		}
+
+		ASTValue::ExprList(exprs) | ASTValue::ExprListNoScope(exprs) => {
+			for e in exprs {
+				walk_ast_mut(e, predicate);
+			}
+		}
+
+		ASTValue::Return(Some(v)) => {
+			walk_ast_mut(v, predicate);
+		}
+
+		ASTValue::If {
+			cond,
+			decl,
+			body,
+			else_,
+		} => {
+			walk_ast_mut(cond, predicate);
+			if let Some(d) = decl {
+				walk_ast_mut(d, predicate);
+			}
+			walk_ast_mut(body, predicate);
+			if let Some(e) = else_ {
+				walk_ast_mut(e, predicate);
+			}
+		}
+
+		ASTValue::While { cond, decl, body } => {
+			walk_ast_mut(cond, predicate);
+			if let Some(d) = decl {
+				walk_ast_mut(d, predicate);
+			}
+			walk_ast_mut(body, predicate);
+		}
+
+		ASTValue::ForLoop {
+			init,
+			cond,
+			step,
+			body,
+		} => {
+			if let Some(i) = init {
+				walk_ast_mut(i, predicate);
+			}
+			if let Some(c) = cond {
+				walk_ast_mut(c, predicate);
+			}
+			if let Some(s) = step {
+				walk_ast_mut(s, predicate);
+			}
+			walk_ast_mut(body, predicate);
+		}
+
+		ASTValue::For {
+			bindings,
+			iter,
+			body,
+		} => {
+			for b in bindings {
+				walk_ast_mut(b, predicate);
+			}
+			walk_ast_mut(iter, predicate);
+			walk_ast_mut(body, predicate);
+		}
+
+		ASTValue::Set(_, v)
+		| ASTValue::Declaration(_, v)
+		| ASTValue::DeclarationConstexpr(_, v) => {
+			walk_ast_mut(v, predicate);
+		}
+
+		ASTValue::SetMulti { values, .. } => {
+			for v in values {
+				walk_ast_mut(v, predicate);
+			}
+		}
+		ASTValue::DeclarationMulti { values, .. } => {
+			if let Some(values) = values {
+				for v in values {
+					walk_ast_mut(v, predicate);
+				}
+			}
+		}
+
+		ASTValue::Fn {
+			pre,
+			where_clause,
+			body,
+			..
+		} => {
+			for p in pre {
+				walk_ast_mut(p, predicate);
+			}
+			if let Some(w) = where_clause {
+				walk_ast_mut(w, predicate);
+			}
+			match body {
+				FnBody::Block(b) | FnBody::Expr(b) => walk_ast_mut(b, predicate),
+			}
+		}
+
+		ASTValue::Struct { body, .. } | ASTValue::RawUnion { body, .. } => {
+			walk_ast_mut(body, predicate);
+		}
+
+		ASTValue::Match {
+			scrutinee, cases, ..
+		} => {
+			walk_ast_mut(scrutinee, predicate);
+			for case in cases {
+				if let MatchCasePattern::Exprs(patterns) = &mut case.pattern {
+					for pat in patterns {
+						walk_ast_mut(pat, predicate);
+					}
+				}
+				if let Some(guard) = &mut case.guard {
+					walk_ast_mut(guard, predicate);
+				}
+				walk_ast_mut(&mut case.body, predicate);
+			}
+		}
+
+		ASTValue::InitializerList(items) | ASTValue::TypedInitializerList { items, .. } => {
+			for item in items {
+				match item {
+					InitializerItem::Positional(v) => {
+						walk_ast_mut(v, predicate)
+					}
+					InitializerItem::Named { value, .. } => {
+						walk_ast_mut(value, predicate)
+					}
+				}
+			}
+		}
+		ASTValue::NamedArg { value, .. } => {
+			walk_ast_mut(value, predicate);
+		}
+		ASTValue::GenericApply { target, .. } => {
+			walk_ast_mut(target, predicate);
+		}
+		ASTValue::Cast { value, .. } | ASTValue::Transmute { value, .. } => {
+			walk_ast_mut(value, predicate);
+		}
+		ASTValue::Return(None)
+		| ASTValue::Package { .. }
+		| ASTValue::Use { .. }
+		| ASTValue::Id(_)
+		| ASTValue::String(_)
+		| ASTValue::Char(_)
+		| ASTValue::Integer(_)
+		| ASTValue::Float(_)
+		| ASTValue::DotId(_)
+		| ASTValue::Type(_)
+		| ASTValue::Enum { .. }
+		| ASTValue::Union { .. }
+		| ASTValue::Newtype { .. }
+		| ASTValue::Alias { .. } => {}
 	}
 }
