@@ -23,6 +23,8 @@ pub fn emit_error<W: WriteColor>(
 	let message = match err {
 		FrontendError::ParseError(err) => match err {
 			ParserError::LexerError(e) => {
+				labels.push(None);
+				locations.push(e.location().clone());
 				format!("lexer error: {}", describe_lexer_error(&e))
 			}
 			ParserError::InvalidUnaryOperator(tok) => {
@@ -204,13 +206,13 @@ pub fn emit_error<W: WriteColor>(
 
 fn describe_lexer_error(err: &LexerError) -> String {
 	match err {
-		LexerError::InvalidString(msg) => {
-			format!("invalid string literal: {msg}")
+		LexerError::InvalidString { message, .. } => {
+			format!("invalid string literal: {message}")
 		}
-		LexerError::InvalidLifetimeName(ch) => {
+		LexerError::InvalidLifetimeName { ch, .. } => {
 			format!("invalid lifetime name '{}'", ch)
 		}
-		LexerError::UnexpectedCharacter(ch) => {
+		LexerError::UnexpectedCharacter { ch, .. } => {
 			format!("unexpected character '{}'", ch.escape_default())
 		}
 	}

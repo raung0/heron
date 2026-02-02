@@ -1,4 +1,4 @@
-use crate::frontend::{ASTValue, AST};
+use crate::frontend::{AST, ASTValue};
 
 pub(crate) fn pass_1(mut ast: Box<AST>) -> Box<AST> {
 	reorder_declarations(&mut ast);

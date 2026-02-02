@@ -66,7 +66,16 @@ fn main() {
 
 		let mut lexer = frontend::Lexer::new(input, file.clone());
 		let input = lexer.get_input();
-		let mut parser = frontend::Parser::new(&mut lexer).unwrap();
+		let mut parser = match frontend::Parser::new(&mut lexer) {
+			Ok(parser) => parser,
+			Err(err) => {
+				pretty_print_error(
+					heron::frontend::FrontendError::ParseError(err),
+					input.as_str(),
+				);
+				continue;
+			}
+		};
 		let ast = parser.parse();
 		let errors = parser.take_errors();
 		if errors.is_empty() {

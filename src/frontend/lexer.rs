@@ -144,9 +144,28 @@ impl Token {
 
 #[derive(Debug, Clone)]
 pub enum LexerError {
-	InvalidString(String),
-	InvalidLifetimeName(char),
-	UnexpectedCharacter(char),
+	InvalidString {
+		message: String,
+		location: SourceLocation,
+	},
+	InvalidLifetimeName {
+		ch: char,
+		location: SourceLocation,
+	},
+	UnexpectedCharacter {
+		ch: char,
+		location: SourceLocation,
+	},
+}
+
+impl LexerError {
+	pub fn location(&self) -> &SourceLocation {
+		match self {
+			LexerError::InvalidString { location, .. }
+			| LexerError::InvalidLifetimeName { location, .. }
+			| LexerError::UnexpectedCharacter { location, .. } => location,
+		}
+	}
 }
 
 #[derive(Clone)]
@@ -284,7 +303,7 @@ impl Lexer {
 		}
 
 		let mut tok = Token {
-			location: start_loc,
+			location: start_loc.clone(),
 			v: TokenValue::EOF,
 			leading_trivia,
 			trailing_trivia: Vec::new(),
@@ -320,6 +339,7 @@ impl Lexer {
 				self.advance();
 			}
 			'\'' => {
+				let err_loc = self.snapshot_location();
 				let c1 = self.peek(1);
 				let c2 = self.peek(2);
 
@@ -355,18 +375,22 @@ impl Lexer {
 					}
 					if let Some(ch) = parse_escape(&esc) {
 						if self.ch != '\'' {
-							return Err(LexerError::InvalidString(
-								"Unterminated character literal"
-									.to_string(),
-							));
+							return Err(LexerError::InvalidString {
+							message: "Unterminated character literal"
+								.to_string(),
+							location: err_loc.clone(),
+						});
 						}
 						self.advance(); // closing '
 						tok.v = TokenValue::Char(ch);
 					} else {
-						return Err(LexerError::InvalidString(format!(
-							"Invalid escape in char: \\{}",
-							esc
-						)));
+						return Err(LexerError::InvalidString {
+							message: format!(
+								"Invalid escape in char: \\{}",
+								esc
+							),
+							location: err_loc,
+						});
 					}
 				} else if c1.is_ascii_lowercase()
 					&& !c1.is_whitespace() && c2 != '\''
@@ -375,7 +399,10 @@ impl Lexer {
 					tok.v = TokenValue::Lifetime(c1);
 					self.advance(); // letter
 				} else {
-					return Err(LexerError::InvalidLifetimeName(c1));
+					return Err(LexerError::InvalidLifetimeName {
+						ch: c1,
+						location: err_loc,
+					});
 				}
 			}
 			':' => {
@@ -610,7 +637,10 @@ impl Lexer {
 			}
 
 			_ => {
-				return Err(LexerError::UnexpectedCharacter(self.ch));
+				return Err(LexerError::UnexpectedCharacter {
+					ch: self.ch,
+					location: start_loc,
+				});
 			}
 		}
 
@@ -775,18 +805,21 @@ impl Lexer {
 	}
 
 	fn read_string(&mut self) -> Result<Token, LexerError> {
-		let mut src = self.snapshot_location();
+		let start_loc = self.snapshot_location();
+		let mut src = start_loc.clone();
 
 		if self.ch != '"' {
-			return Err(LexerError::InvalidString(
-				"Strings must begin with a quote".to_string(),
-			));
+			return Err(LexerError::InvalidString {
+				message: "Strings must begin with a quote".to_string(),
+				location: start_loc,
+			});
 		}
 		self.advance();
 
 		let mut data = String::new();
 		while self.ch != '"' && self.ch != '\0' {
 			if self.ch == '\\' {
+				let err_loc = self.snapshot_location();
 				self.advance(); // consume '\'
 				let mut esc = String::new();
 				if self.ch == 'x' {
@@ -810,10 +843,10 @@ impl Lexer {
 				if let Some(ch) = parse_escape(&esc) {
 					data.push(ch);
 				} else {
-					return Err(LexerError::InvalidString(format!(
-						"Invalid escape: \\{}",
-						esc
-					)));
+					return Err(LexerError::InvalidString {
+						message: format!("Invalid escape: \\{}", esc),
+						location: err_loc,
+					});
 				}
 				self.mark_progress(&mut src);
 				continue;
@@ -824,9 +857,10 @@ impl Lexer {
 		}
 
 		if self.ch != '"' {
-			return Err(LexerError::InvalidString(
-				"Strings must end with a quote".to_string(),
-			));
+			return Err(LexerError::InvalidString {
+				message: "Strings must end with a quote".to_string(),
+				location: start_loc,
+			});
 		}
 		self.advance();
 
@@ -1056,7 +1090,7 @@ mod tests {
 	#[test]
 	fn invalid_lifetime_name_produces_error() {
 		match expect_lexer_error("'1") {
-			LexerError::InvalidLifetimeName(ch) => assert_eq!(ch, '1'),
+			LexerError::InvalidLifetimeName { ch, .. } => assert_eq!(ch, '1'),
 			other => panic!("expected InvalidLifetimeName, got {:?}", other),
 		}
 	}
@@ -1064,11 +1098,11 @@ mod tests {
 	#[test]
 	fn unterminated_string_literal_reports_error() {
 		match expect_lexer_error("\"unterminated") {
-			LexerError::InvalidString(msg) => {
+			LexerError::InvalidString { message, .. } => {
 				assert!(
-					msg.contains("end with a quote"),
+					message.contains("end with a quote"),
 					"expected unterminated string message, got {}",
-					msg
+					message
 				);
 			}
 			other => panic!(
