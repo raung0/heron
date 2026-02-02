@@ -60,6 +60,7 @@
             cargo-watch
             rust-analyzer
             lldb
+            graphviz
           ];
 
           shellHook = ''

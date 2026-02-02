@@ -33,4 +33,36 @@ pub enum FrontendError {
 	},
 	StructOrUnionNotInComptimeDeclaration(SourceLocation),
 	InvalidDeclarationArity(SourceLocation),
+	MissingPackage(SourceLocation),
+	PackageMismatch {
+		location: SourceLocation,
+		expected: String,
+		found: String,
+	},
+	ModuleNotFound {
+		location: SourceLocation,
+		module: String,
+	},
+	DuplicateModuleAlias {
+		location: SourceLocation,
+		alias: String,
+	},
+	DuplicateModuleImport {
+		location: SourceLocation,
+		module: String,
+	},
+	DuplicateExport {
+		location: SourceLocation,
+		name: String,
+	},
+}
+
+#[derive(Debug, Clone)]
+pub enum FrontendWarning {
+	ModuleConflict {
+		location: SourceLocation,
+		module: String,
+		chosen_path: String,
+		ignored_paths: Vec<String>,
+	},
 }

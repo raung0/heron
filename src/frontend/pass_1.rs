@@ -1,4 +1,4 @@
-use crate::frontend::{walk_ast_mut, ASTValue, SourceLocation, Trivia, AST};
+use crate::frontend::{AST, ASTValue, SourceLocation, Trivia, walk_ast_mut};
 
 pub(crate) fn pass_1(mut ast: Box<AST>) -> Box<AST> {
 	reorder_declarations(&mut ast);

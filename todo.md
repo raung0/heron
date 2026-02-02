@@ -8,7 +8,7 @@
         - [x] Check that in arrays indexed by enum the type is nothing but identifier
         - [x] Initializer lists must not have duplicate fields
         - [x] Structs, unions must be inside comptime declarations
-    - [ ] Pass 3: Module resolution
+    - [x] Pass 3: Module resolution
     - [ ] Pass 4: Type resolution and evaluation
     - [ ] Pass 5: Validate typed AST
         - [ ] Check for cyclic dependencies in structs and unions

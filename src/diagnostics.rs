@@ -1,7 +1,8 @@
 use std::io;
 
 use crate::frontend::{
-	FrontendError, Keyword, LexerError, Operator, ParseError, SourceLocation, TokenValue,
+	FrontendError, FrontendWarning, Keyword, LexerError, Operator, ParseError, SourceLocation,
+	TokenValue,
 };
 use termcolor::{Color, ColorChoice, ColorSpec, StandardStream, WriteColor};
 
@@ -9,18 +10,77 @@ type ParserError = ParseError;
 
 pub fn pretty_print_error(err: FrontendError, input: &str) {
 	let mut stderr = StandardStream::stderr(ColorChoice::Auto);
-	let _ = emit_error(&mut stderr, err, input);
+	let _ = emit_message(&mut stderr, Message::Error(err), input);
 }
 
-pub fn emit_error<W: WriteColor>(
+pub fn emit_message<W: WriteColor>(
 	writer: &mut W,
-	err: FrontendError,
+	message: Message,
 	input: &str,
 ) -> io::Result<()> {
 	let mut labels: Vec<Option<String>> = Vec::new();
 	let mut locations: Vec<SourceLocation> = Vec::new();
 
-	let message = match err {
+	let (message, kind) = match message {
+		Message::Error(err) => (
+			emit_error_message(err, &mut labels, &mut locations),
+			MessageKind::Error,
+		),
+		Message::Warning(warning) => (
+			emit_warning_message(warning, &mut labels, &mut locations),
+			MessageKind::Warning,
+		),
+	};
+
+	let mut spec = ColorSpec::new();
+	match kind {
+		MessageKind::Error => {
+			spec.set_fg(Some(Color::Red)).set_bold(true);
+			writer.set_color(&spec)?;
+			write!(writer, "error")?;
+		}
+		MessageKind::Warning => {
+			spec.set_fg(Some(Color::Yellow)).set_bold(true);
+			writer.set_color(&spec)?;
+			write!(writer, "warning")?;
+		}
+	}
+	writer.reset()?;
+	if let Some(loc) = locations.first() {
+		let mut cyan_spec = ColorSpec::new();
+		cyan_spec.set_fg(Some(Color::Cyan));
+		write!(writer, ": {message} at ")?;
+		writer.set_color(&cyan_spec)?;
+		writeln!(
+			writer,
+			"{}:{}:{}",
+			if loc.file.is_empty() {
+				"<input>"
+			} else {
+				loc.file.as_str()
+			},
+			loc.range.begin.1.max(1),
+			loc.range.begin.0.max(1)
+		)?;
+		writer.reset()?;
+	} else {
+		writeln!(writer, ": {message}")?;
+	}
+
+	if !locations.is_empty() {
+		let resolved_input = resolve_input(&locations, input);
+		highlight_locations(writer, &locations, &labels, resolved_input.as_str())?;
+	}
+
+	Ok(())
+}
+
+fn emit_error_message(
+	err: FrontendError,
+	labels: &mut Vec<Option<String>>,
+	locations: &mut Vec<SourceLocation>,
+) -> String {
+	match err {
 		FrontendError::ParseError(err) => match err {
 			ParserError::LexerError(e) => {
 				labels.push(None);
@@ -181,39 +241,86 @@ pub fn emit_error<W: WriteColor>(
 			locations.push(source_location);
 			format!("invalid multi declaration arity")
 		}
+		FrontendError::MissingPackage(source_location) => {
+			labels.push(Some("missing package declaration".to_string()));
+			locations.push(source_location);
+			format!("missing package declaration")
+		}
+		FrontendError::PackageMismatch {
+			location,
+			expected,
+			found,
+		} => {
+			labels.push(Some(format!("expected package `{expected}`")));
+			locations.push(location);
+			format!("package mismatch: expected `{expected}`, found `{found}`")
+		}
+		FrontendError::ModuleNotFound { location, module } => {
+			labels.push(Some("module not found".to_string()));
+			locations.push(location);
+			format!("module not found: `{module}`")
+		}
+		FrontendError::DuplicateModuleAlias { location, alias } => {
+			labels.push(Some("duplicate module alias".to_string()));
+			locations.push(location);
+			format!("duplicate module alias `{alias}`")
+		}
+		FrontendError::DuplicateModuleImport { location, module } => {
+			labels.push(Some("duplicate module import".to_string()));
+			locations.push(location);
+			format!("duplicate module import `{module}`")
+		}
+		FrontendError::DuplicateExport { location, name } => {
+			labels.push(Some("duplicate export".to_string()));
+			locations.push(location);
+			format!("duplicate export `{name}`")
+		}
+	}
+}
+
+fn emit_warning_message(
+	warning: FrontendWarning,
+	labels: &mut Vec<Option<String>>,
+	locations: &mut Vec<SourceLocation>,
+) -> String {
+	match warning {
+		FrontendWarning::ModuleConflict {
+			location,
+			module,
+			chosen_path,
+			ignored_paths,
+		} => {
+			labels.push(Some("module conflict".to_string()));
+			locations.push(location);
+			let ignored = if ignored_paths.is_empty() {
+				"".to_string()
+			} else {
+				format!("; ignored: {}", ignored_paths.join(", "))
+			};
+			format!("module `{module}` resolved to `{chosen_path}`{ignored}")
+		}
+	}
+}
+
+pub enum Message {
+	Error(FrontendError),
+	Warning(FrontendWarning),
+}
+
+enum MessageKind {
+	Error,
+	Warning,
+}
+
+fn resolve_input(locations: &[SourceLocation], default_input: &str) -> String {
+	let Some(location) = locations.iter().find(|loc| !loc.file.is_empty()) else {
+		return default_input.to_string();
 	};
 
-	let mut error_spec = ColorSpec::new();
-	error_spec.set_fg(Some(Color::Red)).set_bold(true);
-	writer.set_color(&error_spec)?;
-	write!(writer, "error")?;
-	writer.reset()?;
-	if let Some(loc) = locations.first() {
-		let mut cyan_spec = ColorSpec::new();
-		cyan_spec.set_fg(Some(Color::Cyan));
-		write!(writer, ": {message} at ")?;
-		writer.set_color(&cyan_spec)?;
-		writeln!(
-			writer,
-			"{}:{}:{}",
-			if loc.file.is_empty() {
-				"<input>"
-			} else {
-				loc.file.as_str()
-			},
-			loc.range.begin.1.max(1),
-			loc.range.begin.0.max(1)
-		)?;
-		writer.reset()?;
-	} else {
-		writeln!(writer, ": {message}")?;
+	match std::fs::read_to_string(&location.file) {
+		Ok(contents) => contents,
+		Err(_) => default_input.to_string(),
 	}
-
-	if !locations.is_empty() {
-		highlight_locations(writer, &locations, &labels, input)?;
-	}
-
-	Ok(())
 }
 
 fn describe_lexer_error(err: &LexerError) -> String {
