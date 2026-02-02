@@ -12,29 +12,28 @@ use core.math
 swizzle :: fn<'a; T; N; M: u32> (
 	vector: &'a core.math.Vector<T, N>
 	format: [M]rune
-) -> core.math.Vector<&'a T, M>
-	throws core.Exception
+) -> Try<core.math.Vector<&'a T, M>, core.GenericError>
 {
-	parse_rune :: fn (r: rune) -> u32 throws core.Exception {
+	parse_rune :: fn (r: rune) -> Try<u32, core.GenericError> {
 		match r {
-			case 'x' | 'r' | 's' | 'u' -> if 0 < N do 0
-			case 'y' | 'g' | 't' | 'v' -> if 1 < N do 1
-			case 'z' | 'b' | 'p' -> if 2 < N do 2
-			case 'w' | 'a' | 'q' -> if 3 < N do 3
-			case -> throw core.Exception("Invalid swizzle accessor")
+			case 'x' | 'r' | 's' | 'u' if 0 < N -> Try.Ok(0)
+			case 'y' | 'g' | 't' | 'v' if 1 < N -> Try.Ok(1)
+			case 'z' | 'b' | 'p'       if 2 < N -> Try.Ok(2)
+			case 'w' | 'a' | 'q'       if 3 < N -> Try.Ok(3)
+			case -> Try.Error(core.GenericError("Invalid swizzle accessor"))
 		}
 	}
 
 	ret := core.math.Vector<&'a T, M>()
 	for i := mut 0; i < M; i += 1 {
-		ret[i] = vector[parse_rune(format[i])]
+		ret[i] = vector[parse_rune(format[i])?]
 	}
-	ret
+	Try.Ok(ret)
 }
 
-pub main := fn throws core.Exception {
+pub main := fn {
 	vec := core.math.Vector<f32, 3>(.{ 1, 2, 3 })
-	swizzles_ref := swizzle(vec, "zyx")
+	swizzles_ref := swizzle(vec, "zyx").or_panic()
 	core.io.println("Original: {}", vec)
 	// No need to manually dereference, there's a formatter that forwards &T to
 	// T, so the normal Vector formatter can be used, as it uses that formatter.
