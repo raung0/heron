@@ -1,0 +1,12 @@
+package main
+
+HasHello :: struct {
+	pub hello :: fn (self: &HasHello) -> int do 7
+}
+
+needs_hello :: fn<T> (value: T) do value.hello()
+
+main :: fn {
+	value := HasHello .{ }
+	needs_hello(value)
+}

@@ -1,0 +1,12 @@
+package main
+
+A :: struct {
+	b: B
+}
+
+B :: struct {
+	a: A
+}
+
+main :: fn {
+}

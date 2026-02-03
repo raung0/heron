@@ -31,6 +31,7 @@ fn normalize_declarations(ast: &mut Box<AST>) {
 	});
 }
 
+#[allow(clippy::vec_box)]
 fn normalize_list(exprs: &mut Vec<Box<AST>>) {
 	let items = std::mem::take(exprs);
 	let mut normalized: Vec<Box<AST>> = Vec::new();
@@ -106,6 +107,7 @@ fn normalize_list(exprs: &mut Vec<Box<AST>>) {
 	*exprs = normalized;
 }
 
+#[allow(clippy::vec_box)]
 fn expand_declaration_multi(
 	location: SourceLocation,
 	trivia: Vec<Trivia>,
@@ -140,7 +142,7 @@ fn expand_declaration_multi(
 			if index == 0 {
 				shared_value.take()
 			} else {
-				shared_value.as_ref().map(|value| value.clone())
+				shared_value.clone()
 			}
 		} else {
 			values_iter.next()
@@ -208,7 +210,7 @@ fn declaration_bucket(node: &AST) -> usize {
 	}
 }
 
-fn unwrap_pub<'a>(node: &'a AST) -> &'a AST {
+fn unwrap_pub(node: &AST) -> &AST {
 	let mut current = node;
 	while let ASTValue::Pub(inner) = &current.v {
 		current = inner.as_ref();

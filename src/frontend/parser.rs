@@ -1,3 +1,5 @@
+#![allow(clippy::result_large_err)]
+
 use crate::frontend::{
 	AST, ASTValue, EnsuresClause, EnumVariant, FnBody, FnParam, GenericArg, GenericParam,
 	Keyword, Lexer, MatchBinder, MatchCase, MatchCasePattern, Operator, ParseError, PostClause,
@@ -29,6 +31,7 @@ impl<'a> Parser<'a> {
 		Ok(ret)
 	}
 
+	#[allow(clippy::should_implement_trait)]
 	pub fn next(&mut self) -> Result<(), ParseError> {
 		self.cur = self.next.clone();
 		let new = self.lexer.next();
@@ -125,14 +128,13 @@ impl<'a> Parser<'a> {
 						self.record_error(e.clone());
 						return Err(e);
 					}
-					let should_record = match (&e, self.errors.last()) {
+					if !matches!(
+						(&e, self.errors.last()),
 						(
 							ParseError::InvalidArraySize(loc),
-							Some(ParseError::InvalidArraySize(prev)),
-						) if loc == prev => false,
-						_ => true,
-					};
-					if should_record {
+							Some(ParseError::InvalidArraySize(prev))
+						) if loc == prev
+					) {
 						self.record_error(e);
 					}
 					let recover = match self.errors.last() {
@@ -191,8 +193,8 @@ impl<'a> Parser<'a> {
 			self.next()?;
 			let rhs = next(self)?;
 
-			let mut loc = (*lhs).location.clone();
-			loc.range.end = (*rhs).location.range.end;
+			let mut loc = lhs.location.clone();
+			loc.range.end = rhs.location.range.end;
 
 			lhs = AST::from(
 				loc,
@@ -235,8 +237,8 @@ impl<'a> Parser<'a> {
 			self.next()?;
 			let rhs = next(self)?;
 
-			let mut loc = (*lhs).location.clone();
-			loc.range.end = (*rhs).location.range.end;
+			let mut loc = lhs.location.clone();
+			loc.range.end = rhs.location.range.end;
 
 			lhs = AST::from(
 				loc,
@@ -506,7 +508,7 @@ impl<'a> Parser<'a> {
 				node
 			}
 			TokenValue::Char(v) => {
-				let node = AST::from(l, ASTValue::Char(v.clone()));
+				let node = AST::from(l, ASTValue::Char(*v));
 				self.next()?;
 				node
 			}
@@ -538,6 +540,7 @@ impl<'a> Parser<'a> {
 				Keyword::Newtype => return self.parse_newtype(),
 				Keyword::Alias => return self.parse_alias(),
 				Keyword::Pub => return self.parse_pub(),
+				Keyword::Hide => return self.parse_hide(),
 				Keyword::Operator => {
 					return Err(ParseError::UnexpectedToken(
 						self.cur.clone(),
@@ -578,7 +581,7 @@ impl<'a> Parser<'a> {
 				let end = self.cur.location.range.end;
 				self.next()?;
 				let mut expr = expr;
-				(*expr).location.range.end = end;
+				expr.location.range.end = end;
 				expr
 			}
 			TokenValue::ListInit => return self.parse_initializer_list(),
@@ -612,6 +615,10 @@ impl<'a> Parser<'a> {
 		let mut items: Vec<crate::frontend::InitializerItem> = Vec::new();
 		let mut style: Option<InitStyle> = None;
 		while self.cur.v != TokenValue::RSquirly {
+			if matches!(self.cur.v, TokenValue::Semicolon | TokenValue::Comma) {
+				self.next()?;
+				continue;
+			}
 			if self.cur.v == TokenValue::EOF {
 				self.enable_multi_id_parse = enable_multi_id_parse_prev;
 				return Err(ParseError::ExpectedToken(
@@ -1053,6 +1060,7 @@ impl<'a> Parser<'a> {
 		}
 	}
 
+	#[allow(clippy::vec_box)]
 	fn parse_call_args(&mut self) -> Result<Vec<Box<AST>>, ParseError> {
 		let enable_multi_id_parse_prev = self.enable_multi_id_parse;
 		self.enable_multi_id_parse = false;
@@ -1209,6 +1217,22 @@ impl<'a> Parser<'a> {
 		let v = self.parse_expression()?;
 		loc.range.end = v.location.range.end;
 		Ok(AST::from(loc, ASTValue::Defer(v)))
+	}
+
+	fn parse_hide(&mut self) -> ParseResult {
+		let mut loc = self.cur.location.clone();
+		self.next()?; // consume 'hide'
+
+		let TokenValue::Id(name) = &self.cur.v else {
+			return Err(ParseError::ExpectedToken(
+				self.cur.clone(),
+				TokenValue::Id("identifier".to_string()),
+			));
+		};
+		let name = name.clone();
+		loc.range.end = self.cur.location.range.end;
+		self.next()?;
+		Ok(AST::from(loc, ASTValue::Hide(name)))
 	}
 
 	fn parse_match(&mut self) -> ParseResult {
@@ -1530,12 +1554,10 @@ impl<'a> Parser<'a> {
 							let name = name.clone();
 							self.next()?; // consume id
 							self.next()?; // consume ':'
-							if matches!(
-								post.as_ref().and_then(|p| p
-									.return_id
-									.as_ref()),
-								Some(_)
-							) {
+							if post.as_ref()
+								.and_then(|p| p.return_id.as_ref())
+								.is_some()
+							{
 								return Err(ParseError::PostReturnIdAlreadyDefined(return_id_tok));
 							}
 							Some(name)
@@ -1792,7 +1814,23 @@ impl<'a> Parser<'a> {
 		self.next()?; // consume '{'
 
 		let mut variants: Vec<Box<Type>> = Vec::new();
+		let mut methods: Vec<Box<AST>> = Vec::new();
 		while self.cur.v != TokenValue::RSquirly {
+			if matches!(self.cur.v, TokenValue::Semicolon | TokenValue::Comma) {
+				self.next()?;
+				continue;
+			}
+			let is_decl = matches!(self.cur.v, TokenValue::Keyword(Keyword::Pub))
+				|| matches!(self.cur.v, TokenValue::Id(_))
+					&& matches!(self.next.v, TokenValue::Colon);
+			if is_decl {
+				methods.push(self.parse_expression()?);
+				if matches!(self.cur.v, TokenValue::Semicolon | TokenValue::Comma) {
+					self.next()?;
+				}
+				continue;
+			}
+
 			variants.push(self.parse_type_inner()?);
 
 			match self.cur.v {
@@ -1803,6 +1841,7 @@ impl<'a> Parser<'a> {
 					}
 				}
 				TokenValue::RSquirly => break,
+				TokenValue::Id(_) | TokenValue::Keyword(Keyword::Pub) => {}
 				_ => {
 					return Err(ParseError::ExpectedToken(
 						self.cur.clone(),
@@ -1821,7 +1860,14 @@ impl<'a> Parser<'a> {
 		loc.range.end = self.cur.location.range.end;
 		self.next()?; // consume '}'
 
-		Ok(AST::from(loc, ASTValue::Union { generics, variants }))
+		Ok(AST::from(
+			loc,
+			ASTValue::Union {
+				generics,
+				variants,
+				methods,
+			},
+		))
 	}
 
 	fn parse_raw_union(&mut self) -> ParseResult {
@@ -2005,6 +2051,7 @@ impl<'a> Parser<'a> {
 			));
 		}
 
+		#[allow(clippy::vec_box)]
 		fn clause_from_exprs(exprs: Vec<Box<AST>>) -> Option<Box<AST>> {
 			match exprs.len() {
 				0 => None,
@@ -2493,6 +2540,7 @@ impl<'a> Parser<'a> {
 
 	fn parse_type_idish(&mut self) -> Result<Box<Type>, ParseError> {
 		// <segment> ('.' <segment>)* ['<' ... '>']
+		let start_tok = self.cur.clone();
 		let mut full = match &self.cur.v {
 			TokenValue::Id(name) => name.clone(),
 			_ => {
@@ -2537,6 +2585,9 @@ impl<'a> Parser<'a> {
 			let (args, _end) = self.parse_generic_args()?;
 			return Ok(Box::new(Type::Generic { base: full, args }));
 		}
+		if Self::is_invalid_numeric_type_name(full.as_str()) {
+			return Err(ParseError::InvalidNumericType(start_tok));
+		}
 
 		Ok(Box::new(match full.as_str() {
 			"bool" => Type::Bool,
@@ -2553,21 +2604,33 @@ impl<'a> Parser<'a> {
 
 	fn type_from_numeric_name(name: &str) -> Option<Type> {
 		fn parse_bits(s: &str) -> Option<u8> {
-			match s.parse::<u16>().ok()? {
-				8 | 16 | 32 | 64 => Some(s.parse::<u8>().ok()?),
-				_ => None,
+			let bits = s.parse::<u16>().ok()?;
+			if bits == 0 || bits > 128 {
+				return None;
 			}
+			if bits == 128 || bits <= 64 {
+				return Some(bits as u8);
+			}
+			None
 		}
 
 		if let Some(rest) = name.strip_prefix('u') {
+			let bit_size = parse_bits(rest)?;
+			if bit_size == 1 {
+				return None;
+			}
 			return Some(Type::Integer {
-				bit_size: parse_bits(rest)?,
+				bit_size,
 				signed: false,
 			});
 		}
 		if let Some(rest) = name.strip_prefix('i') {
+			let bit_size = parse_bits(rest)?;
+			if bit_size == 1 {
+				return None;
+			}
 			return Some(Type::Integer {
-				bit_size: parse_bits(rest)?,
+				bit_size,
 				signed: true,
 			});
 		}
@@ -2577,6 +2640,18 @@ impl<'a> Parser<'a> {
 			});
 		}
 		None
+	}
+
+	fn is_invalid_numeric_type_name(name: &str) -> bool {
+		for prefix in ['u', 'i', 'f'] {
+			if let Some(rest) = name.strip_prefix(prefix)
+				&& rest.chars().all(|c| c.is_ascii_digit())
+				&& Self::type_from_numeric_name(name).is_none()
+			{
+				return true;
+			}
+		}
+		false
 	}
 
 	fn snapshot(&self) -> (Lexer, Token, Token, bool) {

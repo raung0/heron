@@ -96,6 +96,7 @@ pub enum Keyword {
 	Union,
 	RawUnion,
 	Void,
+	Hide,
 }
 
 #[derive(PartialEq, Clone, Debug)]
@@ -142,6 +143,12 @@ impl Token {
 	}
 }
 
+impl Default for Token {
+	fn default() -> Self {
+		Self::new()
+	}
+}
+
 #[derive(Debug, Clone)]
 pub enum LexerError {
 	InvalidString {
@@ -181,8 +188,8 @@ pub struct Lexer {
 }
 
 fn parse_escape(c: &str) -> Option<char> {
-	if c.starts_with('x') {
-		u32::from_str_radix(&c[1..], 16)
+	if let Some(stripped) = c.strip_prefix('x') {
+		u32::from_str_radix(stripped, 16)
 			.ok()
 			.and_then(std::char::from_u32)
 	} else if c.chars().all(|ch| ch.is_ascii_digit()) {
@@ -236,6 +243,7 @@ impl Lexer {
 		std::mem::take(&mut self.trivia)
 	}
 
+	#[allow(clippy::should_implement_trait)]
 	pub fn next(&mut self) -> Result<Token, LexerError> {
 		let leading_trivia = self.collect_leading_trivia();
 
@@ -1015,7 +1023,7 @@ fn is_ident_continue(c: char) -> bool {
 }
 
 fn is_hex_digit(c: char) -> bool {
-	(c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')
+	c.is_ascii_hexdigit()
 }
 
 fn keyword_from_str(s: &str) -> Option<Keyword> {
@@ -1051,6 +1059,7 @@ fn keyword_from_str(s: &str) -> Option<Keyword> {
 		"union" => Keyword::Union,
 		"raw_union" => Keyword::RawUnion,
 		"void" => Keyword::Void,
+		"hide" => Keyword::Hide,
 		_ => return None,
 	})
 }

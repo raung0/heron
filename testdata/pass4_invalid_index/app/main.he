@@ -1,0 +1,9 @@
+package main
+
+Foo :: struct {
+}
+
+main :: fn {
+	foo := Foo .{ }
+	foo[0]
+}

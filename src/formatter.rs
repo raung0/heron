@@ -1,7 +1,7 @@
 use crate::frontend::{
-	ASTValue, EnsuresClause, FnBody, FnParam, GenericArg, GenericParam, InitializerItem,
+	AST, ASTValue, EnsuresClause, FnBody, FnParam, GenericArg, GenericParam, InitializerItem,
 	MatchBinder, MatchCase, MatchCasePattern, Operator, PostClause, SourceLocation, Trivia,
-	TriviaKind, Type, AST,
+	TriviaKind, Type,
 };
 use serde::de::{self, Visitor};
 use serde::ser::{self, SerializeStruct};
@@ -195,10 +195,10 @@ impl<'a> ser::Serializer for &'a mut IniSerializer {
 		Err(IniSerializeError::UnsupportedType("none"))
 	}
 
-	fn serialize_some<T: ?Sized>(self, _value: &T) -> Result<Self::Ok, Self::Error>
-	where
-		T: Serialize,
-	{
+	fn serialize_some<T: ?Sized + Serialize>(
+		self,
+		_value: &T,
+	) -> Result<Self::Ok, Self::Error> {
 		Err(IniSerializeError::UnsupportedType("some"))
 	}
 
@@ -219,27 +219,21 @@ impl<'a> ser::Serializer for &'a mut IniSerializer {
 		Err(IniSerializeError::UnsupportedType("unit_variant"))
 	}
 
-	fn serialize_newtype_struct<T: ?Sized>(
+	fn serialize_newtype_struct<T: ?Sized + Serialize>(
 		self,
 		_name: &'static str,
 		_value: &T,
-	) -> Result<Self::Ok, Self::Error>
-	where
-		T: Serialize,
-	{
+	) -> Result<Self::Ok, Self::Error> {
 		Err(IniSerializeError::UnsupportedType("newtype_struct"))
 	}
 
-	fn serialize_newtype_variant<T: ?Sized>(
+	fn serialize_newtype_variant<T: ?Sized + Serialize>(
 		self,
 		_name: &'static str,
 		_variant_index: u32,
 		_variant: &'static str,
 		_value: &T,
-	) -> Result<Self::Ok, Self::Error>
-	where
-		T: Serialize,
-	{
+	) -> Result<Self::Ok, Self::Error> {
 		Err(IniSerializeError::UnsupportedType("newtype_variant"))
 	}
 
@@ -292,14 +286,11 @@ impl<'a> SerializeStruct for IniSerializeStruct<'a> {
 	type Ok = ();
 	type Error = IniSerializeError;
 
-	fn serialize_field<T: ?Sized>(
+	fn serialize_field<T: ?Sized + Serialize>(
 		&mut self,
 		key: &'static str,
 		value: &T,
-	) -> Result<(), Self::Error>
-	where
-		T: Serialize,
-	{
+	) -> Result<(), Self::Error> {
 		let rendered = value.serialize(IniValueSerializer)?;
 		self.serializer.entries.push((key.to_string(), rendered));
 		Ok(())
@@ -391,10 +382,10 @@ impl ser::Serializer for IniValueSerializer {
 		Err(IniSerializeError::UnsupportedType("none"))
 	}
 
-	fn serialize_some<T: ?Sized>(self, _value: &T) -> Result<Self::Ok, Self::Error>
-	where
-		T: Serialize,
-	{
+	fn serialize_some<T: ?Sized + Serialize>(
+		self,
+		_value: &T,
+	) -> Result<Self::Ok, Self::Error> {
 		Err(IniSerializeError::UnsupportedType("some"))
 	}
 
@@ -415,27 +406,21 @@ impl ser::Serializer for IniValueSerializer {
 		Err(IniSerializeError::UnsupportedType("unit_variant"))
 	}
 
-	fn serialize_newtype_struct<T: ?Sized>(
+	fn serialize_newtype_struct<T: ?Sized + Serialize>(
 		self,
 		_name: &'static str,
 		_value: &T,
-	) -> Result<Self::Ok, Self::Error>
-	where
-		T: Serialize,
-	{
+	) -> Result<Self::Ok, Self::Error> {
 		Err(IniSerializeError::UnsupportedType("newtype_struct"))
 	}
 
-	fn serialize_newtype_variant<T: ?Sized>(
+	fn serialize_newtype_variant<T: ?Sized + Serialize>(
 		self,
 		_name: &'static str,
 		_variant_index: u32,
 		_variant: &'static str,
 		_value: &T,
-	) -> Result<Self::Ok, Self::Error>
-	where
-		T: Serialize,
-	{
+	) -> Result<Self::Ok, Self::Error> {
 		Err(IniSerializeError::UnsupportedType("newtype_variant"))
 	}
 
@@ -750,27 +735,26 @@ impl Formatter {
 				self.emit_blank_lines(gap as usize);
 			}
 
-			if let Some((raw_start, raw_end)) = raw_range {
-				if self.emit_source_range(raw_start, raw_end) {
-					self.skip_comments_in_range(raw_start, raw_end);
-					self.advance_format_off_ranges(raw_end);
-					last_line = raw_end;
-					let mut scan = idx;
-					let mut last_package_use = prev_was_package_use;
-					while scan < items.len()
-						&& items[scan].location.range.begin.1 <= raw_end
-					{
-						last_package_use = matches!(
-							items[scan].v,
-							ASTValue::Package { .. }
-								| ASTValue::Use { .. }
-						);
-						scan += 1;
-					}
-					prev_was_package_use = last_package_use;
-					idx = scan;
-					continue;
+			if let Some((raw_start, raw_end)) = raw_range
+				&& self.emit_source_range(raw_start, raw_end)
+			{
+				self.skip_comments_in_range(raw_start, raw_end);
+				self.advance_format_off_ranges(raw_end);
+				last_line = raw_end;
+				let mut scan = idx;
+				let mut last_package_use = prev_was_package_use;
+				while scan < items.len()
+					&& items[scan].location.range.begin.1 <= raw_end
+				{
+					last_package_use = matches!(
+						items[scan].v,
+						ASTValue::Package { .. } | ASTValue::Use { .. }
+					);
+					scan += 1;
 				}
+				prev_was_package_use = last_package_use;
+				idx = scan;
+				continue;
 			}
 
 			self.write_indent();
@@ -867,7 +851,7 @@ impl Formatter {
 			} => {
 				if *constexpr
 					&& types.is_empty() && names.len() == 1
-					&& values.as_ref().map_or(false, |v| v.len() == 1)
+					&& values.as_ref().is_some_and(|v| v.len() == 1)
 					&& values
 						.as_ref()
 						.and_then(|v| v.first())
@@ -886,9 +870,10 @@ impl Formatter {
 					self.out.push_str(
 						&self.format_namespace_chain(&names[0], value),
 					);
-				} else if values.as_ref().map_or(false, |v| {
-					v.len() == 1 && self.is_stmt_value(&v[0])
-				}) {
+				} else if values
+					.as_ref()
+					.is_some_and(|v| v.len() == 1 && self.is_stmt_value(&v[0]))
+				{
 					self.out.push_str(&names.join(", "));
 					if types.is_empty() {
 						self.out.push_str(if *constexpr {
@@ -1038,8 +1023,14 @@ impl Formatter {
 				body,
 			} => self.format_struct(generics, extends.as_deref(), body),
 			ASTValue::Enum { variants } => self.format_enum(variants),
-			ASTValue::Union { generics, variants } => {
-				self.format_union(generics, variants)
+			ASTValue::Union {
+				generics,
+				variants,
+				methods,
+			} => self.format_union(generics, variants, methods),
+			ASTValue::Hide(name) => {
+				self.out.push_str("hide ");
+				self.out.push_str(name);
 			}
 			ASTValue::RawUnion { generics, body } => {
 				self.format_raw_union(generics, body)
@@ -1247,6 +1238,7 @@ impl Formatter {
 		}
 	}
 
+	#[allow(clippy::too_many_arguments)]
 	fn format_fn(
 		&mut self,
 		loc: &SourceLocation,
@@ -1272,15 +1264,13 @@ impl Formatter {
 			&& self.format_off_overlaps_range(fn_start_line, header_end_line)
 		{
 			let mut raw_end_line = header_end_line;
-			if let FnBody::Block(_) = body {
-				if let Some(lines) = self.source_lines.as_ref() {
-					if raw_end_line > 0 {
-						let idx = (raw_end_line - 1) as usize;
-						if idx < lines.len() && lines[idx].trim() == "{" {
-							raw_end_line =
-								raw_end_line.saturating_sub(1);
-						}
-					}
+			if let FnBody::Block(_) = body
+				&& let Some(lines) = self.source_lines.as_ref()
+				&& raw_end_line > 0
+			{
+				let idx = (raw_end_line - 1) as usize;
+				if idx < lines.len() && lines[idx].trim() == "{" {
+					raw_end_line = raw_end_line.saturating_sub(1);
 				}
 			}
 			if raw_end_line < fn_start_line {
@@ -1429,7 +1419,12 @@ impl Formatter {
 		self.out.push('}');
 	}
 
-	fn format_union(&mut self, generics: &[GenericParam], variants: &[Box<Type>]) {
+	fn format_union(
+		&mut self,
+		generics: &[GenericParam],
+		variants: &[Box<Type>],
+		methods: &[Box<AST>],
+	) {
 		self.out.push_str("union");
 
 		if !generics.is_empty() {
@@ -1450,6 +1445,13 @@ impl Formatter {
 		for variant in variants {
 			self.write_indent();
 			self.out.push_str(&self.format_type(variant));
+			self.out.push('\n');
+		}
+		if !variants.is_empty() && !methods.is_empty() {
+			self.out.push('\n');
+		}
+		for method in methods {
+			self.out.push_str(&self.format_stmt_inline_at_indent(method, self.indent));
 			self.out.push('\n');
 		}
 		self.indent -= 1;
@@ -1704,7 +1706,7 @@ impl Formatter {
 			} => {
 				if *constexpr
 					&& types.is_empty() && names.len() == 1
-					&& values.as_ref().map_or(false, |v| v.len() == 1)
+					&& values.as_ref().is_some_and(|v| v.len() == 1)
 				{
 					let value = &values.as_ref().unwrap()[0];
 					self.format_namespace_chain(&names[0], value)
@@ -1733,6 +1735,7 @@ impl Formatter {
 			| ASTValue::SetMulti { .. }
 			| ASTValue::Return(..)
 			| ASTValue::Defer(..)
+			| ASTValue::Hide(..)
 			| ASTValue::Pub(..) => self.format_stmt_inline_at_indent(ast, self.indent),
 		}
 	}
@@ -1963,11 +1966,11 @@ impl Formatter {
 		if named_items {
 			for item in items {
 				if let InitializerItem::Named { name, value } = item {
-					if let ASTValue::Id(id) = &value.v {
-						if id == name {
-							rendered.push(format!(".{}", name));
-							continue;
-						}
+					if let ASTValue::Id(id) = &value.v
+						&& id == name
+					{
+						rendered.push(format!(".{}", name));
+						continue;
 					}
 					if align_names {
 						let pad = max_name.saturating_sub(name.len());
@@ -2139,6 +2142,7 @@ impl Formatter {
 		}
 	}
 
+	#[allow(clippy::only_used_in_recursion)]
 	fn statement_end_line(&self, ast: &AST) -> i32 {
 		match &ast.v {
 			ASTValue::Pub(inner) => self.statement_end_line(inner),
@@ -2254,10 +2258,10 @@ impl Formatter {
 				if start.is_none() {
 					start = Some(line);
 				}
-			} else if text.contains("heron-format on") {
-				if let Some(begin) = start.take() {
-					ranges.push((begin, line));
-				}
+			} else if text.contains("heron-format on")
+				&& let Some(begin) = start.take()
+			{
+				ranges.push((begin, line));
 			}
 		}
 
@@ -2564,16 +2568,13 @@ impl Formatter {
 			types,
 			values,
 			constexpr,
-		} = &value.v
+		} = &value.v && *constexpr
+			&& types.is_empty() && names.len() == 1
+			&& values.as_ref().is_some_and(|v| v.len() == 1)
 		{
-			if *constexpr
-				&& types.is_empty() && names.len() == 1
-				&& values.as_ref().map_or(false, |v| v.len() == 1)
-			{
-				let inner = &values.as_ref().unwrap()[0];
-				out.push_str(&self.format_namespace_chain(&names[0], inner));
-				return out;
-			}
+			let inner = &values.as_ref().unwrap()[0];
+			out.push_str(&self.format_namespace_chain(&names[0], inner));
+			return out;
 		}
 
 		out.push_str(&self.format_expr(value, self.postfix_prec()));

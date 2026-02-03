@@ -21,14 +21,15 @@ pub fn emit_message<W: WriteColor>(
 	let mut labels: Vec<Option<String>> = Vec::new();
 	let mut locations: Vec<SourceLocation> = Vec::new();
 
-	let (message, kind) = match message {
-		Message::Error(err) => (
-			emit_error_message(err, &mut labels, &mut locations),
-			MessageKind::Error,
-		),
+	let (message, kind, hint) = match message {
+		Message::Error(err) => {
+			let (message, hint) = emit_error_message(err, &mut labels, &mut locations);
+			(message, MessageKind::Error, hint)
+		}
 		Message::Warning(warning) => (
 			emit_warning_message(warning, &mut labels, &mut locations),
 			MessageKind::Warning,
+			None,
 		),
 	};
 
@@ -72,6 +73,17 @@ pub fn emit_message<W: WriteColor>(
 		highlight_locations(writer, &locations, &labels, resolved_input.as_str())?;
 	}
 
+	if let Some(hint) = hint {
+		let mut green_spec = ColorSpec::new();
+		green_spec.set_fg(Some(Color::Green));
+		writer.set_color(&green_spec)?;
+		write!(writer, "hint")?;
+		writer.reset()?;
+		write!(writer, ": {hint}")?;
+		writeln!(writer)?;
+		writer.reset()?;
+	}
+
 	Ok(())
 }
 
@@ -79,145 +91,175 @@ fn emit_error_message(
 	err: FrontendError,
 	labels: &mut Vec<Option<String>>,
 	locations: &mut Vec<SourceLocation>,
-) -> String {
+) -> (String, Option<String>) {
 	match err {
-		FrontendError::ParseError(err) => match err {
-			ParserError::LexerError(e) => {
-				labels.push(None);
-				locations.push(e.location().clone());
-				format!("lexer error: {}", describe_lexer_error(&e))
-			}
-			ParserError::InvalidUnaryOperator(tok) => {
-				labels.push(Some("invalid unary operator".to_string()));
-				locations.push(tok.location);
-				format!("invalid unary operator {}", describe_token_value(&tok.v))
-			}
-			ParserError::InvalidBinaryOperator(tok) => {
-				labels.push(Some("invalid binary operator".to_string()));
-				locations.push(tok.location);
-				format!("invalid binary operator {}", describe_token_value(&tok.v))
-			}
-			ParserError::UnexpectedToken(tok, expected) => {
-				labels.push(Some(format!(
-					"expected {}",
-					describe_token_value(&expected)
-				)));
-				locations.push(tok.location);
-				format!(
-					"unexpected {} (expected {})",
-					describe_token_value(&tok.v),
-					describe_token_value(&expected)
-				)
-			}
-			ParserError::ExpectedToken(tok, expected) => {
-				labels.push(Some(format!(
-					"expected {}",
-					describe_token_value(&expected)
-				)));
-				locations.push(tok.location);
-				format!(
-					"expected {} but found {}",
-					describe_token_value(&expected),
-					describe_token_value(&tok.v)
-				)
-			}
-			ParserError::UnclosedOperatorName(tok, expected) => {
-				labels.push(Some(format!(
-					"operator name not closed (expected {})",
-					describe_token_value(&expected)
-				)));
-				locations.push(tok.location);
-				format!(
-					"operator name not closed (expected {})",
-					describe_token_value(&expected)
-				)
-			}
-			ParserError::InvalidOperatorName(tok) => {
-				labels.push(Some("invalid operator".to_string()));
-				locations.push(tok.location);
-				format!("invalid operator")
-			}
-			ParserError::InvalidFactorToken(tok) => {
-				labels.push(None);
-				locations.push(tok.location);
-				format!("invalid factor token {}", describe_token_value(&tok.v))
-			}
-			ParserError::ExpectedConditionExpression(tok) => {
-				labels.push(None);
-				locations.push(tok.location);
-				format!("expected condition expression")
-			}
-			ParserError::InvalidForBinding(loc) => {
-				labels.push(None);
-				locations.push(loc);
-				format!(
+		FrontendError::ParseError(err) => {
+			let mut hint = None;
+			let message = match err {
+				ParserError::LexerError(e) => {
+					labels.push(None);
+					locations.push(e.location().clone());
+					format!("lexer error: {}", describe_lexer_error(&e))
+				}
+				ParserError::InvalidUnaryOperator(tok) => {
+					labels.push(Some("invalid unary operator".to_string()));
+					locations.push(tok.location);
+					format!(
+						"invalid unary operator {}",
+						describe_token_value(&tok.v)
+					)
+				}
+				ParserError::InvalidBinaryOperator(tok) => {
+					labels.push(Some("invalid binary operator".to_string()));
+					locations.push(tok.location);
+					format!(
+						"invalid binary operator {}",
+						describe_token_value(&tok.v)
+					)
+				}
+				ParserError::UnexpectedToken(tok, expected) => {
+					labels.push(Some(format!(
+						"expected {}",
+						describe_token_value(&expected)
+					)));
+					locations.push(tok.location);
+					format!(
+						"unexpected {} (expected {})",
+						describe_token_value(&tok.v),
+						describe_token_value(&expected)
+					)
+				}
+				ParserError::ExpectedToken(tok, expected) => {
+					labels.push(Some(format!(
+						"expected {}",
+						describe_token_value(&expected)
+					)));
+					locations.push(tok.location);
+					format!(
+						"expected {} but found {}",
+						describe_token_value(&expected),
+						describe_token_value(&tok.v)
+					)
+				}
+				ParserError::UnclosedOperatorName(tok, expected) => {
+					labels.push(Some(format!(
+						"operator name not closed (expected {})",
+						describe_token_value(&expected)
+					)));
+					locations.push(tok.location);
+					format!(
+						"operator name not closed (expected {})",
+						describe_token_value(&expected)
+					)
+				}
+				ParserError::InvalidOperatorName(tok) => {
+					labels.push(Some("invalid operator".to_string()));
+					locations.push(tok.location);
+					"invalid operator".to_string()
+				}
+				ParserError::InvalidFactorToken(tok) => {
+					labels.push(None);
+					locations.push(tok.location);
+					format!(
+						"invalid factor token {}",
+						describe_token_value(&tok.v)
+					)
+				}
+				ParserError::ExpectedConditionExpression(tok) => {
+					labels.push(None);
+					locations.push(tok.location);
+					"expected condition expression".to_string()
+				}
+				ParserError::InvalidForBinding(loc) => {
+					labels.push(None);
+					locations.push(loc);
 					"invalid for binding, must be identifier or reference to identifier"
-				)
-			}
-			ParserError::ExpectedBody(loc) => {
-				labels.push(None);
-				locations.push(loc);
-				format!("expected body")
-			}
-			ParserError::ExpectedExpression(tok) => {
-				labels.push(None);
-				locations.push(tok.location);
-				format!(
-					"expected expression, but found {}",
-					describe_token_value(&tok.v)
-				)
-			}
-			ParserError::InvalidDeclarationType(tok) => {
-				labels.push(None);
-				locations.push(tok.location);
-				format!(
-					"invalid declaration type, found {}",
-					describe_token_value(&tok.v)
-				)
-			}
-			ParserError::InvalidArraySize(loc) => {
-				labels.push(Some(
-					"array size must be identifier or dotted path".to_string()
-				));
-				locations.push(loc);
-				format!("invalid array size expression")
-			}
-			ParserError::PostReturnIdAlreadyDefined(tok) => {
-				labels.push(Some(
+						.to_string()
+				}
+				ParserError::ExpectedBody(loc) => {
+					labels.push(None);
+					locations.push(loc);
+					"expected body".to_string()
+				}
+				ParserError::ExpectedExpression(tok) => {
+					labels.push(None);
+					locations.push(tok.location);
+					format!(
+						"expected expression, but found {}",
+						describe_token_value(&tok.v)
+					)
+				}
+				ParserError::InvalidDeclarationType(tok) => {
+					labels.push(None);
+					locations.push(tok.location);
+					format!(
+						"invalid declaration type, found {}",
+						describe_token_value(&tok.v)
+					)
+				}
+				ParserError::InvalidArraySize(loc) => {
+					labels.push(Some(
+						"array size must be identifier or dotted path"
+							.to_string(),
+					));
+					locations.push(loc);
+					"invalid array size expression".to_string()
+				}
+				ParserError::InvalidNumericType(tok) => {
+					labels.push(Some("invalid numeric type".to_string()));
+					locations.push(tok.location);
+					hint = match &tok.v {
+						TokenValue::Id(name)
+							if name == "u0" || name == "u1" =>
+						{
+							Some("use bool instead".to_string())
+						}
+						_ => None,
+					};
+					format!(
+						"invalid numeric type {}",
+						describe_token_value(&tok.v)
+					)
+				}
+				ParserError::PostReturnIdAlreadyDefined(tok) => {
+					labels.push(Some("post return identifier already defined"
+						.to_string()));
+					locations.push(tok.location);
 					"post return identifier already defined".to_string()
-				));
-				locations.push(tok.location);
-				format!("post return identifier already defined")
-			}
-			ParserError::MixedInitializerListStyles(tok) => {
-				labels.push(Some(
-                    "initializer list items must be all named or all positional".to_string(),
-                ));
-				locations.push(tok.location);
-				format!("mixed initializer list styles")
-			}
-			ParserError::MissingInitializerDot(tok) => {
-				labels.push(Some(
-					"named initializer items must start with '.'".to_string()
-				));
-				locations.push(tok.location);
-				format!("missing '.' before initializer item name")
-			}
-			ParserError::UnsupportedIncrement(tok) => {
-				labels.push(Some("`++` is not supported".to_string()));
-				locations.push(tok.location);
-				format!("`++` is not supported")
-			}
-			ParserError::UnsupportedDecrement(tok) => {
-				labels.push(Some("`--` is not supported".to_string()));
-				locations.push(tok.location);
-				format!("`--` is not supported")
-			}
-		},
+				}
+				ParserError::MixedInitializerListStyles(tok) => {
+					labels.push(Some(
+						"initializer list items must be all named or all positional"
+							.to_string(),
+					));
+					locations.push(tok.location);
+					"mixed initializer list styles".to_string()
+				}
+				ParserError::MissingInitializerDot(tok) => {
+					labels.push(Some(
+						"named initializer items must start with '.'"
+							.to_string(),
+					));
+					locations.push(tok.location);
+					"missing '.' before initializer item name".to_string()
+				}
+				ParserError::UnsupportedIncrement(tok) => {
+					labels.push(Some("`++` is not supported".to_string()));
+					locations.push(tok.location);
+					"`++` is not supported".to_string()
+				}
+				ParserError::UnsupportedDecrement(tok) => {
+					labels.push(Some("`--` is not supported".to_string()));
+					locations.push(tok.location);
+					"`--` is not supported".to_string()
+				}
+			};
+			(message, hint)
+		}
 		FrontendError::InvalidEnumeratedArrayEnum(source_location) => {
 			labels.push(Some("invalid enumareted array enum".to_string()));
 			locations.push(source_location);
-			format!("invalid enumareted array enum")
+			message("invalid enumareted array enum")
 		}
 		FrontendError::InitializerListHasDuplicateFields {
 			first_found_definition,
@@ -227,24 +269,91 @@ fn emit_error_message(
 			locations.push(first_found_definition);
 			labels.push(Some("conflicting field".to_string()));
 			locations.push(conflicting_definition);
-			format!("duplicate fields in initializer list")
+			message("duplicate fields in initializer list")
+		}
+		FrontendError::DuplicateValueDeclaration {
+			name,
+			first_found_definition,
+			conflicting_definition,
+		} => {
+			labels.push(Some("first declaration".to_string()));
+			locations.push(first_found_definition);
+			labels.push(Some("duplicate declaration".to_string()));
+			locations.push(conflicting_definition);
+			message(format!("duplicate declaration of `{name}`"))
+		}
+		FrontendError::DuplicateFieldDeclaration {
+			name,
+			first_found_definition,
+			conflicting_definition,
+		} => {
+			labels.push(Some("first field".to_string()));
+			locations.push(first_found_definition);
+			labels.push(Some("duplicate field".to_string()));
+			locations.push(conflicting_definition);
+			message(format!("duplicate field `{name}`"))
+		}
+		FrontendError::HideOutsideScope { location, name } => {
+			labels.push(Some("hide only allowed in scope".to_string()));
+			locations.push(location);
+			message(format!("`hide` not allowed here for `{name}`"))
+		}
+		FrontendError::InvalidStructMember { location } => {
+			labels.push(Some("invalid struct member".to_string()));
+			locations.push(location);
+			message("struct bodies may only contain declarations")
+		}
+		FrontendError::InlineStructTypeNotAllowed { location } => {
+			labels.push(Some("use a named struct type".to_string()));
+			locations.push(location);
+			(
+				"inline struct types are not allowed in type arguments".to_string(),
+				Some("define a named type like `Unit :: struct{}`".to_string()),
+			)
+		}
+		FrontendError::GenericOperatorConstraint {
+			location,
+			call_location,
+			operator,
+			lhs,
+			rhs,
+		} => {
+			labels.push(Some("invalid operator".to_string()));
+			locations.push(location);
+			labels.push(Some("instantiated here".to_string()));
+			locations.push(call_location);
+			message(format!(
+				"Failed to find suitable operator overload for {lhs}.operator{operator}({rhs})"
+			))
+		}
+		FrontendError::GenericMemberConstraint {
+			location,
+			call_location,
+			member,
+			lhs,
+		} => {
+			labels.push(Some("invalid member access".to_string()));
+			locations.push(location);
+			labels.push(Some("instantiated here".to_string()));
+			locations.push(call_location);
+			message(format!("type {lhs} has no member {member}"))
 		}
 		FrontendError::StructOrUnionNotInComptimeDeclaration(source_location) => {
 			labels.push(Some(
 				"structs and unions must be in comptime declarations".to_string()
 			));
 			locations.push(source_location);
-			format!("structs and unions must be in comptime declarations")
+			message("structs and unions must be in comptime declarations")
 		}
 		FrontendError::InvalidDeclarationArity(source_location) => {
 			labels.push(Some("invalid multi declaration arity".to_string()));
 			locations.push(source_location);
-			format!("invalid multi declaration arity")
+			message("invalid multi declaration arity")
 		}
 		FrontendError::MissingPackage(source_location) => {
 			labels.push(Some("missing package declaration".to_string()));
 			locations.push(source_location);
-			format!("missing package declaration")
+			message("missing package declaration")
 		}
 		FrontendError::PackageMismatch {
 			location,
@@ -253,29 +362,164 @@ fn emit_error_message(
 		} => {
 			labels.push(Some(format!("expected package `{expected}`")));
 			locations.push(location);
-			format!("package mismatch: expected `{expected}`, found `{found}`")
+			message(format!(
+				"package mismatch: expected `{expected}`, found `{found}`"
+			))
 		}
 		FrontendError::ModuleNotFound { location, module } => {
 			labels.push(Some("module not found".to_string()));
 			locations.push(location);
-			format!("module not found: `{module}`")
+			message(format!("module not found: `{module}`"))
 		}
 		FrontendError::DuplicateModuleAlias { location, alias } => {
 			labels.push(Some("duplicate module alias".to_string()));
 			locations.push(location);
-			format!("duplicate module alias `{alias}`")
+			message(format!("duplicate module alias `{alias}`"))
 		}
 		FrontendError::DuplicateModuleImport { location, module } => {
 			labels.push(Some("duplicate module import".to_string()));
 			locations.push(location);
-			format!("duplicate module import `{module}`")
+			message(format!("duplicate module import `{module}`"))
 		}
 		FrontendError::DuplicateExport { location, name } => {
 			labels.push(Some("duplicate export".to_string()));
 			locations.push(location);
-			format!("duplicate export `{name}`")
+			message(format!("duplicate export `{name}`"))
+		}
+		FrontendError::UnknownType {
+			location,
+			name,
+			hint,
+		} => {
+			labels.push(Some("unknown type".to_string()));
+			locations.push(location);
+			(format!("unknown type `{name}`"), hint)
+		}
+		FrontendError::UnknownValue { location, name } => {
+			labels.push(Some("unknown value".to_string()));
+			locations.push(location);
+			message(format!("unknown value `{name}`"))
+		}
+		FrontendError::TypeMismatch {
+			location,
+			expected,
+			found,
+		} => {
+			labels.push(Some(format!("expected {expected}")));
+			locations.push(location);
+			message(format!(
+				"type mismatch (expected {expected}, found {found})"
+			))
+		}
+		FrontendError::InvalidOperator {
+			location,
+			operator,
+			lhs,
+			rhs,
+		} => {
+			labels.push(Some("invalid operator".to_string()));
+			locations.push(location);
+			let args = rhs.unwrap_or_default();
+			let sig = if args.is_empty() {
+				format!("{lhs}.operator{operator}()")
+			} else {
+				format!("{lhs}.operator{operator}({args})")
+			};
+			message(format!(
+				"Failed to find suitable operator overload for {sig}"
+			))
+		}
+		FrontendError::InvalidCall { location, callee } => {
+			labels.push(Some("invalid call".to_string()));
+			locations.push(location);
+			message(format!("invalid call to {callee}"))
+		}
+		FrontendError::MissingOperatorSelf {
+			location,
+			operator,
+			hint,
+		} => {
+			labels.push(Some("missing self parameter".to_string()));
+			locations.push(location);
+			(
+				format!("operator {operator} must take self parameter"),
+				Some(hint),
+			)
+		}
+		FrontendError::MissingField {
+			location,
+			type_name,
+			field,
+		} => {
+			labels.push(Some("missing field".to_string()));
+			locations.push(location);
+			message(format!("type {type_name} has no field {field}"))
+		}
+		FrontendError::CyclicTypeDefinition {
+			location,
+			type_name,
+			cycle: _,
+			cycle_locations,
+		} => {
+			labels.push(Some("cyclic type definition".to_string()));
+			locations.push(location);
+			for (location, label) in cycle_locations {
+				labels.push(Some(label));
+				locations.push(location);
+			}
+			(
+				format!("type `{type_name}` has a cyclic definition"),
+				Some(format!(
+					"consider making one of the fields a reference (e.g. `&{type_name}`)"
+				)),
+			)
+		}
+		FrontendError::InvalidIndex {
+			location,
+			target,
+			index,
+		} => {
+			labels.push(Some("invalid index".to_string()));
+			locations.push(location);
+			message(format!("cannot index {target} with {index}"))
+		}
+		FrontendError::NonBoolCondition { location, found } => {
+			labels.push(Some("expected bool".to_string()));
+			locations.push(location);
+			message(format!("condition must be bool (found {found})"))
+		}
+		FrontendError::UntypedLiteralNeedsContext { location, kind } => {
+			labels.push(Some("needs type context".to_string()));
+			locations.push(location);
+			message(format!("untyped {kind} literal needs a type context"))
+		}
+		FrontendError::DuplicateUnionVariantType { location, ty } => {
+			labels.push(Some("duplicate union variant type".to_string()));
+			locations.push(location);
+			message(format!("union contains duplicate variant type {ty}"))
+		}
+		FrontendError::UnusedValue { location, hint } => {
+			labels.push(Some("unused value".to_string()));
+			locations.push(location);
+			("unused value".to_string(), Some(hint))
+		}
+		FrontendError::InaccessibleMember {
+			location,
+			type_name,
+			member,
+		} => {
+			labels.push(Some("inaccessible member".to_string()));
+			locations.push(location);
+			(
+				format!("{type_name}.{member} is not accessible"),
+				Some("mark it as `pub` to expose it".to_string()),
+			)
 		}
 	}
+}
+
+fn message(text: impl Into<String>) -> (String, Option<String>) {
+	(text.into(), None)
 }
 
 fn emit_warning_message(
@@ -400,6 +644,7 @@ fn keyword_lexeme(keyword: &Keyword) -> &'static str {
 		Keyword::Union => "union",
 		Keyword::RawUnion => "raw_union",
 		Keyword::Void => "void",
+		Keyword::Hide => "hide",
 	}
 }
 
@@ -531,7 +776,7 @@ fn highlight_single_location<W: WriteColor>(
 	Ok(())
 }
 
-fn fetch_line<'a>(input: &'a str, line_number: usize) -> &'a str {
+fn fetch_line(input: &str, line_number: usize) -> &str {
 	if line_number == 0 {
 		return "";
 	}

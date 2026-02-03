@@ -5,11 +5,15 @@ mod parser;
 mod pass_1;
 mod pass_2;
 mod pass_3;
+mod pass_4;
 mod passes;
+mod typed_ast;
 
 pub use ast::*;
 pub use errors::*;
 pub use lexer::*;
 pub use parser::*;
 pub use pass_3::*;
+pub use pass_4::*;
 pub use passes::*;
+pub use typed_ast::*;

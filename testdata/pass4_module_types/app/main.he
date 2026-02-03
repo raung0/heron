@@ -1,0 +1,10 @@
+package main
+
+use some_package
+
+takes :: fn (value: some_package.Foo) -> i32 do value.value
+
+main :: fn {
+	foo := some_package.Foo .{ .value = 1 }
+	_ = takes(foo)
+}

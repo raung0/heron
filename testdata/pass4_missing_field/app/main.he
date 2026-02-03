@@ -1,0 +1,10 @@
+package main
+
+Foo :: struct {
+	a: i32
+}
+
+main :: fn {
+	foo := Foo .{ .a = 1 }
+	foo.b
+}

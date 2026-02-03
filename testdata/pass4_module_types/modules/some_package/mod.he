@@ -1,0 +1,5 @@
+package some_package
+
+pub Foo :: struct {
+	pub value: i32
+}

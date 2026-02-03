@@ -1,0 +1,5 @@
+package main
+
+main :: fn -> bool {
+	1
+}

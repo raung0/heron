@@ -1,0 +1,76 @@
+package main
+
+use some_package as pkg
+
+Ok :: struct<T> {
+	v: T
+
+	pub __construct :: fn (self: &mut Self; v: T) {
+		self.v = v
+	}
+}
+Unit :: struct {
+}
+Err :: struct<T> {
+	v: T
+
+	pub __construct :: fn (self: &mut Self; v: T) {
+		self.v = v
+	}
+}
+
+Result :: union<T; E> {
+	Ok<T>
+	Err<E>
+
+pub is_error :: fn (self: Result<T, E>) -> bool {
+		match & v in self {
+			case Ok -> false
+			case Err -> true
+		}
+	}
+pub is_ok :: fn (self: Result<T, E>) -> bool {
+		match & v in self {
+			case Ok -> true
+			case Err -> false
+		}
+	}
+}
+
+MyStruct :: struct<T> {
+	field: i32
+	generic_field: T
+	// invalid_field: ^NonExistantType
+	// another_invalid_field: i1
+
+	operator() :: fn (self: &MyStruct) -> i32 {
+		32
+	}
+
+	operator[] :: fn (self: &MyStruct) -> i32 do 12
+
+	operator- :: fn<T> (self: &MyStruct; other: T) -> i32 do 68
+	operator+ :: fn (self: &MyStruct; other: T) -> i32 do 68
+
+	hello :: fn (self: &Self) -> i32 do 123
+}
+
+CONST_1 :: 60
+CONST_2 :: 3
+CONST :: CONST_1 + CONST_2 * CONST_2
+
+normal_function :: fn<T; Y> (a, b: T; c: Y) -> T do a + c.hello() + b
+
+main :: fn {
+	a := pkg.hello()
+	b: u32 = CONST
+	res: Result<i32, Unit> = Ok(123)
+	struct_ := MyStruct<i32> .{ }
+	normal_function<bool, MyStruct>(true, false, struct_)
+	normal_function(true, false, struct_)
+	normal_function(1, 2, struct_)
+	// normal_function<bool>(1, false, struct_)
+	hide struct_
+	struct_ := MyStruct .{ }
+	struct_ - struct_() + struct_[] + a + { cast<i32>b }
+}

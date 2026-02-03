@@ -1,3 +1,5 @@
+#![allow(clippy::result_large_err)]
+
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::read_to_string;
 use std::path::{Path, PathBuf};
@@ -9,11 +11,13 @@ use crate::frontend::{
 
 pub type ModuleId = String;
 
+#[derive(Clone)]
 pub struct ResolvedProgram {
 	pub entry: ModuleId,
 	pub modules: HashMap<ModuleId, ModuleInfo>,
 }
 
+#[derive(Clone)]
 pub struct ModuleInfo {
 	pub id: ModuleId,
 	pub file_path: String,
@@ -23,15 +27,18 @@ pub struct ModuleInfo {
 	pub exports: ModuleExports,
 }
 
+#[derive(Clone)]
 pub struct ModuleImports {
 	pub alias_to_module: HashMap<String, ModuleId>,
 }
 
+#[derive(Clone)]
 pub struct ModuleExports {
 	pub types: HashMap<String, ExportStub>,
 	pub constexprs: HashMap<String, ExportStub>,
 }
 
+#[derive(Clone)]
 pub struct ExportStub {
 	pub name: String,
 	pub node: Box<AST>,
@@ -240,7 +247,7 @@ fn normalize_root(path: &Path) -> PathBuf {
 }
 
 fn extract_package(
-	ast: &Box<AST>,
+	ast: &AST,
 	file_path: &str,
 ) -> Result<(Vec<String>, SourceLocation), FrontendError> {
 	let mut package = None;
@@ -263,7 +270,7 @@ fn extract_package(
 	}
 }
 
-fn collect_uses(ast: &Box<AST>) -> Vec<UseDirective> {
+fn collect_uses(ast: &AST) -> Vec<UseDirective> {
 	let mut uses = Vec::new();
 	let ASTValue::ExprList(items) = &ast.v else {
 		return uses;
@@ -412,7 +419,7 @@ fn parse_module(file_path: &str) -> ModuleParseResult {
 	}
 }
 
-fn collect_exports(ast: &Box<AST>, errors: &mut Vec<FrontendError>) -> ModuleExports {
+fn collect_exports(ast: &AST, errors: &mut Vec<FrontendError>) -> ModuleExports {
 	let mut types = HashMap::new();
 	let mut constexprs = HashMap::new();
 	let ASTValue::ExprList(items) = &ast.v else {
@@ -445,27 +452,24 @@ fn collect_exports(ast: &Box<AST>, errors: &mut Vec<FrontendError>) -> ModuleExp
 			}
 			ASTValue::DeclarationMulti {
 				names,
-				values,
+				values: Some(values),
 				constexpr: true,
 				..
 			} => {
-				if let Some(values) = values {
-					for (idx, name) in names.iter().enumerate() {
-						if let Some(value) = values.get(idx) {
-							let target =
-								if is_type_value(value.as_ref()) {
-									&mut types
-								} else {
-									&mut constexprs
-								};
-							insert_export_value(
-								target,
-								name.clone(),
-								value.clone(),
-								inner.location.clone(),
-								errors,
-							);
-						}
+				for (idx, name) in names.iter().enumerate() {
+					if let Some(value) = values.get(idx) {
+						let target = if is_type_value(value.as_ref()) {
+							&mut types
+						} else {
+							&mut constexprs
+						};
+						insert_export_value(
+							target,
+							name.clone(),
+							value.clone(),
+							inner.location.clone(),
+							errors,
+						);
 					}
 				}
 			}

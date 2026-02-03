@@ -16,6 +16,7 @@ pub enum ParseError {
 	ExpectedExpression(Token),
 	InvalidDeclarationType(Token),
 	InvalidArraySize(SourceLocation),
+	InvalidNumericType(Token),
 	PostReturnIdAlreadyDefined(Token),
 	MixedInitializerListStyles(Token),
 	MissingInitializerDot(Token),
@@ -30,6 +31,39 @@ pub enum FrontendError {
 	InitializerListHasDuplicateFields {
 		first_found_definition: SourceLocation,
 		conflicting_definition: SourceLocation,
+	},
+	DuplicateValueDeclaration {
+		name: String,
+		first_found_definition: SourceLocation,
+		conflicting_definition: SourceLocation,
+	},
+	DuplicateFieldDeclaration {
+		name: String,
+		first_found_definition: SourceLocation,
+		conflicting_definition: SourceLocation,
+	},
+	HideOutsideScope {
+		location: SourceLocation,
+		name: String,
+	},
+	InvalidStructMember {
+		location: SourceLocation,
+	},
+	InlineStructTypeNotAllowed {
+		location: SourceLocation,
+	},
+	GenericOperatorConstraint {
+		location: SourceLocation,
+		call_location: SourceLocation,
+		operator: String,
+		lhs: String,
+		rhs: String,
+	},
+	GenericMemberConstraint {
+		location: SourceLocation,
+		call_location: SourceLocation,
+		member: String,
+		lhs: String,
 	},
 	StructOrUnionNotInComptimeDeclaration(SourceLocation),
 	InvalidDeclarationArity(SourceLocation),
@@ -54,6 +88,72 @@ pub enum FrontendError {
 	DuplicateExport {
 		location: SourceLocation,
 		name: String,
+	},
+	UnknownType {
+		location: SourceLocation,
+		name: String,
+		hint: Option<String>,
+	},
+	UnknownValue {
+		location: SourceLocation,
+		name: String,
+	},
+	TypeMismatch {
+		location: SourceLocation,
+		expected: String,
+		found: String,
+	},
+	InvalidOperator {
+		location: SourceLocation,
+		operator: String,
+		lhs: String,
+		rhs: Option<String>,
+	},
+	InvalidCall {
+		location: SourceLocation,
+		callee: String,
+	},
+	MissingOperatorSelf {
+		location: SourceLocation,
+		operator: String,
+		hint: String,
+	},
+	MissingField {
+		location: SourceLocation,
+		type_name: String,
+		field: String,
+	},
+	CyclicTypeDefinition {
+		location: SourceLocation,
+		type_name: String,
+		cycle: String,
+		cycle_locations: Vec<(SourceLocation, String)>,
+	},
+	InvalidIndex {
+		location: SourceLocation,
+		target: String,
+		index: String,
+	},
+	NonBoolCondition {
+		location: SourceLocation,
+		found: String,
+	},
+	UntypedLiteralNeedsContext {
+		location: SourceLocation,
+		kind: String,
+	},
+	DuplicateUnionVariantType {
+		location: SourceLocation,
+		ty: String,
+	},
+	UnusedValue {
+		location: SourceLocation,
+		hint: String,
+	},
+	InaccessibleMember {
+		location: SourceLocation,
+		type_name: String,
+		member: String,
 	},
 }
 

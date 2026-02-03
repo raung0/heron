@@ -1,0 +1,21 @@
+package main
+
+Base :: struct {
+	pub pub_field: int
+	priv_field: int
+
+	pub pub_method :: fn (self: &Base) -> int do self.priv_field
+	priv_method :: fn (self: &Base) -> int do self.priv_field
+}
+
+Child :: struct extends Base {
+	pub child_method :: fn (self: &Child) -> int {
+		self.priv_field + self.priv_method()
+	}
+}
+
+main :: fn {
+	child := Child .{ }
+	_ = child.pub_field
+	_ = child.child_method()
+}

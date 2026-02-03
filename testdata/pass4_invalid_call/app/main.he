@@ -1,0 +1,6 @@
+package main
+
+main :: fn {
+	value := 1
+	value()
+}

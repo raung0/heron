@@ -395,6 +395,7 @@ pub enum ASTValue {
 	ExprList(Vec<Box<AST>>),
 	ExprListNoScope(Vec<Box<AST>>),
 	Return(Option<Box<AST>>),
+	Hide(String),
 	Defer(Box<AST>),
 	DotId(String),
 	Match {
@@ -460,6 +461,7 @@ pub enum ASTValue {
 	Union {
 		generics: Vec<GenericParam>,
 		variants: Vec<Box<Type>>,
+		methods: Vec<Box<AST>>,
 	},
 	RawUnion {
 		generics: Vec<GenericParam>,
@@ -516,7 +518,7 @@ impl AST {
 					'[' => {
 						let mut buf = String::new();
 						let mut depth = 0usize;
-						while let Some(ch) = it.next() {
+						for ch in it.by_ref() {
 							buf.push(ch);
 							match ch {
 								'[' => depth += 1,
@@ -535,7 +537,7 @@ impl AST {
 					'"' => {
 						let mut buf = String::new();
 						let mut escaped = false;
-						while let Some(ch) = it.next() {
+						for ch in it.by_ref() {
 							buf.push(ch);
 							if escaped {
 								escaped = false;
@@ -881,6 +883,9 @@ impl fmt::Display for AST {
 			Defer(v) => {
 				write!(f, "(Defer {})", v)
 			}
+			Hide(name) => {
+				write!(f, "(Hide {:?})", name)
+			}
 			DotId(name) => {
 				write!(f, "(DotId {:?})", name)
 			}
@@ -1106,7 +1111,9 @@ impl fmt::Display for AST {
 				}
 				write!(f, ")")
 			}
-			Union { generics, variants } => {
+			Union {
+				generics, variants, ..
+			} => {
 				write!(f, "(Union")?;
 				if !generics.is_empty() {
 					write_generic_list(f, generics)?;
@@ -1142,9 +1149,9 @@ impl fmt::Display for AST {
 	}
 }
 
-pub fn walk_ast<F>(node: &Box<AST>, parent: Option<&Box<AST>>, predicate: &mut F)
+pub fn walk_ast<F>(node: &AST, parent: Option<&AST>, predicate: &mut F)
 where
-	F: FnMut(&Box<AST>, Option<&Box<AST>>),
+	F: FnMut(&AST, Option<&AST>),
 {
 	predicate(node, parent);
 
@@ -1164,6 +1171,7 @@ where
 		| ASTValue::Pub(v) => {
 			walk_ast(v, Some(node), predicate);
 		}
+		ASTValue::Hide(_) => {}
 
 		ASTValue::Ref { v, .. } => {
 			walk_ast(v, Some(node), predicate);
@@ -1258,11 +1266,12 @@ where
 				walk_ast(v, Some(node), predicate);
 			}
 		}
-		ASTValue::DeclarationMulti { values, .. } => {
-			if let Some(values) = values {
-				for v in values {
-					walk_ast(v, Some(node), predicate);
-				}
+		ASTValue::DeclarationMulti {
+			values: Some(values),
+			..
+		} => {
+			for v in values {
+				walk_ast(v, Some(node), predicate);
 			}
 		}
 
@@ -1278,14 +1287,18 @@ where
 			if let Some(w) = where_clause {
 				walk_ast(w, Some(node), predicate);
 			}
-			match body {
-				FnBody::Block(b) => walk_ast(b, Some(node), predicate),
-				_ => {}
+			if let FnBody::Block(b) = body {
+				walk_ast(b, Some(node), predicate);
 			}
 		}
 
 		ASTValue::Struct { body, .. } | ASTValue::RawUnion { body, .. } => {
 			walk_ast(body, Some(node), predicate);
+		}
+		ASTValue::Union { methods, .. } => {
+			for method in methods {
+				walk_ast(method, Some(node), predicate);
+			}
 		}
 
 		ASTValue::Match {
@@ -1323,6 +1336,7 @@ where
 		| ASTValue::Pub(v) => {
 			walk_ast_mut(v, predicate);
 		}
+		ASTValue::Hide(_) => {}
 
 		ASTValue::Ref { v, .. } => {
 			walk_ast_mut(v, predicate);
@@ -1445,6 +1459,11 @@ where
 		ASTValue::Struct { body, .. } | ASTValue::RawUnion { body, .. } => {
 			walk_ast_mut(body, predicate);
 		}
+		ASTValue::Union { methods, .. } => {
+			for method in methods {
+				walk_ast_mut(method, predicate);
+			}
+		}
 
 		ASTValue::Match {
 			scrutinee, cases, ..
@@ -1495,7 +1514,6 @@ where
 		| ASTValue::DotId(_)
 		| ASTValue::Type(_)
 		| ASTValue::Enum { .. }
-		| ASTValue::Union { .. }
 		| ASTValue::Newtype { .. }
 		| ASTValue::Alias { .. } => {}
 	}

@@ -74,7 +74,7 @@ fn main() {
 						)
 					);
 				}
-				let (program, errors, warnings) =
+				let (_typed_program, program, errors, warnings) =
 					run_passes_with_modules(ast, file.as_str(), &module_paths);
 				if !warnings.is_empty() {
 					let mut stderr = StandardStream::stderr(ColorChoice::Auto);
@@ -92,7 +92,6 @@ fn main() {
 				}
 				if dump_module_graph {
 					println!("{}", dot_module_graph(&program));
-					return;
 				}
 			}
 			Err(e) => pretty_print_error(

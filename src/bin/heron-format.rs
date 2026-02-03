@@ -2,7 +2,7 @@ use clap::{Arg, ArgAction, Command};
 use heron::frontend;
 use heron::{
 	diagnostics::pretty_print_error,
-	formatter::{format_ast_with_options, FormatConfig, FormatOptions},
+	formatter::{FormatConfig, FormatOptions, format_ast_with_options},
 };
 
 fn main() {

@@ -1,6 +1,6 @@
 use crate::frontend::{
-	AST, FrontendError, FrontendWarning, ResolvedProgram, pass_1::pass_1, pass_2::pass_2,
-	pass_3::pass_3,
+	AST, FrontendError, FrontendWarning, ResolvedProgram, TypedProgram, pass_1::pass_1,
+	pass_2::pass_2, pass_3::pass_3, pass_4::pass_4,
 };
 
 pub fn run_passes(ast: Box<AST>) -> (Box<AST>, Vec<FrontendError>) {
@@ -13,10 +13,17 @@ pub fn run_passes_with_modules(
 	ast: Box<AST>,
 	entry_file: &str,
 	module_paths: &[String],
-) -> (ResolvedProgram, Vec<FrontendError>, Vec<FrontendWarning>) {
+) -> (
+	TypedProgram,
+	ResolvedProgram,
+	Vec<FrontendError>,
+	Vec<FrontendWarning>,
+) {
 	let ast = pass_1(ast);
 	let mut errors = pass_2(&ast);
 	let pass_3 = pass_3(ast, entry_file, module_paths);
 	errors.extend(pass_3.errors);
-	(pass_3.program, errors, pass_3.warnings)
+	let pass_4 = pass_4(pass_3.program.clone());
+	errors.extend(pass_4.errors);
+	(pass_4.program, pass_3.program, errors, pass_3.warnings)
 }

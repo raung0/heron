@@ -1,0 +1,9 @@
+package main
+
+Dup :: union {
+	i32
+	i32
+}
+
+main :: fn {
+}

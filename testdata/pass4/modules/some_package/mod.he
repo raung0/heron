@@ -1,0 +1,5 @@
+package some_package
+
+pub hello :: fn -> i32 {
+	32
+}
