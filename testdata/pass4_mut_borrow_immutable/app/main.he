@@ -1,0 +1,7 @@
+package main
+
+main := fn {
+	value := 1
+	ref := &mut value
+	_ = ref
+}

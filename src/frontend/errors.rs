@@ -145,7 +145,31 @@ pub enum FrontendError {
 		location: SourceLocation,
 		name: String,
 	},
+	AssignWhileBorrowed {
+		location: SourceLocation,
+		name: String,
+	},
 	UseAfterMove {
+		location: SourceLocation,
+		name: String,
+	},
+	MoveWhileBorrowed {
+		location: SourceLocation,
+		name: String,
+	},
+	AccessWhileMutBorrowed {
+		location: SourceLocation,
+		name: String,
+	},
+	BorrowSharedWhileMut {
+		location: SourceLocation,
+		name: String,
+	},
+	BorrowMutWhileShared {
+		location: SourceLocation,
+		name: String,
+	},
+	MutBorrowOfImmutable {
 		location: SourceLocation,
 		name: String,
 	},

@@ -1,0 +1,9 @@
+package main
+
+main := fn {
+	mut value := 1
+	first := &value
+	_ = first
+	second := &mut value
+	_ = second
+}

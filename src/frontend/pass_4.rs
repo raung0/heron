@@ -53,6 +53,25 @@ pub struct ValueInfo {
 	pub moved: bool,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BorrowKind {
+	Shared,
+	Mutable,
+}
+
+#[derive(Clone, Copy)]
+struct BorrowState {
+	shared: u32,
+	mutable: bool,
+}
+
+#[derive(Clone)]
+struct RefBinding {
+	base: String,
+	kind: BorrowKind,
+	is_static: bool,
+}
+
 #[derive(Clone)]
 pub struct ModuleState {
 	pub id: ModuleId,
@@ -69,12 +88,16 @@ struct TypeContext<'a> {
 	module_id: &'a ModuleId,
 	module: &'a ModuleState,
 	value_scopes: Vec<HashMap<String, ValueInfo>>,
+	borrow_state: HashMap<String, BorrowState>,
+	ref_scopes: Vec<HashMap<String, RefBinding>>,
+	temporary_borrows: Vec<RefBinding>,
 	generic_types: HashMap<String, TypeId>,
 	self_type: Option<TypeId>,
 	return_type: Option<TypeId>,
 	in_constexpr: bool,
 	unsafe_depth: usize,
 	suppress_move: bool,
+	suppress_borrow_check: bool,
 }
 
 struct Pass4State {
@@ -1112,15 +1135,16 @@ impl Pass4State {
 		ctx.unsafe_depth > 0
 	}
 
+	#[allow(clippy::only_used_in_recursion)]
 	fn lhs_base_id<'a>(&self, node: &'a AST) -> Option<&'a str> {
 		match &node.v {
 			ASTValue::Id(name) => Some(name.as_str()),
 			ASTValue::Deref(inner) => self.lhs_base_id(inner),
-			ASTValue::BinExpr { op, lhs, .. }
-				if matches!(op, crate::frontend::Operator::Dot) =>
-			{
-				self.lhs_base_id(lhs)
-			}
+			ASTValue::BinExpr {
+				op: crate::frontend::Operator::Dot,
+				lhs,
+				..
+			} => self.lhs_base_id(lhs),
 			ASTValue::Index { target, .. } => self.lhs_base_id(target),
 			ASTValue::ExprList { items, .. }
 			| ASTValue::ExprListNoScope { items, .. } => {
@@ -1130,7 +1154,207 @@ impl Pass4State {
 		}
 	}
 
+	#[allow(clippy::only_used_in_recursion)]
+	fn top_level_ref<'a>(&self, node: &'a AST) -> Option<(bool, &'a AST)> {
+		match &node.v {
+			ASTValue::Ref { mutable, v } => Some((*mutable, v.as_ref())),
+			ASTValue::ExprListNoScope { items, .. } if items.len() == 1 => {
+				items.first().and_then(|item| self.top_level_ref(item))
+			}
+			_ => None,
+		}
+	}
+
+	fn scope_index_for_value(&self, ctx: &TypeContext, name: &str) -> Option<usize> {
+		for (idx, scope) in ctx.value_scopes.iter().enumerate().rev() {
+			if scope.contains_key(name) {
+				return Some(idx);
+			}
+		}
+		if ctx.module.values.contains_key(name) {
+			return Some(0);
+		}
+		None
+	}
+
+	fn lookup_value_info(&self, ctx: &TypeContext, name: &str) -> Option<ValueInfo> {
+		for scope in ctx.value_scopes.iter().rev() {
+			if let Some(info) = scope.get(name) {
+				return Some(*info);
+			}
+		}
+		ctx.module.values.get(name).copied()
+	}
+
+	fn is_static_ref_type(&self, ty: TypeId) -> bool {
+		match self.arena.get(ty) {
+			ResolvedType::Reference {
+				lifetime: Some('s'),
+				..
+			} => true,
+			ResolvedType::Alias { underlying, .. } => {
+				self.is_static_ref_type(*underlying)
+			}
+			ResolvedType::GenericInstance { base, .. } => {
+				self.is_static_ref_type(*base)
+			}
+			_ => false,
+		}
+	}
+
+	fn borrow_conflicts(&self, ctx: &TypeContext, name: &str, kind: BorrowKind) -> bool {
+		let Some(state) = ctx.borrow_state.get(name) else {
+			return false;
+		};
+		match kind {
+			BorrowKind::Shared => state.mutable,
+			BorrowKind::Mutable => state.mutable || state.shared > 0,
+		}
+	}
+
+	fn push_scope(&self, ctx: &mut TypeContext) {
+		ctx.value_scopes.push(HashMap::new());
+		ctx.ref_scopes.push(HashMap::new());
+	}
+
+	fn pop_scope(&mut self, ctx: &mut TypeContext) {
+		if let Some(bindings) = ctx.ref_scopes.pop() {
+			for (_, binding) in bindings {
+				self.release_borrow(ctx, &binding);
+			}
+		}
+		ctx.value_scopes.pop();
+	}
+
+	fn register_borrow(
+		&mut self,
+		ctx: &mut TypeContext,
+		name: &str,
+		kind: BorrowKind,
+		location: &SourceLocation,
+	) -> bool {
+		let state = ctx
+			.borrow_state
+			.entry(name.to_string())
+			.or_insert(BorrowState {
+				shared: 0,
+				mutable: false,
+			});
+		match kind {
+			BorrowKind::Shared => {
+				if state.mutable {
+					self.errors.push(FrontendError::BorrowSharedWhileMut {
+						location: location.clone(),
+						name: name.to_string(),
+					});
+					return false;
+				}
+				state.shared += 1;
+			}
+			BorrowKind::Mutable => {
+				if state.mutable || state.shared > 0 {
+					self.errors.push(FrontendError::BorrowMutWhileShared {
+						location: location.clone(),
+						name: name.to_string(),
+					});
+					return false;
+				}
+				state.mutable = true;
+			}
+		}
+		true
+	}
+
+	fn release_borrow(&mut self, ctx: &mut TypeContext, binding: &RefBinding) {
+		if binding.is_static {
+			return;
+		}
+		let Some(state) = ctx.borrow_state.get_mut(&binding.base) else {
+			return;
+		};
+		match binding.kind {
+			BorrowKind::Shared => {
+				state.shared = state.shared.saturating_sub(1);
+			}
+			BorrowKind::Mutable => {
+				state.mutable = false;
+			}
+		}
+		if state.shared == 0 && !state.mutable {
+			ctx.borrow_state.remove(&binding.base);
+		}
+	}
+
+	fn release_binding_for_name(&mut self, ctx: &mut TypeContext, name: &str) {
+		for scope in ctx.ref_scopes.iter_mut().rev() {
+			if let Some(binding) = scope.remove(name) {
+				self.release_borrow(ctx, &binding);
+				break;
+			}
+		}
+	}
+
+	fn record_temporary_borrow(&mut self, ctx: &mut TypeContext, binding: RefBinding) {
+		ctx.temporary_borrows.push(binding);
+	}
+
+	fn promote_temporary_borrow(
+		&mut self,
+		ctx: &mut TypeContext,
+		binding_name: &str,
+		binding: RefBinding,
+		location: &SourceLocation,
+	) {
+		let mut removed = None;
+		if let Some(index) = ctx
+			.temporary_borrows
+			.iter()
+			.position(|entry| entry.base == binding.base && entry.kind == binding.kind)
+		{
+			removed = Some(ctx.temporary_borrows.remove(index));
+		}
+		if removed.is_none() {
+			if binding.kind == BorrowKind::Mutable {
+				if let Some(info) = self.lookup_value_info(ctx, &binding.base) {
+					if !info.mutable {
+						return;
+					}
+				}
+			}
+			if self.borrow_conflicts(ctx, &binding.base, binding.kind) {
+				return;
+			}
+			if !self.register_borrow(ctx, &binding.base, binding.kind, location) {
+				return;
+			}
+		}
+		let Some(scope_idx) = self.scope_index_for_value(ctx, binding_name) else {
+			return;
+		};
+		if let Some(scope) = ctx.ref_scopes.get_mut(scope_idx) {
+			scope.insert(binding_name.to_string(), binding);
+		}
+	}
+
+	fn clear_temporary_borrows(&mut self, ctx: &mut TypeContext) {
+		let borrows = std::mem::take(&mut ctx.temporary_borrows);
+		for binding in borrows {
+			self.release_borrow(ctx, &binding);
+		}
+	}
+
 	fn mark_moved(&mut self, ctx: &mut TypeContext, name: &str, location: &SourceLocation) {
+		if !ctx.suppress_borrow_check {
+			if let Some(state) = ctx.borrow_state.get(name) {
+				if state.shared > 0 || state.mutable {
+					self.errors.push(FrontendError::MoveWhileBorrowed {
+						location: location.clone(),
+						name: name.to_string(),
+					});
+					return;
+				}
+			}
+		}
 		for scope in ctx.value_scopes.iter_mut().rev() {
 			if let Some(info) = scope.get_mut(name) {
 				if info.moved {
@@ -1368,12 +1592,16 @@ impl Pass4State {
 				module_id: &module_id,
 				module: &module_snapshot,
 				value_scopes: vec![HashMap::new()],
+				borrow_state: HashMap::new(),
+				ref_scopes: vec![HashMap::new()],
+				temporary_borrows: Vec::new(),
 				generic_types: HashMap::new(),
 				self_type: None,
 				return_type: None,
 				in_constexpr: false,
 				unsafe_depth: 0,
 				suppress_move: false,
+				suppress_borrow_check: false,
 			};
 			let typed_ast = self.type_node(&module_snapshot.ast, &mut ctx, None);
 			let values = module_snapshot
@@ -1459,6 +1687,20 @@ impl Pass4State {
 				let bool_literal = name == "true" || name == "false";
 				for scope in ctx.value_scopes.iter_mut().rev() {
 					if let Some(info) = scope.get_mut(name) {
+						if !ctx.suppress_borrow_check {
+							if let Some(state) =
+								ctx.borrow_state.get(name)
+							{
+								if state.mutable {
+									self.errors.push(
+										FrontendError::AccessWhileMutBorrowed {
+											location: node.location.clone(),
+											name: name.clone(),
+										},
+									);
+								}
+							}
+						}
 						if info.moved {
 							self.errors.push(
 								FrontendError::UseAfterMove {
@@ -1471,7 +1713,27 @@ impl Pass4State {
 						}
 						if !ctx.suppress_move && !self.is_copy_type(info.ty)
 						{
-							info.moved = true;
+							let mut can_move = true;
+							if !ctx.suppress_borrow_check {
+								if let Some(state) =
+									ctx.borrow_state.get(name)
+								{
+									if state.shared > 0
+										|| state.mutable
+									{
+										self.errors.push(
+											FrontendError::MoveWhileBorrowed {
+												location: node.location.clone(),
+												name: name.clone(),
+											},
+										);
+										can_move = false;
+									}
+								}
+							}
+							if can_move {
+								info.moved = true;
+							}
 						}
 						found = Some(*info);
 						break;
@@ -1479,6 +1741,20 @@ impl Pass4State {
 				}
 				if found.is_none() {
 					if let Some(info) = ctx.module.values.get(name) {
+						if !ctx.suppress_borrow_check {
+							if let Some(state) =
+								ctx.borrow_state.get(name)
+							{
+								if state.mutable {
+									self.errors.push(
+										FrontendError::AccessWhileMutBorrowed {
+											location: node.location.clone(),
+											name: name.clone(),
+										},
+									);
+								}
+							}
+						}
 						found = Some(*info);
 					}
 				}
@@ -1590,7 +1866,53 @@ impl Pass4State {
 				out
 			}
 			ASTValue::Ref { mutable, v } => {
+				let prev_borrow_check = ctx.suppress_borrow_check;
+				ctx.suppress_borrow_check = true;
 				let typed_inner = self.type_node_without_move(v, ctx, None);
+				ctx.suppress_borrow_check = prev_borrow_check;
+				if let Some(base_name) = self
+					.lhs_base_id(v.as_ref())
+					.filter(|name| *name != "_")
+					.map(|name| name.to_string())
+				{
+					let kind = if *mutable {
+						BorrowKind::Mutable
+					} else {
+						BorrowKind::Shared
+					};
+					let mut can_borrow = true;
+					if *mutable {
+						if let Some(info) =
+							self.lookup_value_info(ctx, &base_name)
+						{
+							if !info.mutable {
+								self.errors.push(
+									FrontendError::MutBorrowOfImmutable {
+										location: node.location.clone(),
+										name: base_name.clone(),
+									},
+								);
+								can_borrow = false;
+							}
+						}
+					}
+					if can_borrow
+						&& self.register_borrow(
+							ctx,
+							&base_name,
+							kind,
+							&node.location,
+						) {
+						self.record_temporary_borrow(
+							ctx,
+							RefBinding {
+								base: base_name,
+								kind,
+								is_static: false,
+							},
+						);
+					}
+				}
 				let underlying = typed_inner.ty.unwrap_or(self.builtins.unknown_id);
 				let ref_ty = self.arena.add(ResolvedType::Reference {
 					mutable: *mutable,
@@ -2032,7 +2354,7 @@ impl Pass4State {
 					ctx.unsafe_depth += 1;
 				}
 				if is_scoped {
-					ctx.value_scopes.push(HashMap::new());
+					self.push_scope(ctx);
 				}
 				let mut typed_exprs = Vec::new();
 				let mut last_ty = self.builtins.void_id;
@@ -2040,6 +2362,7 @@ impl Pass4State {
 					let typed_expr = self.type_node(expr, ctx, None);
 					last_ty = typed_expr.ty.unwrap_or(self.builtins.unknown_id);
 					typed_exprs.push(typed_expr);
+					self.clear_temporary_borrows(ctx);
 				}
 				if typed_exprs.len() > 1 {
 					for typed_expr in
@@ -2060,7 +2383,7 @@ impl Pass4State {
 					}
 				}
 				if is_scoped {
-					ctx.value_scopes.pop();
+					self.pop_scope(ctx);
 				}
 				if has_unsafe {
 					ctx.unsafe_depth = ctx.unsafe_depth.saturating_sub(1);
@@ -2125,6 +2448,7 @@ impl Pass4State {
 				let mut found = None;
 				for scope in ctx.value_scopes.iter_mut().rev() {
 					if scope.remove(name).is_some() {
+						self.release_binding_for_name(ctx, name);
 						found = Some(());
 						break;
 					}
@@ -2189,20 +2513,41 @@ impl Pass4State {
 				for value in values {
 					typed_values.push(self.type_node(value, ctx, None));
 				}
-				for name in names {
+				for (idx, name) in names.iter().enumerate() {
+					if name != "_" {
+						if let Some(state) = ctx.borrow_state.get(name) {
+							if state.shared > 0 || state.mutable {
+								self.errors.push(
+									FrontendError::AssignWhileBorrowed {
+										location: node.location.clone(),
+										name: name.clone(),
+									},
+								);
+							}
+						}
+					}
 					let mut target_mutable = None;
-					let mut target_info: Option<&mut ValueInfo> = None;
+					let mut target_ty = None;
+					let mut target_found = false;
+					let mut found_in_scope = false;
 					for scope in ctx.value_scopes.iter_mut().rev() {
 						if let Some(info) = scope.get_mut(name) {
 							target_mutable = Some(info.mutable);
-							target_info = Some(info);
+							target_ty = Some(info.ty);
+							target_found = true;
+							found_in_scope = true;
 							break;
 						}
 					}
 					if target_mutable.is_none() {
 						if let Some(info) = ctx.module.values.get(name) {
 							target_mutable = Some(info.mutable);
+							target_ty = Some(info.ty);
+							target_found = true;
 						}
+					}
+					if target_found && name != "_" {
+						self.release_binding_for_name(ctx, name);
 					}
 					if let Some(target_mutable) = target_mutable {
 						if !target_mutable && name != "_" {
@@ -2215,9 +2560,50 @@ impl Pass4State {
 								},
 							);
 						}
-						if target_mutable {
-							if let Some(info) = target_info {
-								info.moved = false;
+						if target_mutable && found_in_scope {
+							for scope in
+								ctx.value_scopes.iter_mut().rev()
+							{
+								if let Some(info) =
+									scope.get_mut(name)
+								{
+									info.moved = false;
+									break;
+								}
+							}
+						}
+					}
+					if name != "_" {
+						if let Some(value_ast) =
+							values.get(idx).or_else(|| values.first())
+						{
+							if let Some((ref_mutable, inner)) = self
+								.top_level_ref(value_ast.as_ref())
+							{
+								if let Some(base) =
+									self.lhs_base_id(inner)
+								{
+									let kind = if ref_mutable {
+										BorrowKind::Mutable
+									} else {
+										BorrowKind::Shared
+									};
+									let is_static = target_ty
+										.map(|ty| {
+											self.is_static_ref_type(ty)
+										})
+										.unwrap_or(false);
+									self.promote_temporary_borrow(
+										ctx,
+										name,
+										RefBinding {
+											base: base.to_string(),
+											kind,
+											is_static,
+										},
+										&node.location,
+									);
+								}
 							}
 						}
 					}
@@ -2506,11 +2892,24 @@ impl Pass4State {
 				let mut target_ty = None;
 				let mut target_mutable = None;
 				let mut found_in_scope = false;
+				let mut target_found = false;
+				if name != "_" {
+					if let Some(state) = ctx.borrow_state.get(name) {
+						if state.shared > 0 || state.mutable {
+							self.errors
+								.push(FrontendError::AssignWhileBorrowed {
+								location: node.location.clone(),
+								name: name.clone(),
+							});
+						}
+					}
+				}
 				for scope in ctx.value_scopes.iter().rev() {
 					if let Some(info) = scope.get(name) {
 						target_ty = Some(info.ty);
 						target_mutable = Some(info.mutable);
 						found_in_scope = true;
+						target_found = true;
 						break;
 					}
 				}
@@ -2518,7 +2917,11 @@ impl Pass4State {
 					if let Some(info) = ctx.module.values.get(name) {
 						target_ty = Some(info.ty);
 						target_mutable = Some(info.mutable);
+						target_found = true;
 					}
+				}
+				if target_found && name != "_" {
+					self.release_binding_for_name(ctx, name);
 				}
 				let mut typed_rhs = self.type_node(rhs, ctx, target_ty);
 				let mut rhs_ty = typed_rhs.ty.unwrap_or(self.builtins.unknown_id);
@@ -2559,6 +2962,34 @@ impl Pass4State {
 						}
 					}
 				}
+				if name != "_" {
+					if let Some((ref_mutable, inner)) =
+						self.top_level_ref(rhs.as_ref())
+					{
+						if let Some(base) = self.lhs_base_id(inner) {
+							let kind = if ref_mutable {
+								BorrowKind::Mutable
+							} else {
+								BorrowKind::Shared
+							};
+							let is_static = target_ty
+								.map(|ty| {
+									self.is_static_ref_type(ty)
+								})
+								.unwrap_or(false);
+							self.promote_temporary_borrow(
+								ctx,
+								name,
+								RefBinding {
+									base: base.to_string(),
+									kind,
+									is_static,
+								},
+								&node.location,
+							);
+						}
+					}
+				}
 				let typed_lhs = self.build_typed_id(
 					lhs.location.clone(),
 					name.clone(),
@@ -2577,6 +3008,16 @@ impl Pass4State {
 				&& name != "_"
 			{
 				let mut target_mutable = None;
+				if let Some(state) = ctx.borrow_state.get(name) {
+					if state.shared > 0 || state.mutable {
+						self.errors.push(
+							FrontendError::AssignWhileBorrowed {
+								location: node.location.clone(),
+								name: name.to_string(),
+							},
+						);
+					}
+				}
 				for scope in ctx.value_scopes.iter().rev() {
 					if let Some(info) = scope.get(name) {
 						target_mutable = Some(info.mutable);
@@ -4404,12 +4845,13 @@ impl Pass4State {
 		cases: &[MatchCase],
 	) -> Box<TypedAst> {
 		let typed_scrutinee = self.type_node(scrutinee, ctx, None);
+		self.clear_temporary_borrows(ctx);
 		let scrutinee_ty = typed_scrutinee.ty.unwrap_or(self.builtins.unknown_id);
 		let mut typed_cases = Vec::new();
 		let mut match_ty = None;
 
 		for case in cases {
-			ctx.value_scopes.push(HashMap::new());
+			self.push_scope(ctx);
 			let _typed_binder = binder.as_ref().map(|b| {
 				let mut binder_ty = scrutinee_ty;
 				if b.by_ref {
@@ -4418,6 +4860,54 @@ impl Pass4State {
 						lifetime: b.lifetime,
 						underlying: scrutinee_ty,
 					});
+				}
+				if b.by_ref {
+					if let Some(base) = self.lhs_base_id(scrutinee.as_ref()) {
+						let kind = if b.mutable {
+							BorrowKind::Mutable
+						} else {
+							BorrowKind::Shared
+						};
+						let mut can_borrow = true;
+						if b.mutable {
+							if let Some(info) =
+								self.lookup_value_info(ctx, base)
+							{
+								if !info.mutable {
+									self.errors.push(
+										FrontendError::MutBorrowOfImmutable {
+											location: node.location.clone(),
+											name: base.to_string(),
+										},
+									);
+									can_borrow = false;
+								}
+							}
+						}
+						if can_borrow
+							&& self.register_borrow(
+								ctx,
+								base,
+								kind,
+								&node.location,
+							) {
+							let is_static = b.lifetime == Some('s');
+							if let Some(scope) =
+								ctx.ref_scopes.last_mut()
+							{
+								scope.insert(
+									b.name.clone(),
+									RefBinding {
+										base: base
+											.to_string(
+											),
+										kind,
+										is_static,
+									},
+								);
+							}
+						}
+					}
 				}
 				ctx.value_scopes.last_mut().expect("scope").insert(
 					b.name.clone(),
@@ -4447,16 +4937,17 @@ impl Pass4State {
 								ctx,
 								Some(scrutinee_ty),
 							);
+							self.clear_temporary_borrows(ctx);
 							let expr_ty = typed_expr.ty.unwrap_or(
 								self.builtins.unknown_id,
 							);
 							if !self.type_matches(expr_ty, scrutinee_ty)
 							{
 								self.errors.push(FrontendError::TypeMismatch {
-								location: expr.location.clone(),
-								expected: self.type_name(scrutinee_ty),
-								found: self.type_name(expr_ty),
-							});
+									location: expr.location.clone(),
+									expected: self.type_name(scrutinee_ty),
+									found: self.type_name(expr_ty),
+								});
 							}
 							typed_exprs.push(typed_expr);
 						}
@@ -4477,6 +4968,7 @@ impl Pass4State {
 			let typed_guard = case.guard.as_ref().map(|guard| {
 				let typed_guard =
 					self.type_node(guard, ctx, Some(self.builtins.bool_id));
+				self.clear_temporary_borrows(ctx);
 				let guard_ty = typed_guard.ty.unwrap_or(self.builtins.unknown_id);
 				if !self.type_matches(guard_ty, self.builtins.bool_id) {
 					self.errors.push(FrontendError::NonBoolCondition {
@@ -4488,6 +4980,7 @@ impl Pass4State {
 			});
 
 			let typed_body = self.type_node(&case.body, ctx, None);
+			self.clear_temporary_borrows(ctx);
 			let body_ty = typed_body.ty.unwrap_or(self.builtins.unknown_id);
 			if let Some(current) = match_ty {
 				if !self.type_matches(body_ty, current) {
@@ -4506,7 +4999,7 @@ impl Pass4State {
 				guard: typed_guard,
 				body: typed_body,
 			});
-			ctx.value_scopes.pop();
+			self.pop_scope(ctx);
 		}
 
 		let mut out = TypedAst::from(
@@ -4535,9 +5028,11 @@ impl Pass4State {
 		body: &Box<AST>,
 		else_: &Option<Box<AST>>,
 	) -> Box<TypedAst> {
-		ctx.value_scopes.push(HashMap::new());
+		self.push_scope(ctx);
 		let typed_decl = decl.as_ref().map(|d| self.type_node(d, ctx, None));
+		self.clear_temporary_borrows(ctx);
 		let typed_cond = self.type_node(cond, ctx, Some(self.builtins.bool_id));
+		self.clear_temporary_borrows(ctx);
 		let cond_ty = typed_cond.ty.unwrap_or(self.builtins.unknown_id);
 		if !self.type_matches(cond_ty, self.builtins.bool_id) {
 			self.errors.push(FrontendError::NonBoolCondition {
@@ -4546,10 +5041,12 @@ impl Pass4State {
 			});
 		}
 		let typed_body = self.type_node(body, ctx, None);
+		self.clear_temporary_borrows(ctx);
 		let body_ty = typed_body.ty.unwrap_or(self.builtins.unknown_id);
-		ctx.value_scopes.pop();
+		self.pop_scope(ctx);
 
 		let typed_else = else_.as_ref().map(|e| self.type_node(e, ctx, None));
+		self.clear_temporary_borrows(ctx);
 		let out_ty = if let Some(typed_else) = &typed_else {
 			let else_ty = typed_else.ty.unwrap_or(self.builtins.unknown_id);
 			if !self.type_matches(body_ty, else_ty) {
@@ -4585,9 +5082,11 @@ impl Pass4State {
 		decl: &Option<Box<AST>>,
 		body: &Box<AST>,
 	) -> Box<TypedAst> {
-		ctx.value_scopes.push(HashMap::new());
+		self.push_scope(ctx);
 		let typed_decl = decl.as_ref().map(|d| self.type_node(d, ctx, None));
+		self.clear_temporary_borrows(ctx);
 		let typed_cond = self.type_node(cond, ctx, Some(self.builtins.bool_id));
+		self.clear_temporary_borrows(ctx);
 		let cond_ty = typed_cond.ty.unwrap_or(self.builtins.unknown_id);
 		if !self.type_matches(cond_ty, self.builtins.bool_id) {
 			self.errors.push(FrontendError::NonBoolCondition {
@@ -4596,7 +5095,8 @@ impl Pass4State {
 			});
 		}
 		let typed_body = self.type_node(body, ctx, None);
-		ctx.value_scopes.pop();
+		self.clear_temporary_borrows(ctx);
+		self.pop_scope(ctx);
 
 		let mut out = TypedAst::from(
 			node.location.clone(),
@@ -4619,9 +5119,11 @@ impl Pass4State {
 		step: &Option<Box<AST>>,
 		body: &Box<AST>,
 	) -> Box<TypedAst> {
-		ctx.value_scopes.push(HashMap::new());
+		self.push_scope(ctx);
 		let typed_init = init.as_ref().map(|v| self.type_node(v, ctx, None));
+		self.clear_temporary_borrows(ctx);
 		let typed_cond = cond.as_ref().map(|v| self.type_node(v, ctx, None));
+		self.clear_temporary_borrows(ctx);
 		if let Some(typed_cond) = &typed_cond {
 			let cond_ty = typed_cond.ty.unwrap_or(self.builtins.unknown_id);
 			if !self.type_matches(cond_ty, self.builtins.bool_id) {
@@ -4632,8 +5134,10 @@ impl Pass4State {
 			}
 		}
 		let typed_step = step.as_ref().map(|v| self.type_node(v, ctx, None));
+		self.clear_temporary_borrows(ctx);
 		let typed_body = self.type_node(body, ctx, None);
-		ctx.value_scopes.pop();
+		self.clear_temporary_borrows(ctx);
+		self.pop_scope(ctx);
 
 		let mut out = TypedAst::from(
 			node.location.clone(),
@@ -4657,8 +5161,9 @@ impl Pass4State {
 		body: &Box<AST>,
 	) -> Box<TypedAst> {
 		let typed_iter = self.type_node(iter, ctx, None);
+		self.clear_temporary_borrows(ctx);
 		let iter_ty = typed_iter.ty.unwrap_or(self.builtins.unknown_id);
-		ctx.value_scopes.push(HashMap::new());
+		self.push_scope(ctx);
 		for binding in bindings {
 			if let ASTValue::Id(name) = &binding.v {
 				ctx.value_scopes.last_mut().expect("scope").insert(
@@ -4673,7 +5178,8 @@ impl Pass4State {
 			}
 		}
 		let typed_body = self.type_node(body, ctx, None);
-		ctx.value_scopes.pop();
+		self.clear_temporary_borrows(ctx);
+		self.pop_scope(ctx);
 
 		let mut typed_bindings = Vec::new();
 		for binding in bindings {
@@ -4701,11 +5207,23 @@ impl Pass4State {
 		let mut target_ty = None;
 		let mut target_mutable = None;
 		let mut found_in_scope = false;
+		let mut target_found = false;
+		if name != "_" {
+			if let Some(state) = ctx.borrow_state.get(name) {
+				if state.shared > 0 || state.mutable {
+					self.errors.push(FrontendError::AssignWhileBorrowed {
+						location: node.location.clone(),
+						name: name.to_string(),
+					});
+				}
+			}
+		}
 		for scope in ctx.value_scopes.iter().rev() {
 			if let Some(info) = scope.get(name) {
 				target_ty = Some(info.ty);
 				target_mutable = Some(info.mutable);
 				found_in_scope = true;
+				target_found = true;
 				break;
 			}
 		}
@@ -4713,7 +5231,11 @@ impl Pass4State {
 			if let Some(info) = ctx.module.values.get(name) {
 				target_ty = Some(info.ty);
 				target_mutable = Some(info.mutable);
+				target_found = true;
 			}
+		}
+		if target_found && name != "_" {
+			self.release_binding_for_name(ctx, name);
 		}
 		let mut typed_value = self.type_node(value, ctx, target_ty);
 		let mut value_ty = typed_value.ty.unwrap_or(self.builtins.unknown_id);
@@ -4752,6 +5274,30 @@ impl Pass4State {
 				location: node.location.clone(),
 				name: name.to_string(),
 			});
+		}
+		if name != "_" {
+			if let Some((ref_mutable, inner)) = self.top_level_ref(value.as_ref()) {
+				if let Some(base) = self.lhs_base_id(inner) {
+					let kind = if ref_mutable {
+						BorrowKind::Mutable
+					} else {
+						BorrowKind::Shared
+					};
+					let is_static = target_ty
+						.map(|ty| self.is_static_ref_type(ty))
+						.unwrap_or(false);
+					self.promote_temporary_borrow(
+						ctx,
+						name,
+						RefBinding {
+							base: base.to_string(),
+							kind,
+							is_static,
+						},
+						&node.location,
+					);
+				}
+			}
 		}
 
 		let mut out = TypedAst::from(
@@ -4819,6 +5365,28 @@ impl Pass4State {
 				moved: false,
 			},
 		);
+		if name != "_" {
+			if let Some((ref_mutable, inner)) = self.top_level_ref(value.as_ref()) {
+				if let Some(base) = self.lhs_base_id(inner) {
+					let kind = if ref_mutable {
+						BorrowKind::Mutable
+					} else {
+						BorrowKind::Shared
+					};
+					let is_static = self.is_static_ref_type(value_ty);
+					self.promote_temporary_borrow(
+						ctx,
+						name,
+						RefBinding {
+							base: base.to_string(),
+							kind,
+							is_static,
+						},
+						&node.location,
+					);
+				}
+			}
+		}
 		let mut out = TypedAst::from(
 			node.location.clone(),
 			if constexpr {
@@ -4947,6 +5515,43 @@ impl Pass4State {
 					moved: false,
 				},
 			);
+			if name != "_" {
+				if let Some(values) = values {
+					if let Some(value_ast) =
+						values.get(idx).or_else(|| values.first())
+					{
+						if let Some((ref_mutable, inner)) =
+							self.top_level_ref(value_ast.as_ref())
+						{
+							if let Some(base) = self.lhs_base_id(inner)
+							{
+								let kind = if ref_mutable {
+									BorrowKind::Mutable
+								} else {
+									BorrowKind::Shared
+								};
+								let is_static = declared_ty
+									.map(|ty| {
+										self.is_static_ref_type(ty)
+									})
+									.unwrap_or(false);
+								self.promote_temporary_borrow(
+									ctx,
+									name,
+									RefBinding {
+										base: base
+											.to_string(
+											),
+										kind,
+										is_static,
+									},
+									&node.location,
+								);
+							}
+						}
+					}
+				}
+			}
 		}
 
 		let mut out = TypedAst::from(
@@ -5072,7 +5677,7 @@ impl Pass4State {
 		let prev_constexpr = ctx.in_constexpr;
 		ctx.return_type = Some(resolved_return);
 		ctx.in_constexpr = prev_constexpr;
-		ctx.value_scopes.push(HashMap::new());
+		self.push_scope(ctx);
 		for (idx, param) in params.iter().enumerate() {
 			let ty = param_types
 				.get(idx)
@@ -5115,6 +5720,7 @@ impl Pass4State {
 				TypedFnBody::Expr(self.type_node(e, ctx, None))
 			}
 		};
+		self.clear_temporary_borrows(ctx);
 		if return_type.is_some() {
 			let (body_ty, body_location) = match &typed_body {
 				TypedFnBody::Block(block) => (block.ty, &block.location),
@@ -5163,7 +5769,7 @@ impl Pass4State {
 				});
 			}
 		}
-		ctx.value_scopes.pop();
+		self.pop_scope(ctx);
 		ctx.return_type = prev_return;
 		ctx.in_constexpr = prev_constexpr;
 		ctx.unsafe_depth = prev_unsafe_depth;
@@ -7164,6 +7770,45 @@ mod tests {
 	fn reports_use_after_move() {
 		assert_fixture_error("testdata/pass4_use_after_move", Vec::new(), |err| {
 			matches!(err, FrontendError::UseAfterMove { .. })
+		});
+	}
+
+	#[test]
+	fn reports_assign_while_borrowed() {
+		assert_fixture_error("testdata/pass4_assign_while_borrowed", Vec::new(), |err| {
+			matches!(err, FrontendError::AssignWhileBorrowed { .. })
+		});
+	}
+
+	#[test]
+	fn reports_move_while_borrowed() {
+		assert_fixture_error("testdata/pass4_move_while_borrowed", Vec::new(), |err| {
+			matches!(err, FrontendError::MoveWhileBorrowed { .. })
+		});
+	}
+
+	#[test]
+	fn reports_borrow_mut_while_shared() {
+		assert_fixture_error(
+			"testdata/pass4_borrow_mut_while_shared",
+			Vec::new(),
+			|err| matches!(err, FrontendError::BorrowMutWhileShared { .. }),
+		);
+	}
+
+	#[test]
+	fn reports_borrow_shared_while_mut() {
+		assert_fixture_error(
+			"testdata/pass4_borrow_shared_while_mut",
+			Vec::new(),
+			|err| matches!(err, FrontendError::BorrowSharedWhileMut { .. }),
+		);
+	}
+
+	#[test]
+	fn reports_mut_borrow_immutable() {
+		assert_fixture_error("testdata/pass4_mut_borrow_immutable", Vec::new(), |err| {
+			matches!(err, FrontendError::MutBorrowOfImmutable { .. })
 		});
 	}
 

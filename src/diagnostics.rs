@@ -493,10 +493,46 @@ fn emit_error_message(
 			locations.push(location);
 			message(format!("cannot assign to immutable value {name}"))
 		}
+		FrontendError::AssignWhileBorrowed { location, name } => {
+			labels.push(Some("assign while borrowed".to_string()));
+			locations.push(location);
+			message(format!("cannot assign to {name} because it is borrowed"))
+		}
 		FrontendError::UseAfterMove { location, name } => {
 			labels.push(Some("use after move".to_string()));
 			locations.push(location);
 			message(format!("value {name} was moved"))
+		}
+		FrontendError::MoveWhileBorrowed { location, name } => {
+			labels.push(Some("move while borrowed".to_string()));
+			locations.push(location);
+			message(format!("cannot move {name} because it is borrowed"))
+		}
+		FrontendError::AccessWhileMutBorrowed { location, name } => {
+			labels.push(Some("access while mutably borrowed".to_string()));
+			locations.push(location);
+			message(format!(
+				"cannot access {name} because it is mutably borrowed"
+			))
+		}
+		FrontendError::BorrowSharedWhileMut { location, name } => {
+			labels.push(Some("borrow conflicts with mutable borrow".to_string()));
+			locations.push(location);
+			message(format!(
+				"cannot borrow {name} because it is mutably borrowed"
+			))
+		}
+		FrontendError::BorrowMutWhileShared { location, name } => {
+			labels.push(Some("borrow conflicts with shared borrow".to_string()));
+			locations.push(location);
+			message(format!(
+				"cannot mutably borrow {name} because it is already borrowed"
+			))
+		}
+		FrontendError::MutBorrowOfImmutable { location, name } => {
+			labels.push(Some("mutable borrow of immutable".to_string()));
+			locations.push(location);
+			message(format!("cannot mutably borrow immutable value {name}"))
 		}
 		FrontendError::NonStaticModuleMut { location, name } => {
 			labels.push(Some("non-static module mut".to_string()));

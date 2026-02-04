@@ -1,14 +1,15 @@
 package main
 
 Foo :: struct {
-	pub value: int
+	value: int
 }
 
 consume := fn (value: Foo) {
 }
 
 main := fn {
-	value := Foo .{ .value = 1 }
+	mut value := Foo .{ .value = 1 }
+	ref := &value
+	_ = ref
 	consume(value)
-	_ = value.value
 }
