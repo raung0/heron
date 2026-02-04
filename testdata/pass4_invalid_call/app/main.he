@@ -1,6 +1,6 @@
 package main
 
-main :: fn {
+main := fn {
 	value := 1
 	value()
 }

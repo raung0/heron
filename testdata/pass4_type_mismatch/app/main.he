@@ -1,5 +1,5 @@
 package main
 
-main :: fn -> bool {
+main := fn -> bool {
 	1
 }

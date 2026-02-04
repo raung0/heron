@@ -3,5 +3,5 @@ package main
 foo :: fn (a: int = 1; b: int) {
 }
 
-main :: fn {
+main := fn {
 }

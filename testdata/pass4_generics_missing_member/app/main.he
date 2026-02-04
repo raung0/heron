@@ -5,7 +5,7 @@ NoHello :: struct {
 
 needs_hello :: fn<T> (value: T) -> i32 do value.hello()
 
-main :: fn {
+main := fn {
 	value := NoHello .{ }
 	needs_hello(value)
 }

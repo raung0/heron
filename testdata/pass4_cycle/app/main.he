@@ -8,5 +8,5 @@ B :: struct {
 	a: A
 }
 
-main :: fn {
+main := fn {
 }

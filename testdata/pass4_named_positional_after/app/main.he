@@ -3,6 +3,6 @@ package main
 foo :: fn (a: int; b: int) {
 }
 
-main :: fn {
+main := fn {
 	foo(a: 1, 2)
 }

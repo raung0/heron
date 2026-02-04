@@ -1,5 +1,5 @@
 package main
 
-main :: fn {
+main := fn {
 	true + false
 }

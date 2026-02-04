@@ -61,7 +61,7 @@ CONST :: CONST_1 + CONST_2 * CONST_2
 
 normal_function :: fn<T; Y> (a, b: T; c: Y) -> T do a + c.hello() + b
 
-main :: fn {
+main := fn {
 	a := pkg.hello()
 	b: u32 = CONST
 	res: Result<i32, Unit> = Ok(123)

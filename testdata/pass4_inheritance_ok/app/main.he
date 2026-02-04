@@ -14,7 +14,7 @@ Child :: struct extends Base {
 	}
 }
 
-main :: fn {
+main := fn {
 	child := Child .{ }
 	_ = child.pub_field
 	_ = child.child_method()

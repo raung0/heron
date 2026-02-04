@@ -5,5 +5,5 @@ Dup :: union {
 	i32
 }
 
-main :: fn {
+main := fn {
 }

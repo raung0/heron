@@ -2,6 +2,6 @@ package main
 
 make :: fn -> int do 3
 
-main :: fn {
+main := fn {
 	_ = make()
 }

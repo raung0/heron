@@ -1,6 +1,6 @@
 package main
 
-main :: fn {
+main := fn {
 	if 1 {
 		1
 	}

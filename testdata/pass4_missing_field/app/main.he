@@ -4,7 +4,7 @@ Foo :: struct {
 	a: i32
 }
 
-main :: fn {
+main := fn {
 	foo := Foo .{ .a = 1 }
 	foo.b
 }

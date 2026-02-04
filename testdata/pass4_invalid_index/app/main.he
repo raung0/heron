@@ -3,7 +3,7 @@ package main
 Foo :: struct {
 }
 
-main :: fn {
+main := fn {
 	foo := Foo .{ }
 	foo[0]
 }

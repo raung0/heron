@@ -7,7 +7,7 @@ Node :: struct {
 	pub with_value :: fn (value: int) -> Self do Self .{ .value }
 }
 
-main :: fn {
+main := fn {
 	value := Node .{ .value = 5 }
 	_ = value.clone()
 }

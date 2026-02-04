@@ -6,7 +6,7 @@ HasHello :: struct {
 
 needs_hello :: fn<T> (value: T) do value.hello()
 
-main :: fn {
+main := fn {
 	value := HasHello .{ }
 	needs_hello(value)
 }
