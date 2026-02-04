@@ -156,6 +156,9 @@ pub enum FrontendError {
 	PointerInConstexpr {
 		location: SourceLocation,
 	},
+	PointerRequiresUnsafe {
+		location: SourceLocation,
+	},
 	MissingOperatorSelf {
 		location: SourceLocation,
 		operator: String,

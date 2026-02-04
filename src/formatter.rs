@@ -645,7 +645,7 @@ impl Formatter {
 
 	fn format_root(&mut self, ast: &AST) {
 		match &ast.v {
-			ASTValue::ExprList(items) => {
+			ASTValue::ExprList { items, .. } => {
 				let mut last_line = self.format_stmt_list(items);
 				self.emit_comments_until(None, &mut last_line);
 			}
@@ -794,7 +794,7 @@ impl Formatter {
 				self.out.push_str("defer ");
 				self.out.push_str(&self.format_expr(value, 0));
 			}
-			ASTValue::ExprList(_) => self.format_block(ast),
+			ASTValue::ExprList { .. } => self.format_block(ast),
 
 			ASTValue::If {
 				cond,
@@ -1184,7 +1184,7 @@ impl Formatter {
 			self.out.push_str(" -> ");
 
 			match &case.body.v {
-				ASTValue::ExprList(_) => self.format_block(&case.body),
+				ASTValue::ExprList { .. } => self.format_block(&case.body),
 				_ => self.out.push_str(&self.format_expr(&case.body, 0)),
 			}
 
@@ -1438,7 +1438,7 @@ impl Formatter {
 			self.out.push_str(&self.format_type(extends));
 		}
 
-		if matches!(body.v, ASTValue::ExprList(_)) {
+		if matches!(body.v, ASTValue::ExprList { .. }) {
 			self.out.push(' ');
 			self.format_block(body);
 		} else {
@@ -1522,7 +1522,7 @@ impl Formatter {
 			self.out.push('>');
 		}
 
-		if matches!(body.v, ASTValue::ExprList(_)) {
+		if matches!(body.v, ASTValue::ExprList { .. }) {
 			self.out.push(' ');
 			self.format_block(body);
 		} else {
@@ -1542,7 +1542,7 @@ impl Formatter {
 
 	fn format_block_or_do(&mut self, body: &AST) {
 		match &body.v {
-			ASTValue::ExprList(_) => {
+			ASTValue::ExprList { .. } => {
 				self.out.push(' ');
 				self.format_block(body);
 			}
@@ -1554,10 +1554,14 @@ impl Formatter {
 	}
 
 	fn format_block(&mut self, block: &AST) {
-		let ASTValue::ExprList(items) = &block.v else {
+		let ASTValue::ExprList { items, attributes } = &block.v else {
 			return;
 		};
-
+		if !attributes.is_empty() {
+			self.out.push_str("[[");
+			self.out.push_str(&attributes.join(","));
+			self.out.push_str("]] ");
+		}
 		self.out.push('{');
 		self.out.push('\n');
 
@@ -1732,17 +1736,24 @@ impl Formatter {
 			ASTValue::TypedInitializerList { ty, items } => self
 				.format_initializer_list(items, Some(ty.as_ref()), &ast.location),
 
-			ASTValue::ExprList(items) => {
+			ASTValue::ExprList { items, attributes } => {
+				let mut prefix = String::new();
+				if !attributes.is_empty() {
+					prefix.push_str("[[");
+					prefix.push_str(&attributes.join(","));
+					prefix.push_str("]] ");
+				}
 				if items.is_empty() {
-					"{ }".to_string()
+					format!("{}{{ }}", prefix)
 				} else {
 					format!(
-						"{{ {} }}",
+						"{}{{ {} }}",
+						prefix,
 						self.format_expr_list_inline(items, "; ")
 					)
 				}
 			}
-			ASTValue::ExprListNoScope(items) => {
+			ASTValue::ExprListNoScope { items, .. } => {
 				self.format_expr_list_inline(items, ", ")
 			}
 
@@ -2210,7 +2221,7 @@ impl Formatter {
 				.map(|v| self.statement_end_line(v))
 				.unwrap_or(ast.location.range.end.1),
 
-			ASTValue::ExprList(_) => ast.location.range.end.1,
+			ASTValue::ExprList { .. } => ast.location.range.end.1,
 
 			ASTValue::Fn { body, .. } => match body {
 				FnBody::Block(block) => self.statement_end_line(block),
@@ -2385,7 +2396,7 @@ impl Formatter {
 	fn format_fn_body(&mut self, multiline_clauses: bool, body: &FnBody) {
 		match body {
 			FnBody::Block(block) => {
-				let is_block = matches!(block.v, ASTValue::ExprList(_));
+				let is_block = matches!(block.v, ASTValue::ExprList { .. });
 				match (multiline_clauses, is_block) {
 					(true, true) => {
 						self.ensure_newline();

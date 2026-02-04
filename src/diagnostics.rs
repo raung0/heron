@@ -510,6 +510,11 @@ fn emit_error_message(
 			locations.push(location);
 			message("pointers are not allowed in constexpr functions".to_string())
 		}
+		FrontendError::PointerRequiresUnsafe { location } => {
+			labels.push(Some("pointer requires unsafe".to_string()));
+			locations.push(location);
+			message("pointers are only allowed in unsafe contexts".to_string())
+		}
 		FrontendError::MissingOperatorSelf {
 			location,
 			operator,

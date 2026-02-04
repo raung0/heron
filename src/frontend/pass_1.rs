@@ -7,7 +7,7 @@ pub(crate) fn pass_1(mut ast: Box<AST>) -> Box<AST> {
 }
 
 fn reorder_declarations(ast: &mut AST) {
-	let ASTValue::ExprList(exprs) = &mut ast.v else {
+	let ASTValue::ExprList { items: exprs, .. } = &mut ast.v else {
 		return;
 	};
 
@@ -24,7 +24,8 @@ fn reorder_declarations(ast: &mut AST) {
 
 fn normalize_declarations(ast: &mut Box<AST>) {
 	walk_ast_mut(ast, &mut |node| match &mut node.v {
-		ASTValue::ExprList(exprs) | ASTValue::ExprListNoScope(exprs) => {
+		ASTValue::ExprList { items: exprs, .. }
+		| ASTValue::ExprListNoScope { items: exprs, .. } => {
 			normalize_list(exprs);
 		}
 		_ => {}
@@ -246,7 +247,7 @@ mod tests {
 		let ast = parse_all(src);
 		let ast = pass_1(ast);
 
-		let ASTValue::ExprList(items) = ast.v else {
+		let ASTValue::ExprList { items, .. } = ast.v else {
 			panic!("expected ExprList root");
 		};
 

@@ -253,7 +253,7 @@ fn extract_package(
 ) -> Result<(Vec<String>, SourceLocation), FrontendError> {
 	let mut package = None;
 	let mut package_loc = None;
-	if let ASTValue::ExprList(items) = &ast.v {
+	if let ASTValue::ExprList { items, .. } = &ast.v {
 		for item in items {
 			if let ASTValue::Package { path } = &item.v {
 				package = Some(path.clone());
@@ -273,7 +273,7 @@ fn extract_package(
 
 fn collect_uses(ast: &AST) -> Vec<UseDirective> {
 	let mut uses = Vec::new();
-	let ASTValue::ExprList(items) = &ast.v else {
+	let ASTValue::ExprList { items, .. } = &ast.v else {
 		return uses;
 	};
 
@@ -423,7 +423,7 @@ fn parse_module(file_path: &str) -> ModuleParseResult {
 fn collect_exports(ast: &AST, errors: &mut Vec<FrontendError>) -> ModuleExports {
 	let mut types = HashMap::new();
 	let mut constexprs = HashMap::new();
-	let ASTValue::ExprList(items) = &ast.v else {
+	let ASTValue::ExprList { items, .. } = &ast.v else {
 		return ModuleExports { types, constexprs };
 	};
 

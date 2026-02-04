@@ -13,7 +13,7 @@ pub(crate) fn pass_2(ast: &mut Box<AST>) -> Vec<FrontendError> {
 		ASTValue::Hide(name) => {
 			let in_scope = matches!(
 				parent.map(|p| &p.v),
-				Some(ASTValue::ExprList(_) | ASTValue::ExprListNoScope(_))
+				Some(ASTValue::ExprList { .. } | ASTValue::ExprListNoScope { .. },)
 			);
 			if !in_scope {
 				errors.push(FrontendError::HideOutsideScope {
@@ -22,7 +22,7 @@ pub(crate) fn pass_2(ast: &mut Box<AST>) -> Vec<FrontendError> {
 				});
 			}
 		}
-		ASTValue::ExprList(items) => {
+		ASTValue::ExprList { items, .. } => {
 			let is_struct_body = matches!(
 				parent.map(|p| &p.v),
 				Some(ASTValue::Struct { .. } | ASTValue::RawUnion { .. })
@@ -136,7 +136,7 @@ fn normalize_assignment_binexpr(ast: &mut Box<AST>) {
 			ASTValue::Id(name) => {
 				node.v = ASTValue::Set(name.clone(), rhs.clone());
 			}
-			ASTValue::ExprList(items) => {
+			ASTValue::ExprList { items, .. } => {
 				let mut names = Vec::new();
 				for item in items {
 					if let ASTValue::Id(name) = &item.v {
@@ -145,7 +145,7 @@ fn normalize_assignment_binexpr(ast: &mut Box<AST>) {
 						return;
 					}
 				}
-				let ASTValue::ExprList(values) = &rhs.v else {
+				let ASTValue::ExprList { items: values, .. } = &rhs.v else {
 					return;
 				};
 				node.v = ASTValue::SetMulti {

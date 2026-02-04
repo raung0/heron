@@ -392,8 +392,14 @@ pub enum ASTValue {
 		target: Box<AST>,
 		indices: Vec<Box<AST>>,
 	},
-	ExprList(Vec<Box<AST>>),
-	ExprListNoScope(Vec<Box<AST>>),
+	ExprList {
+		items: Vec<Box<AST>>,
+		attributes: Vec<String>,
+	},
+	ExprListNoScope {
+		items: Vec<Box<AST>>,
+		attributes: Vec<String>,
+	},
 	Return(Option<Box<AST>>),
 	Hide(String),
 	Defer(Box<AST>),
@@ -866,19 +872,29 @@ impl fmt::Display for AST {
 				}
 				write!(f, ")")
 			}
-			ExprList(v) => {
-				let folded =
-					v.iter().map(|x| x.to_string())
-						.collect::<Vec<_>>()
-						.join(" ");
-				write!(f, "(ExprList {})", folded)
+			ExprList { items, attributes } => {
+				let folded = items
+					.iter()
+					.map(|x| x.to_string())
+					.collect::<Vec<_>>()
+					.join(" ");
+				if attributes.is_empty() {
+					write!(f, "(ExprList {})", folded)
+				} else {
+					write!(f, "(ExprList {:?} {})", attributes, folded)
+				}
 			}
-			ExprListNoScope(v) => {
-				let folded =
-					v.iter().map(|x| x.to_string())
-						.collect::<Vec<_>>()
-						.join(" ");
-				write!(f, "(ExprListNoScope {})", folded)
+			ExprListNoScope { items, attributes } => {
+				let folded = items
+					.iter()
+					.map(|x| x.to_string())
+					.collect::<Vec<_>>()
+					.join(" ");
+				if attributes.is_empty() {
+					write!(f, "(ExprListNoScope {})", folded)
+				} else {
+					write!(f, "(ExprListNoScope {:?} {})", attributes, folded)
+				}
 			}
 			Return(v) => {
 				if let Some(v) = v {
@@ -1211,8 +1227,8 @@ where
 			}
 		}
 
-		ASTValue::ExprList(exprs) | ASTValue::ExprListNoScope(exprs) => {
-			for e in exprs {
+		ASTValue::ExprList { items, .. } | ASTValue::ExprListNoScope { items, .. } => {
+			for e in items {
 				walk_ast(e, Some(node), predicate);
 			}
 		}
@@ -1376,8 +1392,8 @@ where
 			}
 		}
 
-		ASTValue::ExprList(exprs) | ASTValue::ExprListNoScope(exprs) => {
-			for e in exprs {
+		ASTValue::ExprList { items, .. } | ASTValue::ExprListNoScope { items, .. } => {
+			for e in items {
 				walk_ast_mut(e, predicate);
 			}
 		}

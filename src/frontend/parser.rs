@@ -43,7 +43,7 @@ impl<'a> Parser<'a> {
 	}
 
 	pub fn parse(&mut self) -> ParseResult {
-		let mut ast = self.parse_expression_list(&[TokenValue::EOF], false)?;
+		let mut ast = self.parse_expression_list(&[TokenValue::EOF], false, Vec::new())?;
 		ast.trivia = self.lexer.take_trivia();
 		if self.errors.is_empty() {
 			Ok(ast)
@@ -56,6 +56,7 @@ impl<'a> Parser<'a> {
 		&mut self,
 		list_end: &[TokenValue],
 		only_comma: bool,
+		attributes: Vec<String>,
 	) -> ParseResult {
 		let mut lst = Vec::<Box<AST>>::new();
 		let mut loc = self.cur.location.clone();
@@ -157,7 +158,13 @@ impl<'a> Parser<'a> {
 			need_separator = true;
 		}
 
-		Ok(AST::from(loc, ASTValue::ExprList(lst)))
+		Ok(AST::from(
+			loc,
+			ASTValue::ExprList {
+				items: lst,
+				attributes,
+			},
+		))
 	}
 
 	fn parse_expression(&mut self) -> ParseResult {
@@ -445,6 +452,17 @@ impl<'a> Parser<'a> {
 			&& self.enable_multi_id_parse
 		{
 			return self.parse_multi_id();
+		}
+
+		if self.cur.v == TokenValue::LBracket && self.next.v == TokenValue::LBracket {
+			let attributes = self.parse_attributes()?;
+			if self.cur.v == TokenValue::LSquirly {
+				return self.parse_block_with_attributes(attributes);
+			}
+			return Err(ParseError::ExpectedToken(
+				self.cur.clone(),
+				TokenValue::LSquirly,
+			));
 		}
 
 		if self.token_starts_type(&self.cur.v) {
@@ -934,9 +952,10 @@ impl<'a> Parser<'a> {
 					let indices_list = self.parse_expression_list(
 						&[TokenValue::RBracket],
 						true,
+						Vec::new(),
 					)?;
 					let indices = match indices_list.v {
-						ASTValue::ExprList(v) => v,
+						ASTValue::ExprList { items, .. } => items,
 						_ => unreachable!(
 							"expression_list always returns ExprList"
 						),
@@ -1539,10 +1558,13 @@ impl<'a> Parser<'a> {
 			match self.cur.v.clone() {
 				TokenValue::Keyword(Keyword::Pre) => {
 					self.next()?; // consume 'pre'
-					let list_ast =
-						self.parse_expression_list(contract_stop, false)?;
+					let list_ast = self.parse_expression_list(
+						contract_stop,
+						false,
+						Vec::new(),
+					)?;
 					let exprs = match list_ast.v {
-						ASTValue::ExprList(exprs) => exprs,
+						ASTValue::ExprList { items, .. } => items,
 						_ => unreachable!(
 							"expression_list always returns ExprList"
 						),
@@ -1579,10 +1601,13 @@ impl<'a> Parser<'a> {
 						}
 					};
 
-					let list_ast =
-						self.parse_expression_list(contract_stop, false)?;
+					let list_ast = self.parse_expression_list(
+						contract_stop,
+						false,
+						Vec::new(),
+					)?;
 					let conditions = match list_ast.v {
-						ASTValue::ExprList(exprs) => exprs,
+						ASTValue::ExprList { items, .. } => items,
 						_ => unreachable!(
 							"expression_list always returns ExprList"
 						),
@@ -2066,7 +2091,13 @@ impl<'a> Parser<'a> {
 					let mut clause_loc = exprs[0].location.clone();
 					clause_loc.range.end =
 						exprs.last().unwrap().location.range.end;
-					Some(AST::from(clause_loc, ASTValue::ExprList(exprs)))
+					Some(AST::from(
+						clause_loc,
+						ASTValue::ExprList {
+							items: exprs,
+							attributes: Vec::new(),
+						},
+					))
 				}
 			}
 		}
@@ -2079,13 +2110,14 @@ impl<'a> Parser<'a> {
 				TokenValue::Semicolon,
 			],
 			true,
+			Vec::new(),
 		)?;
 
 		let header_exprs = match *header_ast {
 			AST {
-				v: ASTValue::ExprList(exprs),
+				v: ASTValue::ExprList { items, .. },
 				..
-			} => exprs,
+			} => items,
 			_ => unreachable!("header_ast is always ExprList"),
 		};
 
@@ -2258,6 +2290,10 @@ impl<'a> Parser<'a> {
 	}
 
 	fn parse_block(&mut self) -> ParseResult {
+		self.parse_block_with_attributes(Vec::new())
+	}
+
+	fn parse_block_with_attributes(&mut self, attributes: Vec<String>) -> ParseResult {
 		if self.cur.v != TokenValue::LSquirly {
 			return Err(ParseError::ExpectedToken(
 				self.cur.clone(),
@@ -2266,7 +2302,7 @@ impl<'a> Parser<'a> {
 		}
 		self.next()?;
 
-		let ast = self.parse_expression_list(&[TokenValue::RSquirly], false)?;
+		let ast = self.parse_expression_list(&[TokenValue::RSquirly], false, attributes)?;
 
 		if self.cur.v != TokenValue::RSquirly {
 			return Err(ParseError::ExpectedToken(
@@ -2288,6 +2324,10 @@ impl<'a> Parser<'a> {
 				return Err(ParseError::ExpectedExpression(self.cur.clone()));
 			}
 			self.parse_expression_with_stop(stop)
+		} else if self.cur.v == TokenValue::LBracket && self.next.v == TokenValue::LBracket
+		{
+			let attributes = self.parse_attributes()?;
+			self.parse_block_with_attributes(attributes)
 		} else {
 			self.parse_block()
 		}
@@ -2947,11 +2987,12 @@ impl<'a> Parser<'a> {
 						TokenValue::RBracket,
 					],
 					true,
+					Vec::new(),
 				)?;
 				loc.range.end = rhs_list.location.range.end;
 
 				let values = match rhs_list.v {
-					ASTValue::ExprList(values) => values,
+					ASTValue::ExprList { items, .. } => items,
 					_ => unreachable!(
 						"expression_list always returns ExprList"
 					),
@@ -3006,9 +3047,10 @@ impl<'a> Parser<'a> {
 								TokenValue::RBracket,
 							],
 							true,
+							Vec::new(),
 						)?;
 						let values = match rhs_list.v {
-							ASTValue::ExprList(values) => values,
+							ASTValue::ExprList { items, .. } => items,
 							_ => unreachable!(
 								"expression_list always returns ExprList"
 							),
@@ -3027,9 +3069,10 @@ impl<'a> Parser<'a> {
 								TokenValue::RBracket,
 							],
 							true,
+							Vec::new(),
 						)?;
 						let values = match rhs_list.v {
-							ASTValue::ExprList(values) => values,
+							ASTValue::ExprList { items, .. } => items,
 							_ => unreachable!(
 								"expression_list always returns ExprList"
 							),
@@ -3677,7 +3720,7 @@ mod tests {
 		let ast = p.parse()?;
 		match *ast {
 			AST {
-				v: ASTValue::ExprList(exprs),
+				v: ASTValue::ExprList { items: exprs, .. },
 				..
 			} => {
 				let mut iter = exprs.into_iter();
@@ -3738,7 +3781,7 @@ mod tests {
 		let ast = p.parse()?;
 		match *ast {
 			AST {
-				v: ASTValue::ExprList(exprs),
+				v: ASTValue::ExprList { items: exprs, .. },
 				..
 			} => Ok(exprs),
 			_ => unreachable!("parser should wrap expressions in ExprList"),
@@ -4083,7 +4126,7 @@ mod tests {
 
 	fn expect_expr_list_ids(ast: &AST, expected: &[&str]) {
 		match &ast.v {
-			ASTValue::ExprList(exprs) => {
+			ASTValue::ExprList { items: exprs, .. } => {
 				assert_eq!(
 					exprs.len(),
 					expected.len(),
@@ -4300,7 +4343,7 @@ mod tests {
 		let mut p = Parser::new(&mut lx).expect("parser init");
 		let ast = p.parse().expect("ok");
 		match &ast.v {
-			ASTValue::ExprList(exprs) => {
+			ASTValue::ExprList { items: exprs, .. } => {
 				assert_eq!(exprs.len(), 2);
 				expect_id(exprs[0].as_ref(), "foo");
 				expect_id(exprs[1].as_ref(), "bar");
@@ -4884,7 +4927,20 @@ mod tests {
 		let lx = Lexer::new("{ 1; 2 }".to_string(), "<test>".to_string());
 		let ast = parse_one(lx).expect("ok");
 		match &ast.v {
-			ASTValue::ExprList(items) => assert_eq!(items.len(), 2),
+			ASTValue::ExprList { items, .. } => assert_eq!(items.len(), 2),
+			_ => panic!("expected ExprList"),
+		}
+	}
+
+	#[test]
+	fn unsafe_block_parses_attributes() {
+		let lx = Lexer::new("[[unsafe]] { 1 }".to_string(), "<test>".to_string());
+		let ast = parse_one(lx).expect("ok");
+		match &ast.v {
+			ASTValue::ExprList { items, attributes } => {
+				assert_eq!(items.len(), 1);
+				assert_eq!(attributes, &vec!["unsafe".to_string()]);
+			}
 			_ => panic!("expected ExprList"),
 		}
 	}
@@ -4894,10 +4950,12 @@ mod tests {
 		let lx = Lexer::new("{{}}".to_string(), "<test>".to_string());
 		let ast = parse_one(lx).expect("ok");
 		match &ast.v {
-			ASTValue::ExprList(items) => {
+			ASTValue::ExprList { items, .. } => {
 				assert_eq!(items.len(), 1);
 				match &items[0].v {
-					ASTValue::ExprList(inner) => assert!(inner.is_empty()),
+					ASTValue::ExprList { items: inner, .. } => {
+						assert!(inner.is_empty())
+					}
 					_ => panic!("expected inner ExprList"),
 				}
 			}
@@ -4912,7 +4970,7 @@ mod tests {
 		let (lhs, rhs) = expect_binary(ast.as_ref(), Operator::Mul, false);
 		expect_integer(lhs, 1);
 		match &rhs.v {
-			ASTValue::ExprList(items) => assert_eq!(items.len(), 1),
+			ASTValue::ExprList { items, .. } => assert_eq!(items.len(), 1),
 			_ => panic!("expected ExprList"),
 		}
 	}
@@ -5585,7 +5643,9 @@ mod tests {
 					Some(&crate::frontend::Type::Id("Base".to_string()))
 				);
 				match &body.v {
-					ASTValue::ExprList(items) => assert_eq!(items.len(), 1),
+					ASTValue::ExprList { items, .. } => {
+						assert_eq!(items.len(), 1)
+					}
 					_ => panic!("expected struct body expr list"),
 				}
 			}
@@ -5693,7 +5753,7 @@ mod tests {
 
 		match &ast.v {
 			ASTValue::RawUnion { body, .. } => match &body.v {
-				ASTValue::ExprList(items) => assert_eq!(items.len(), 2),
+				ASTValue::ExprList { items, .. } => assert_eq!(items.len(), 2),
 				_ => panic!("expected raw_union body expr list"),
 			},
 			_ => panic!("expected RawUnion"),
@@ -5822,7 +5882,7 @@ mod tests {
 		match &ast.v {
 			ASTValue::Fn { body, .. } => match body {
 				FnBody::Block(block) => match &block.v {
-					ASTValue::ExprList(items) => {
+					ASTValue::ExprList { items, .. } => {
 						assert_eq!(items.len(), 2);
 						match &items[0].v {
 							ASTValue::Return(Some(v)) => {
@@ -5860,7 +5920,7 @@ mod tests {
 		match &ast.v {
 			ASTValue::Fn { body, .. } => match body {
 				FnBody::Block(block) => match &block.v {
-					ASTValue::ExprList(items) => {
+					ASTValue::ExprList { items, .. } => {
 						assert_eq!(items.len(), 1);
 						expect_integer(items[0].as_ref(), 1);
 					}

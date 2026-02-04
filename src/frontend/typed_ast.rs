@@ -284,8 +284,14 @@ pub enum TypedValue {
 		target: Box<TypedAst>,
 		indices: Vec<Box<TypedAst>>,
 	},
-	ExprList(Vec<Box<TypedAst>>),
-	ExprListNoScope(Vec<Box<TypedAst>>),
+	ExprList {
+		items: Vec<Box<TypedAst>>,
+		attributes: Vec<String>,
+	},
+	ExprListNoScope {
+		items: Vec<Box<TypedAst>>,
+		attributes: Vec<String>,
+	},
 	Return(Option<Box<TypedAst>>),
 	Hide(String),
 	Defer(Box<TypedAst>),

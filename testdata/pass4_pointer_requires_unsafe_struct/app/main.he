@@ -1,0 +1,8 @@
+package main
+
+MyStruct :: struct {
+	ptr: ^int
+}
+
+main := fn {
+}

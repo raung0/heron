@@ -1,0 +1,7 @@
+package main
+
+ptr_fn := fn (value: ^int) {
+}
+
+main := fn {
+}

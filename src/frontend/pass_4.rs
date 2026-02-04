@@ -73,6 +73,7 @@ struct TypeContext<'a> {
 	self_type: Option<TypeId>,
 	return_type: Option<TypeId>,
 	in_constexpr: bool,
+	unsafe_depth: usize,
 	suppress_move: bool,
 }
 
@@ -387,11 +388,13 @@ impl Pass4State {
 
 		match &value.v {
 			ASTValue::Struct {
-				attributes: _,
+				attributes,
 				generics,
 				extends,
 				body,
 			} => {
+				let struct_is_unsafe =
+					attributes.iter().any(|attr| attr == "unsafe");
 				let (typed_generics, mut generic_map) = self
 					.resolve_generic_params(module_id, generics, None, None);
 				let self_type = Some(ty_id);
@@ -407,7 +410,7 @@ impl Pass4State {
 				});
 				let mut fields = Vec::new();
 				let mut methods: HashMap<String, MethodInfo> = HashMap::new();
-				let ASTValue::ExprList(items) = &body.v else {
+				let ASTValue::ExprList { items, .. } = &body.v else {
 					return;
 				};
 				for item in items {
@@ -421,6 +424,27 @@ impl Pass4State {
 					);
 				}
 
+				if !struct_is_unsafe {
+					for field in &fields {
+						if self.type_contains_pointer(field.ty) {
+							let location = self
+								.type_field_locations
+								.get(&ty_id)
+								.and_then(|fields| {
+									fields.get(&field.name)
+								})
+								.cloned()
+								.unwrap_or_else(|| {
+									value.location.clone()
+								});
+							self.errors.push(
+								FrontendError::PointerRequiresUnsafe {
+									location,
+								},
+							);
+						}
+					}
+				}
 				if let ResolvedType::Struct {
 					extends,
 					fields: dst_fields,
@@ -504,6 +528,16 @@ impl Pass4State {
 						}
 					}
 				}
+				for variant_ty in &resolved_variants {
+					if self.type_contains_pointer(*variant_ty) {
+						self.errors.push(
+							FrontendError::PointerRequiresUnsafe {
+								location: value.location.clone(),
+							},
+						);
+						break;
+					}
+				}
 				if let ResolvedType::Union {
 					variants: dst,
 					methods: dst_methods,
@@ -518,7 +552,7 @@ impl Pass4State {
 				let (_, generic_map) = self
 					.resolve_generic_params(module_id, generics, None, None);
 				let mut fields = Vec::new();
-				if let ASTValue::ExprList(items) = &body.v {
+				if let ASTValue::ExprList { items, .. } = &body.v {
 					for item in items {
 						let (node, is_public) = match &item.v {
 							ASTValue::Pub(inner) => {
@@ -559,6 +593,13 @@ impl Pass4State {
 										node.location
 											.clone(),
 									);
+									if self.type_contains_pointer(resolved) {
+									self.errors.push(
+										FrontendError::PointerRequiresUnsafe {
+											location: node.location.clone(),
+										},
+									);
+								}
 								}
 							}
 						}
@@ -578,6 +619,11 @@ impl Pass4State {
 					None,
 					&value.location,
 				);
+				if self.type_contains_pointer(resolved) {
+					self.errors.push(FrontendError::PointerRequiresUnsafe {
+						location: value.location.clone(),
+					});
+				}
 				if let ResolvedType::Newtype {
 					underlying: dst, ..
 				} = self.arena.get_mut(ty_id)
@@ -593,6 +639,11 @@ impl Pass4State {
 					None,
 					&value.location,
 				);
+				if self.type_contains_pointer(resolved) {
+					self.errors.push(FrontendError::PointerRequiresUnsafe {
+						location: value.location.clone(),
+					});
+				}
 				if let ResolvedType::Alias {
 					underlying: dst, ..
 				} = self.arena.get_mut(ty_id)
@@ -1057,6 +1108,10 @@ impl Pass4State {
 		ctx.return_type.is_none() && ctx.value_scopes.len() <= 2
 	}
 
+	fn is_unsafe_context(&self, ctx: &TypeContext) -> bool {
+		ctx.unsafe_depth > 0
+	}
+
 	fn lhs_base_id<'a>(&self, node: &'a AST) -> Option<&'a str> {
 		match &node.v {
 			ASTValue::Id(name) => Some(name.as_str()),
@@ -1067,7 +1122,8 @@ impl Pass4State {
 				self.lhs_base_id(lhs)
 			}
 			ASTValue::Index { target, .. } => self.lhs_base_id(target),
-			ASTValue::ExprList(items) | ASTValue::ExprListNoScope(items) => {
+			ASTValue::ExprList { items, .. }
+			| ASTValue::ExprListNoScope { items, .. } => {
 				items.last().and_then(|item| self.lhs_base_id(item))
 			}
 			_ => None,
@@ -1316,6 +1372,7 @@ impl Pass4State {
 				self_type: None,
 				return_type: None,
 				in_constexpr: false,
+				unsafe_depth: 0,
 				suppress_move: false,
 			};
 			let typed_ast = self.type_node(&module_snapshot.ast, &mut ctx, None);
@@ -1347,9 +1404,8 @@ impl Pass4State {
 		self.modules
 			.get(module_id)
 			.and_then(|module| match &module.ast.v {
-				ASTValue::ExprList(items) | ASTValue::ExprListNoScope(items) => {
-					Some(items.clone())
-				}
+				ASTValue::ExprList { items, .. }
+				| ASTValue::ExprListNoScope { items, .. } => Some(items.clone()),
 				_ => None,
 			})
 			.unwrap_or_default()
@@ -1576,6 +1632,11 @@ impl Pass4State {
 			ASTValue::PtrOf(inner) => {
 				if ctx.in_constexpr {
 					self.errors.push(FrontendError::PointerInConstexpr {
+						location: node.location.clone(),
+					});
+				}
+				if !self.is_unsafe_context(ctx) {
+					self.errors.push(FrontendError::PointerRequiresUnsafe {
 						location: node.location.clone(),
 					});
 				}
@@ -1957,8 +2018,19 @@ impl Pass4State {
 					}
 				}
 			}
-			ASTValue::ExprList(exprs) | ASTValue::ExprListNoScope(exprs) => {
-				let is_scoped = matches!(node.v, ASTValue::ExprList(_));
+			ASTValue::ExprList {
+				items: exprs,
+				attributes,
+			}
+			| ASTValue::ExprListNoScope {
+				items: exprs,
+				attributes,
+			} => {
+				let is_scoped = matches!(node.v, ASTValue::ExprList { .. });
+				let has_unsafe = attributes.iter().any(|attr| attr == "unsafe");
+				if has_unsafe {
+					ctx.unsafe_depth += 1;
+				}
 				if is_scoped {
 					ctx.value_scopes.push(HashMap::new());
 				}
@@ -1990,12 +2062,21 @@ impl Pass4State {
 				if is_scoped {
 					ctx.value_scopes.pop();
 				}
+				if has_unsafe {
+					ctx.unsafe_depth = ctx.unsafe_depth.saturating_sub(1);
+				}
 				let mut out = TypedAst::from(
 					node.location.clone(),
 					if is_scoped {
-						TypedValue::ExprList(typed_exprs)
+						TypedValue::ExprList {
+							items: typed_exprs,
+							attributes: attributes.clone(),
+						}
 					} else {
-						TypedValue::ExprListNoScope(typed_exprs)
+						TypedValue::ExprListNoScope {
+							items: typed_exprs,
+							attributes: attributes.clone(),
+						}
 					},
 				);
 				out.ty = Some(last_ty);
@@ -2167,6 +2248,18 @@ impl Pass4State {
 					ctx.self_type,
 					&node.location,
 				);
+				if self.type_contains_pointer(resolved)
+					&& !self.is_unsafe_context(ctx)
+				{
+					self.errors.push(FrontendError::PointerRequiresUnsafe {
+						location: node.location.clone(),
+					});
+				}
+				if ctx.in_constexpr && self.type_contains_pointer(resolved) {
+					self.errors.push(FrontendError::PointerInConstexpr {
+						location: node.location.clone(),
+					});
+				}
 				let mut out = TypedAst::from(
 					node.location.clone(),
 					TypedValue::Type(resolved),
@@ -4707,6 +4800,16 @@ impl Pass4State {
 				});
 			}
 		}
+		if self.type_contains_pointer(value_ty) && !self.is_unsafe_context(ctx) {
+			self.errors.push(FrontendError::PointerRequiresUnsafe {
+				location: node.location.clone(),
+			});
+		}
+		if ctx.in_constexpr && self.type_contains_pointer(value_ty) {
+			self.errors.push(FrontendError::PointerInConstexpr {
+				location: node.location.clone(),
+			});
+		}
 		ctx.value_scopes.last_mut().expect("scope").insert(
 			name.to_string(),
 			ValueInfo {
@@ -4825,6 +4928,16 @@ impl Pass4State {
 					});
 				}
 			}
+			if self.type_contains_pointer(final_ty) && !self.is_unsafe_context(ctx) {
+				self.errors.push(FrontendError::PointerRequiresUnsafe {
+					location: node.location.clone(),
+				});
+			}
+			if ctx.in_constexpr && self.type_contains_pointer(final_ty) {
+				self.errors.push(FrontendError::PointerInConstexpr {
+					location: node.location.clone(),
+				});
+			}
 			ctx.value_scopes.last_mut().expect("scope").insert(
 				name.clone(),
 				ValueInfo {
@@ -4871,6 +4984,11 @@ impl Pass4State {
 			Some(&ctx.generic_types),
 			ctx.self_type,
 		);
+		let fn_is_unsafe = attributes.iter().any(|attr| attr == "unsafe");
+		let prev_unsafe_depth = ctx.unsafe_depth;
+		if fn_is_unsafe {
+			ctx.unsafe_depth += 1;
+		}
 		let mut seen_default = false;
 		for param in params {
 			if param.default.is_some() {
@@ -4908,6 +5026,11 @@ impl Pass4State {
 						location: node.location.clone(),
 					});
 				}
+				if self.type_contains_pointer(ty) && !fn_is_unsafe {
+					self.errors.push(FrontendError::PointerRequiresUnsafe {
+						location: node.location.clone(),
+					});
+				}
 				param_types.push(ty);
 			} else {
 				param_types.push(self.builtins.unknown_id);
@@ -4932,6 +5055,11 @@ impl Pass4State {
 			.unwrap_or(self.builtins.void_id);
 		if ctx.in_constexpr && self.type_contains_pointer(resolved_return) {
 			self.errors.push(FrontendError::PointerInConstexpr {
+				location: node.location.clone(),
+			});
+		}
+		if self.type_contains_pointer(resolved_return) && !fn_is_unsafe {
+			self.errors.push(FrontendError::PointerRequiresUnsafe {
 				location: node.location.clone(),
 			});
 		}
@@ -5015,8 +5143,8 @@ impl Pass4State {
 		} else {
 			let (body_ty, body_location) = match &typed_body {
 				TypedFnBody::Block(block) => match &block.v {
-					TypedValue::ExprList(exprs)
-					| TypedValue::ExprListNoScope(exprs) => exprs
+					TypedValue::ExprList { items, .. }
+					| TypedValue::ExprListNoScope { items, .. } => items
 						.last()
 						.map(|expr| (expr.ty, &expr.location))
 						.unwrap_or((block.ty, &block.location)),
@@ -5038,6 +5166,7 @@ impl Pass4State {
 		ctx.value_scopes.pop();
 		ctx.return_type = prev_return;
 		ctx.in_constexpr = prev_constexpr;
+		ctx.unsafe_depth = prev_unsafe_depth;
 
 		let mut out = TypedAst::from(
 			node.location.clone(),
@@ -5738,8 +5867,8 @@ impl Pass4State {
 			}
 			match &value.v {
 				ASTValue::Struct { body, .. } => {
-					if let ASTValue::ExprList(items)
-					| ASTValue::ExprListNoScope(items) = &body.v
+					if let ASTValue::ExprList { items, .. }
+					| ASTValue::ExprListNoScope { items, .. } = &body.v
 					{
 						if let Some(params) = self
 							.method_param_defs_from_items(
@@ -7050,6 +7179,33 @@ mod tests {
 		assert_fixture_error("testdata/pass4_pointer_in_constexpr", Vec::new(), |err| {
 			matches!(err, FrontendError::PointerInConstexpr { .. })
 		});
+	}
+
+	#[test]
+	fn reports_pointer_requires_unsafe_expr() {
+		assert_fixture_error(
+			"testdata/pass4_pointer_requires_unsafe_expr",
+			Vec::new(),
+			|err| matches!(err, FrontendError::PointerRequiresUnsafe { .. }),
+		);
+	}
+
+	#[test]
+	fn reports_pointer_requires_unsafe_struct() {
+		assert_fixture_error(
+			"testdata/pass4_pointer_requires_unsafe_struct",
+			Vec::new(),
+			|err| matches!(err, FrontendError::PointerRequiresUnsafe { .. }),
+		);
+	}
+
+	#[test]
+	fn reports_pointer_requires_unsafe_fn() {
+		assert_fixture_error(
+			"testdata/pass4_pointer_requires_unsafe_fn",
+			Vec::new(),
+			|err| matches!(err, FrontendError::PointerRequiresUnsafe { .. }),
+		);
 	}
 
 	#[test]
