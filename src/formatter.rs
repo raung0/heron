@@ -898,6 +898,7 @@ impl Formatter {
 					let value = &values.as_ref().unwrap()[0];
 					match &value.v {
 						ASTValue::Fn {
+							attributes,
 							generics,
 							params,
 							return_type,
@@ -909,6 +910,7 @@ impl Formatter {
 						} => self.format_fn(
 							&value.location,
 							true,
+							attributes,
 							generics,
 							params,
 							return_type.as_deref(),
@@ -936,6 +938,7 @@ impl Formatter {
 				if self.is_stmt_value(value) {
 					match &value.v {
 						ASTValue::Fn {
+							attributes,
 							generics,
 							params,
 							return_type,
@@ -947,6 +950,7 @@ impl Formatter {
 						} => self.format_fn(
 							&value.location,
 							true,
+							attributes,
 							generics,
 							params,
 							return_type.as_deref(),
@@ -968,6 +972,7 @@ impl Formatter {
 				if self.is_stmt_value(value) {
 					match &value.v {
 						ASTValue::Fn {
+							attributes,
 							generics,
 							params,
 							return_type,
@@ -979,6 +984,7 @@ impl Formatter {
 						} => self.format_fn(
 							&value.location,
 							true,
+							attributes,
 							generics,
 							params,
 							return_type.as_deref(),
@@ -996,6 +1002,7 @@ impl Formatter {
 			}
 
 			ASTValue::Fn {
+				attributes,
 				generics,
 				params,
 				return_type,
@@ -1007,6 +1014,7 @@ impl Formatter {
 			} => self.format_fn(
 				&ast.location,
 				false,
+				attributes,
 				generics,
 				params,
 				return_type.as_deref(),
@@ -1018,10 +1026,11 @@ impl Formatter {
 			),
 
 			ASTValue::Struct {
+				attributes,
 				generics,
 				extends,
 				body,
-			} => self.format_struct(generics, extends.as_deref(), body),
+			} => self.format_struct(attributes, generics, extends.as_deref(), body),
 			ASTValue::Enum { variants } => self.format_enum(variants),
 			ASTValue::Union {
 				generics,
@@ -1243,6 +1252,7 @@ impl Formatter {
 		&mut self,
 		loc: &SourceLocation,
 		inline_prefix: bool,
+		attributes: &[String],
 		generics: &[GenericParam],
 		params: &[FnParam],
 		return_type: Option<&Type>,
@@ -1296,6 +1306,12 @@ impl Formatter {
 		let params_entries = self.format_param_entries(params);
 
 		let mut signature_inline = String::from("fn");
+		if !attributes.is_empty() {
+			signature_inline.push(' ');
+			signature_inline.push_str("[[");
+			signature_inline.push_str(&attributes.join(","));
+			signature_inline.push_str("]]");
+		}
 		if !generics.is_empty() {
 			let generics_s = generics
 				.iter()
@@ -1319,6 +1335,12 @@ impl Formatter {
 		let wraps_signature = self.line_width_exceeded(self.indent, &signature_inline);
 
 		self.out.push_str("fn");
+		if !attributes.is_empty() {
+			self.out.push(' ');
+			self.out.push_str("[[");
+			self.out.push_str(&attributes.join(","));
+			self.out.push_str("]]");
+		}
 		if !generics.is_empty() {
 			let generics_s = generics
 				.iter()
@@ -1372,8 +1394,20 @@ impl Formatter {
 		self.format_fn_body(multiline_clauses, body);
 	}
 
-	fn format_struct(&mut self, generics: &[GenericParam], extends: Option<&Type>, body: &AST) {
+	fn format_struct(
+		&mut self,
+		attributes: &[String],
+		generics: &[GenericParam],
+		extends: Option<&Type>,
+		body: &AST,
+	) {
 		self.out.push_str("struct");
+		if !attributes.is_empty() {
+			self.out.push(' ');
+			self.out.push_str("[[");
+			self.out.push_str(&attributes.join(","));
+			self.out.push_str("]]");
+		}
 
 		if !generics.is_empty() {
 			let generics_s = generics

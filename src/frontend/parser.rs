@@ -1493,6 +1493,7 @@ impl<'a> Parser<'a> {
 	fn parse_fn(&mut self) -> ParseResult {
 		let mut loc = self.cur.location.clone();
 		self.next()?; // consume 'fn'
+		let attributes = self.parse_attributes()?;
 
 		let generics = if Self::is_lt(&self.cur.v) {
 			self.parse_generic_params()?
@@ -1666,6 +1667,7 @@ impl<'a> Parser<'a> {
 		Ok(AST::from(
 			loc,
 			ASTValue::Fn {
+				attributes,
 				generics,
 				params,
 				return_type,
@@ -1681,6 +1683,7 @@ impl<'a> Parser<'a> {
 	fn parse_struct(&mut self) -> ParseResult {
 		let mut loc = self.cur.location.clone();
 		self.next()?; // consume 'struct'
+		let attributes = self.parse_attributes()?;
 
 		let generics = if Self::is_lt(&self.cur.v) {
 			self.parse_generic_params()?
@@ -1708,6 +1711,7 @@ impl<'a> Parser<'a> {
 		Ok(AST::from(
 			loc,
 			ASTValue::Struct {
+				attributes,
 				generics,
 				extends,
 				body,
@@ -3590,6 +3594,49 @@ impl<'a> Parser<'a> {
 		Ok(())
 	}
 
+	fn parse_attributes(&mut self) -> Result<Vec<String>, ParseError> {
+		let mut attributes = Vec::new();
+		while self.cur.v == TokenValue::LBracket
+			&& self.next.v == TokenValue::LBracket
+		{
+			self.next()?; // consume '['
+			self.next()?; // consume '['
+			let mut current: Vec<String> = Vec::new();
+			loop {
+				if self.cur.v == TokenValue::EOF {
+					return Err(ParseError::ExpectedToken(
+						self.cur.clone(),
+						TokenValue::RBracket,
+					));
+				}
+				if self.cur.v == TokenValue::RBracket
+					&& self.next.v == TokenValue::RBracket
+				{
+					break;
+				}
+				if self.cur.v == TokenValue::Comma {
+					let value = current.join("");
+					if !value.is_empty() {
+						attributes.push(value);
+					}
+					current.clear();
+					self.next()?;
+					continue;
+				}
+				current.push(Self::token_to_sourceish(&self.cur.v));
+				self.next()?;
+			}
+			let value = current.join("");
+			if !value.is_empty() {
+				attributes.push(value);
+			}
+			self.next()?; // consume ']'
+			self.next()?; // consume ']'
+			self.consume_semicolons()?;
+		}
+		Ok(attributes)
+	}
+
 	fn token_starts_type(&self, v: &TokenValue) -> bool {
 		matches!(v, TokenValue::Id(_))
 			|| matches!(v, TokenValue::Keyword(Keyword::Fn))
@@ -5260,6 +5307,7 @@ mod tests {
 
 		match &ast.v {
 			ASTValue::Fn {
+				attributes,
 				generics,
 				params,
 				return_type,
@@ -5269,6 +5317,7 @@ mod tests {
 				ensures,
 				body,
 			} => {
+				assert!(attributes.is_empty());
 				assert!(generics.is_empty());
 				assert_eq!(params.len(), 1);
 				assert_eq!(params[0].names, vec!["a".to_string(), "b".to_string()]);
@@ -5296,6 +5345,25 @@ mod tests {
 					}
 					_ => panic!("expected do-body expression"),
 				}
+			}
+			_ => panic!("expected Fn"),
+		}
+	}
+
+	#[test]
+	fn fn_attributes_parse() {
+		let lx = Lexer::new(
+			"fn [[packed,no_reorder]] () do 0".to_string(),
+			"<test>".to_string(),
+		);
+		let ast = parse_one(lx).expect("ok");
+
+		match &ast.v {
+			ASTValue::Fn { attributes, .. } => {
+				assert_eq!(
+					attributes,
+					&vec!["packed".to_string(), "no_reorder".to_string()]
+				);
 			}
 			_ => panic!("expected Fn"),
 		}
@@ -5437,10 +5505,12 @@ mod tests {
 
 		match &ast.v {
 			ASTValue::Struct {
+				attributes,
 				generics,
 				extends,
 				body,
 			} => {
+				assert!(attributes.is_empty());
 				assert_eq!(
 					generics,
 					&vec![GenericParam::Type {
@@ -5460,6 +5530,22 @@ mod tests {
 					ASTValue::ExprList(items) => assert_eq!(items.len(), 1),
 					_ => panic!("expected struct body expr list"),
 				}
+			}
+			_ => panic!("expected Struct"),
+		}
+	}
+
+	#[test]
+	fn struct_attributes_parse() {
+		let lx = Lexer::new(
+			"struct [[packed]] { x: int }".to_string(),
+			"<test>".to_string(),
+		);
+		let ast = parse_one(lx).expect("ok");
+
+		match &ast.v {
+			ASTValue::Struct { attributes, .. } => {
+				assert_eq!(attributes, &vec!["packed".to_string()]);
 			}
 			_ => panic!("expected Struct"),
 		}

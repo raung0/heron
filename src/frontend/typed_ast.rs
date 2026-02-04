@@ -333,6 +333,7 @@ pub enum TypedValue {
 	},
 	Type(TypeId),
 	Fn {
+		attributes: Vec<String>,
 		generics: Vec<TypedGenericParam>,
 		params: Vec<TypedFnParam>,
 		return_type: Option<TypeId>,
@@ -343,6 +344,7 @@ pub enum TypedValue {
 		body: TypedFnBody,
 	},
 	Struct {
+		attributes: Vec<String>,
 		generics: Vec<TypedGenericParam>,
 		extends: Option<TypeId>,
 		body: Box<TypedAst>,

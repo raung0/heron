@@ -441,6 +441,7 @@ pub enum ASTValue {
 	},
 	Type(Box<Type>),
 	Fn {
+		attributes: Vec<String>,
 		generics: Vec<GenericParam>,
 		params: Vec<FnParam>,
 		return_type: Option<Box<Type>>,
@@ -451,6 +452,7 @@ pub enum ASTValue {
 		body: FnBody,
 	},
 	Struct {
+		attributes: Vec<String>,
 		generics: Vec<GenericParam>,
 		extends: Option<Box<Type>>,
 		body: Box<AST>,
@@ -1040,6 +1042,7 @@ impl fmt::Display for AST {
 				write!(f, "(Type {})", quote_type(t.as_ref()))
 			}
 			Fn {
+				attributes,
 				generics,
 				params,
 				return_type,
@@ -1050,6 +1053,9 @@ impl fmt::Display for AST {
 				body,
 			} => {
 				write!(f, "(Fn")?;
+				if !attributes.is_empty() {
+					write!(f, " (Attributes {:?})", attributes)?;
+				}
 				if !generics.is_empty() {
 					write_generic_list(f, generics)?;
 				}
@@ -1087,11 +1093,15 @@ impl fmt::Display for AST {
 				write!(f, ")")
 			}
 			Struct {
+				attributes,
 				generics,
 				extends,
 				body,
 			} => {
 				write!(f, "(Struct")?;
+				if !attributes.is_empty() {
+					write!(f, " (Attributes {:?})", attributes)?;
+				}
 				if !generics.is_empty() {
 					write_generic_list(f, generics)?;
 				}

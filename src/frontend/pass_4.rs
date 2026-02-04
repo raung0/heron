@@ -379,6 +379,7 @@ impl Pass4State {
 
 		match &value.v {
 			ASTValue::Struct {
+				attributes: _,
 				generics,
 				extends,
 				body,
@@ -1972,6 +1973,7 @@ impl Pass4State {
 				out
 			}
 			ASTValue::Fn {
+				attributes,
 				generics,
 				params,
 				return_type,
@@ -1983,6 +1985,7 @@ impl Pass4State {
 			} => self.type_fn(
 				node,
 				ctx,
+				attributes,
 				generics,
 				params,
 				return_type,
@@ -1993,6 +1996,7 @@ impl Pass4State {
 				body,
 			),
 			ASTValue::Struct {
+				attributes,
 				generics,
 				extends,
 				body,
@@ -2021,6 +2025,7 @@ impl Pass4State {
 				let mut out = TypedAst::from(
 					node.location.clone(),
 					TypedValue::Struct {
+						attributes: attributes.clone(),
 						generics: typed_generics,
 						extends: typed_extends,
 						body: typed_body,
@@ -4133,6 +4138,7 @@ impl Pass4State {
 		&mut self,
 		node: &Box<AST>,
 		ctx: &mut TypeContext,
+		attributes: &[String],
 		generics: &[GenericParam],
 		params: &[crate::frontend::FnParam],
 		return_type: &Option<Box<Type>>,
@@ -4293,6 +4299,7 @@ impl Pass4State {
 		let mut out = TypedAst::from(
 			node.location.clone(),
 			TypedValue::Fn {
+				attributes: attributes.to_vec(),
 				generics: typed_generics,
 				params: typed_params,
 				return_type: if return_type.is_some() {
