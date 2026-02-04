@@ -23,13 +23,13 @@ Result :: union<T; E> {
 	Ok<T>
 	Err<E>
 
-pub is_error :: fn (self: Result<T, E>) -> bool {
+	pub is_error :: fn (self: Result<T, E>) -> bool {
 		match & v in self {
 			case Ok -> false
 			case Err -> true
 		}
 	}
-pub is_ok :: fn (self: Result<T, E>) -> bool {
+	pub is_ok :: fn (self: Result<T, E>) -> bool {
 		match & v in self {
 			case Ok -> true
 			case Err -> false

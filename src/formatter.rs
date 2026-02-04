@@ -1451,6 +1451,7 @@ impl Formatter {
 			self.out.push('\n');
 		}
 		for method in methods {
+			self.write_indent();
 			self.out.push_str(&self.format_stmt_inline_at_indent(method, self.indent));
 			self.out.push('\n');
 		}
