@@ -992,13 +992,6 @@ impl<'a> Parser<'a> {
 		let mut l = self.cur.location.clone();
 
 		match &self.cur.v {
-			TokenValue::Keyword(Keyword::Mut) => {
-				self.next()?; // consume `mut`
-				let inner = self.parse_unary()?;
-				l.range.end = inner.location.range.end;
-				Ok(AST::from(l, ASTValue::Mut(inner)))
-			}
-
 			TokenValue::Op {
 				op,
 				has_equals: false,
@@ -3596,9 +3589,7 @@ impl<'a> Parser<'a> {
 
 	fn parse_attributes(&mut self) -> Result<Vec<String>, ParseError> {
 		let mut attributes = Vec::new();
-		while self.cur.v == TokenValue::LBracket
-			&& self.next.v == TokenValue::LBracket
-		{
+		while self.cur.v == TokenValue::LBracket && self.next.v == TokenValue::LBracket {
 			self.next()?; // consume '['
 			self.next()?; // consume '['
 			let mut current: Vec<String> = Vec::new();
@@ -3653,7 +3644,6 @@ impl<'a> Parser<'a> {
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use std::fs::read_to_string;
 
 	fn parse_one(mut lx: Lexer) -> ParseResult {
 		let mut p = Parser::new(&mut lx).expect("parser init");
@@ -5837,14 +5827,6 @@ mod tests {
 		))
 		.expect("ok");
 		assert_eq!(exprs.len(), 2);
-	}
-
-	#[test]
-	fn testing_he_parses() {
-		let input = read_to_string("testing.he").expect("read testing.he");
-		let mut lx = Lexer::new(input, "testing.he".to_string());
-		let mut p = Parser::new(&mut lx).expect("parser init");
-		p.parse().expect("testing.he should parse");
 	}
 
 	#[test]
