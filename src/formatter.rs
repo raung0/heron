@@ -848,6 +848,7 @@ impl Formatter {
 				types,
 				values,
 				constexpr,
+				mutable,
 			} => {
 				if *constexpr
 					&& types.is_empty() && names.len() == 1
@@ -928,11 +929,19 @@ impl Formatter {
 						types,
 						values.as_deref(),
 						*constexpr,
+						*mutable,
 					);
 				}
 			}
 
-			ASTValue::Declaration(name, value) => {
+			ASTValue::Declaration {
+				name,
+				value,
+				mutable,
+			} => {
+				if *mutable {
+					self.out.push_str("mut ");
+				}
 				self.out.push_str(name);
 				self.out.push_str(" := ");
 				if self.is_stmt_value(value) {
@@ -1201,7 +1210,11 @@ impl Formatter {
 		types: &[Box<Type>],
 		values: Option<&[Box<AST>]>,
 		constexpr: bool,
+		mutable: bool,
 	) {
+		if mutable {
+			self.out.push_str("mut ");
+		}
 		self.out.push_str(&names.join(", "));
 		if types.is_empty() && values.is_none() {
 			return;
@@ -1738,6 +1751,7 @@ impl Formatter {
 				types,
 				values,
 				constexpr,
+				mutable: _,
 			} => {
 				if *constexpr
 					&& types.is_empty() && names.len() == 1
@@ -1764,7 +1778,7 @@ impl Formatter {
 			| ASTValue::Alias { .. }
 			| ASTValue::Package { .. }
 			| ASTValue::Use { .. }
-			| ASTValue::Declaration(..)
+			| ASTValue::Declaration { .. }
 			| ASTValue::DeclarationConstexpr(..)
 			| ASTValue::Set(..)
 			| ASTValue::SetMulti { .. }
@@ -2181,7 +2195,7 @@ impl Formatter {
 	fn statement_end_line(&self, ast: &AST) -> i32 {
 		match &ast.v {
 			ASTValue::Pub(inner) => self.statement_end_line(inner),
-			ASTValue::Declaration(_, value) => self.statement_end_line(value),
+			ASTValue::Declaration { value, .. } => self.statement_end_line(value),
 			ASTValue::DeclarationConstexpr(_, value) => self.statement_end_line(value),
 
 			ASTValue::DeclarationMulti { values, .. } => values
@@ -2603,6 +2617,7 @@ impl Formatter {
 			types,
 			values,
 			constexpr,
+			mutable: _,
 		} = &value.v && *constexpr
 			&& types.is_empty() && names.len() == 1
 			&& values.as_ref().is_some_and(|v| v.len() == 1)

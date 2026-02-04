@@ -427,7 +427,11 @@ pub enum ASTValue {
 	},
 	Pub(Box<AST>),
 	Set(String, Box<AST>),
-	Declaration(String, Box<AST>),
+	Declaration {
+		name: String,
+		value: Box<AST>,
+		mutable: bool,
+	},
 	DeclarationConstexpr(String, Box<AST>),
 	SetMulti {
 		names: Vec<String>,
@@ -438,6 +442,7 @@ pub enum ASTValue {
 		types: Vec<Box<Type>>,
 		values: Option<Vec<Box<AST>>>,
 		constexpr: bool,
+		mutable: bool,
 	},
 	Type(Box<Type>),
 	Fn {
@@ -997,8 +1002,12 @@ impl fmt::Display for AST {
 			Set(s, v) => {
 				write!(f, "(Set {:?} {})", s, v)
 			}
-			Declaration(name, value) => {
-				write!(f, "(Declaration {:?} {})", name, value)
+			Declaration {
+				name,
+				value,
+				mutable,
+			} => {
+				write!(f, "(Declaration mut={} {:?} {})", mutable, name, value)
 			}
 			DeclarationConstexpr(name, value) => {
 				write!(f, "(DeclarationConstexpr {:?} {})", name, value)
@@ -1018,6 +1027,7 @@ impl fmt::Display for AST {
 				types,
 				values,
 				constexpr,
+				mutable,
 			} => {
 				let types_s = types
 					.iter()
@@ -1034,8 +1044,8 @@ impl fmt::Display for AST {
 				};
 				write!(
 					f,
-					"(DeclarationMulti constexpr={} {:?} [{}] {})",
-					constexpr, names, types_s, values_s
+					"(DeclarationMulti constexpr={} mut={} {:?} [{}] {})",
+					constexpr, mutable, names, types_s, values_s
 				)
 			}
 			Type(t) => {
@@ -1266,7 +1276,7 @@ where
 		}
 
 		ASTValue::Set(_, v)
-		| ASTValue::Declaration(_, v)
+		| ASTValue::Declaration { value: v, .. }
 		| ASTValue::DeclarationConstexpr(_, v) => {
 			walk_ast(v, Some(node), predicate);
 		}
@@ -1431,7 +1441,7 @@ where
 		}
 
 		ASTValue::Set(_, v)
-		| ASTValue::Declaration(_, v)
+		| ASTValue::Declaration { value: v, .. }
 		| ASTValue::DeclarationConstexpr(_, v) => {
 			walk_ast_mut(v, predicate);
 		}

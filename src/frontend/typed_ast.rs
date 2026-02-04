@@ -319,7 +319,11 @@ pub enum TypedValue {
 	},
 	Pub(Box<TypedAst>),
 	Set(String, Box<TypedAst>),
-	Declaration(String, Box<TypedAst>),
+	Declaration {
+		name: String,
+		value: Box<TypedAst>,
+		mutable: bool,
+	},
 	DeclarationConstexpr(String, Box<TypedAst>),
 	SetMulti {
 		names: Vec<String>,
@@ -330,6 +334,7 @@ pub enum TypedValue {
 		types: Vec<TypeId>,
 		values: Option<Vec<Box<TypedAst>>>,
 		constexpr: bool,
+		mutable: bool,
 	},
 	Type(TypeId),
 	Fn {

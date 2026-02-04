@@ -541,6 +541,15 @@ impl<'a> Parser<'a> {
 				Keyword::Alias => return self.parse_alias(),
 				Keyword::Pub => return self.parse_pub(),
 				Keyword::Hide => return self.parse_hide(),
+				Keyword::Mut => {
+					if self.enable_multi_id_parse {
+						return self.parse_multi_id();
+					}
+					return Err(ParseError::UnexpectedToken(
+						self.cur.clone(),
+						TokenValue::Id("expression".to_string()),
+					));
+				}
 				Keyword::Operator => {
 					return Err(ParseError::UnexpectedToken(
 						self.cur.clone(),
@@ -2860,6 +2869,11 @@ impl<'a> Parser<'a> {
 
 	fn parse_multi_id(&mut self) -> ParseResult {
 		let mut loc = self.cur.location.clone();
+		let mut mutable = false;
+		if self.cur.v == TokenValue::Keyword(Keyword::Mut) {
+			mutable = true;
+			self.next()?; // consume `mut`
+		}
 
 		let mut names = Vec::<String>::new();
 		while matches!(
@@ -2909,6 +2923,13 @@ impl<'a> Parser<'a> {
 				));
 			}
 		};
+
+		if mutable && matches!(kind, Kind::Assign) {
+			return Err(ParseError::UnexpectedToken(
+				self.cur.clone(),
+				TokenValue::Colon,
+			));
+		}
 
 		let enable_multi_id_parse_prev = self.enable_multi_id_parse;
 		self.enable_multi_id_parse = true;
@@ -3035,6 +3056,7 @@ impl<'a> Parser<'a> {
 						types,
 						values,
 						constexpr,
+						mutable,
 					},
 				)
 			}
@@ -4093,6 +4115,7 @@ mod tests {
 		&'a [String],
 		&'a [Box<crate::frontend::Type>],
 		Option<&'a [Box<AST>]>,
+		bool,
 	) {
 		match &ast.v {
 			ASTValue::DeclarationMulti {
@@ -4100,11 +4123,13 @@ mod tests {
 				names,
 				types,
 				values,
+				mutable,
 			} => (
 				*constexpr,
 				names.as_slice(),
 				types.as_slice(),
 				values.as_ref().map(|v| v.as_slice()),
+				*mutable,
 			),
 			_ => panic!("expected DeclarationMulti"),
 		}
@@ -4301,7 +4326,8 @@ mod tests {
 		let ast = parse_expr(Lexer::new("a, b: T, U".to_string(), "<test>".to_string()))
 			.expect("ok");
 
-		let (constexpr, names, types, values) = expect_declaration_multi(ast.as_ref());
+		let (constexpr, names, types, values, _mutable) =
+			expect_declaration_multi(ast.as_ref());
 		assert!(!constexpr);
 		assert_eq!(names, ["a".to_string(), "b".to_string()]);
 		assert_eq!(types.len(), 2);
@@ -4321,10 +4347,47 @@ mod tests {
 		let ast = parse_expr(Lexer::new("a, b := 1, 2".to_string(), "<test>".to_string()))
 			.expect("ok");
 
-		let (constexpr, names, types, values) = expect_declaration_multi(ast.as_ref());
+		let (constexpr, names, types, values, _mutable) =
+			expect_declaration_multi(ast.as_ref());
 		assert!(!constexpr);
 		assert_eq!(names, ["a".to_string(), "b".to_string()]);
 		assert!(types.is_empty());
+		let values = values.expect("expected initializer list");
+		assert_eq!(values.len(), 2);
+		expect_integer(values[0].as_ref(), 1);
+		expect_integer(values[1].as_ref(), 2);
+	}
+
+	#[test]
+	fn mut_decl_infer_from_initializer() {
+		let ast = parse_expr(Lexer::new("mut x := 1".to_string(), "<test>".to_string()))
+			.expect("ok");
+
+		let (constexpr, names, types, values, mutable) =
+			expect_declaration_multi(ast.as_ref());
+		assert!(!constexpr);
+		assert!(mutable);
+		assert_eq!(names, ["x".to_string()]);
+		assert!(types.is_empty());
+		let values = values.expect("expected initializer list");
+		assert_eq!(values.len(), 1);
+		expect_integer(values[0].as_ref(), 1);
+	}
+
+	#[test]
+	fn mut_decl_with_types() {
+		let ast = parse_expr(Lexer::new(
+			"mut x, y: int, uint = 1, 2".to_string(),
+			"<test>".to_string(),
+		))
+		.expect("ok");
+
+		let (constexpr, names, types, values, mutable) =
+			expect_declaration_multi(ast.as_ref());
+		assert!(!constexpr);
+		assert!(mutable);
+		assert_eq!(names, ["x".to_string(), "y".to_string()]);
+		assert_eq!(types.len(), 2);
 		let values = values.expect("expected initializer list");
 		assert_eq!(values.len(), 2);
 		expect_integer(values[0].as_ref(), 1);
@@ -4336,7 +4399,8 @@ mod tests {
 		let ast = parse_expr(Lexer::new("x :: 1".to_string(), "<test>".to_string()))
 			.expect("ok");
 
-		let (constexpr, names, types, values) = expect_declaration_multi(ast.as_ref());
+		let (constexpr, names, types, values, _mutable) =
+			expect_declaration_multi(ast.as_ref());
 		assert!(constexpr);
 		assert_eq!(names, ["x".to_string()]);
 		assert!(types.is_empty());
@@ -4353,7 +4417,8 @@ mod tests {
 		))
 		.expect("ok");
 
-		let (_constexpr, names, types, values) = expect_declaration_multi(ast.as_ref());
+		let (_constexpr, names, types, values, _mutable) =
+			expect_declaration_multi(ast.as_ref());
 		assert_eq!(names, ["x".to_string()]);
 		assert!(values.is_none());
 		assert_eq!(types.len(), 2);
@@ -4384,7 +4449,8 @@ mod tests {
 		))
 		.expect("ok");
 
-		let (_constexpr, _names, types, _values) = expect_declaration_multi(ast.as_ref());
+		let (_constexpr, _names, types, _values, _mutable) =
+			expect_declaration_multi(ast.as_ref());
 		assert_eq!(types.len(), 2);
 		match types[0].as_ref() {
 			crate::frontend::Type::Slice { underlying } => {
@@ -4420,7 +4486,8 @@ mod tests {
 		))
 		.expect("ok");
 
-		let (_constexpr, _names, types, _values) = expect_declaration_multi(ast.as_ref());
+		let (_constexpr, _names, types, _values, _mutable) =
+			expect_declaration_multi(ast.as_ref());
 		assert_eq!(types.len(), 1);
 		match types[0].as_ref() {
 			crate::frontend::Type::Generic { base, args } => {
@@ -4531,7 +4598,8 @@ mod tests {
 		.expect("ok");
 
 		let inner = expect_pub(ast.as_ref());
-		let (constexpr, names, types, values) = expect_declaration_multi(inner);
+		let (constexpr, names, types, values, _mutable) =
+			expect_declaration_multi(inner);
 		assert!(!constexpr);
 		assert_eq!(names, &["main".to_string()]);
 		assert!(types.is_empty());
@@ -4720,7 +4788,8 @@ mod tests {
 		))
 		.expect("ok");
 
-		let (_constexpr, _names, types, _values) = expect_declaration_multi(ast.as_ref());
+		let (_constexpr, _names, types, _values, _mutable) =
+			expect_declaration_multi(ast.as_ref());
 		assert_eq!(types.len(), 1);
 		match types[0].as_ref() {
 			crate::frontend::Type::Generic { base, args } => {
@@ -5548,7 +5617,8 @@ mod tests {
 			"<test>".to_string(),
 		))
 		.expect("ok");
-		let (_constexpr, names, _types, _values) = expect_declaration_multi(ast.as_ref());
+		let (_constexpr, names, _types, _values, _mutable) =
+			expect_declaration_multi(ast.as_ref());
 		assert_eq!(names, &["operator+".to_string()]);
 	}
 
@@ -5693,7 +5763,8 @@ mod tests {
 		))
 		.expect("ok");
 
-		let (_constexpr, names, types, values) = expect_declaration_multi(ast.as_ref());
+		let (_constexpr, names, types, values, _mutable) =
+			expect_declaration_multi(ast.as_ref());
 		assert_eq!(names, ["f".to_string()]);
 		assert!(values.is_none());
 		assert_eq!(types.len(), 1);

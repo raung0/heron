@@ -1,4 +1,4 @@
-use crate::frontend::{AST, ASTValue, SourceLocation, Trivia, walk_ast_mut};
+use crate::frontend::{walk_ast_mut, ASTValue, SourceLocation, Trivia, AST};
 
 pub(crate) fn pass_1(mut ast: Box<AST>) -> Box<AST> {
 	reorder_declarations(&mut ast);
@@ -44,6 +44,7 @@ fn normalize_list(exprs: &mut Vec<Box<AST>>) {
 				types,
 				values,
 				constexpr,
+				mutable,
 			} => {
 				let types_len = types.len();
 				let values_len = values.as_ref().map_or(0, |v| v.len());
@@ -62,6 +63,7 @@ fn normalize_list(exprs: &mut Vec<Box<AST>>) {
 						types_owned,
 						values_owned,
 						*constexpr,
+						*mutable,
 						false,
 					);
 					normalized.extend(expanded);
@@ -73,6 +75,7 @@ fn normalize_list(exprs: &mut Vec<Box<AST>>) {
 					types,
 					values,
 					constexpr,
+					mutable,
 				} = &mut inner.v
 				{
 					let types_len = types.len();
@@ -92,6 +95,7 @@ fn normalize_list(exprs: &mut Vec<Box<AST>>) {
 							types_owned,
 							values_owned,
 							*constexpr,
+							*mutable,
 							true,
 						);
 						normalized.extend(expanded);
@@ -108,6 +112,7 @@ fn normalize_list(exprs: &mut Vec<Box<AST>>) {
 }
 
 #[allow(clippy::vec_box)]
+#[allow(clippy::too_many_arguments)]
 fn expand_declaration_multi(
 	location: SourceLocation,
 	trivia: Vec<Trivia>,
@@ -115,6 +120,7 @@ fn expand_declaration_multi(
 	types: Vec<Box<crate::frontend::Type>>,
 	values: Option<Vec<Box<AST>>>,
 	constexpr: bool,
+	mutable: bool,
 	wrap_pub: bool,
 ) -> Vec<Box<AST>> {
 	let types_len = types.len();
@@ -158,7 +164,11 @@ fn expand_declaration_multi(
 			} else {
 				AST::from(
 					location.clone(),
-					ASTValue::Declaration(name.clone(), value),
+					ASTValue::Declaration {
+						name: name.clone(),
+						value,
+						mutable,
+					},
 				)
 			}
 		} else {
@@ -169,6 +179,7 @@ fn expand_declaration_multi(
 					types: vec![type_for.expect("type required")],
 					values: value_for.map(|v| vec![v]),
 					constexpr,
+					mutable,
 				},
 			)
 		};

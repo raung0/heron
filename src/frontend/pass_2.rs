@@ -167,7 +167,7 @@ fn check_duplicate_declarations(
 			ASTValue::DeclarationMulti { names: decls, .. } => {
 				names.extend(decls.iter());
 			}
-			ASTValue::Declaration(name, _)
+			ASTValue::Declaration { name, .. }
 			| ASTValue::DeclarationConstexpr(name, _) => {
 				names.push(name);
 			}
@@ -199,7 +199,7 @@ fn check_struct_members(items: &[Box<AST>], errors: &mut Vec<FrontendError>) {
 		let node = unwrap_pub(item.as_ref());
 		match &node.v {
 			ASTValue::DeclarationMulti { .. }
-			| ASTValue::Declaration(..)
+			| ASTValue::Declaration { .. }
 			| ASTValue::DeclarationConstexpr(..) => {}
 			_ => {
 				errors.push(FrontendError::InvalidStructMember {

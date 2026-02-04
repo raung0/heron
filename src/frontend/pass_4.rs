@@ -1929,11 +1929,13 @@ impl Pass4State {
 				out
 			}
 			ASTValue::Set(name, value) => self.type_assignment(node, ctx, name, value),
-			ASTValue::Declaration(name, value) => {
-				self.type_declaration(node, ctx, name, value, false)
-			}
+			ASTValue::Declaration {
+				name,
+				value,
+				mutable,
+			} => self.type_declaration(node, ctx, name, value, *mutable, false),
 			ASTValue::DeclarationConstexpr(name, value) => {
-				self.type_declaration(node, ctx, name, value, true)
+				self.type_declaration(node, ctx, name, value, false, true)
 			}
 			ASTValue::SetMulti { names, values } => {
 				let mut typed_values = Vec::new();
@@ -1954,8 +1956,9 @@ impl Pass4State {
 				types,
 				values,
 				constexpr,
+				mutable,
 			} => self.type_multi_declaration(
-				node, ctx, names, types, values, *constexpr,
+				node, ctx, names, types, values, *constexpr, *mutable,
 			),
 			ASTValue::Type(ty) => {
 				let resolved = self.resolve_type(
@@ -3986,6 +3989,7 @@ impl Pass4State {
 		ctx: &mut TypeContext,
 		name: &str,
 		value: &Box<AST>,
+		mutable: bool,
 		constexpr: bool,
 	) -> Box<TypedAst> {
 		let prev_constexpr = ctx.in_constexpr;
@@ -4021,7 +4025,11 @@ impl Pass4State {
 			if constexpr {
 				TypedValue::DeclarationConstexpr(name.to_string(), typed_value)
 			} else {
-				TypedValue::Declaration(name.to_string(), typed_value)
+				TypedValue::Declaration {
+					name: name.to_string(),
+					value: typed_value,
+					mutable,
+				}
 			},
 		);
 		out.ty = Some(self.builtins.void_id);
@@ -4029,6 +4037,7 @@ impl Pass4State {
 	}
 
 	#[allow(clippy::vec_box)]
+	#[allow(clippy::too_many_arguments)]
 	fn type_multi_declaration(
 		&mut self,
 		node: &Box<AST>,
@@ -4037,6 +4046,7 @@ impl Pass4State {
 		types: &[Box<Type>],
 		values: &Option<Vec<Box<AST>>>,
 		constexpr: bool,
+		mutable: bool,
 	) -> Box<TypedAst> {
 		let mut typed_types = Vec::new();
 		for ty in types {
@@ -4127,6 +4137,7 @@ impl Pass4State {
 				types: typed_types,
 				values: typed_values,
 				constexpr,
+				mutable,
 			},
 		);
 		out.ty = Some(self.builtins.void_id);
@@ -4920,8 +4931,11 @@ impl Pass4State {
 			let node = Self::unwrap_pub(item.as_ref());
 			match &node.v {
 				ASTValue::DeclarationConstexpr(decl_name, value)
-				| ASTValue::Declaration(decl_name, value)
-					if decl_name == name =>
+				| ASTValue::Declaration {
+					name: decl_name,
+					value,
+					..
+				} if decl_name == name =>
 				{
 					if let ASTValue::Fn { params, .. } = &value.v {
 						let mut count = 0;
@@ -4967,8 +4981,11 @@ impl Pass4State {
 			let node = Self::unwrap_pub(item.as_ref());
 			match &node.v {
 				ASTValue::DeclarationConstexpr(decl_name, value)
-				| ASTValue::Declaration(decl_name, value)
-					if decl_name == name =>
+				| ASTValue::Declaration {
+					name: decl_name,
+					value,
+					..
+				} if decl_name == name =>
 				{
 					if let ASTValue::Fn {
 						generics, params, ..
@@ -5045,8 +5062,11 @@ impl Pass4State {
 			let node = Self::unwrap_pub(item.as_ref());
 			match &node.v {
 				ASTValue::DeclarationConstexpr(decl_name, value)
-				| ASTValue::Declaration(decl_name, value)
-					if decl_name == name =>
+				| ASTValue::Declaration {
+					name: decl_name,
+					value,
+					..
+				} if decl_name == name =>
 				{
 					if let ASTValue::Fn { generics, .. } = &value.v {
 						return Some(self.flatten_generic_names(generics));
