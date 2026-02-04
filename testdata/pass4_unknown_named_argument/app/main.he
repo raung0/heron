@@ -1,0 +1,8 @@
+package main
+
+foo :: fn (a: int; b: int = 2) {
+}
+
+main :: fn {
+	foo(c: 1, a: 2)
+}

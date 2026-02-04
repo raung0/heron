@@ -113,6 +113,34 @@ pub enum FrontendError {
 		location: SourceLocation,
 		callee: String,
 	},
+	PositionalAfterNamedArgument {
+		location: SourceLocation,
+		callee: String,
+	},
+	UnknownNamedArgument {
+		location: SourceLocation,
+		callee: String,
+		name: String,
+	},
+	DuplicateNamedArgument {
+		location: SourceLocation,
+		callee: String,
+		name: String,
+	},
+	DuplicateArgument {
+		location: SourceLocation,
+		callee: String,
+		name: String,
+	},
+	MissingNamedArgument {
+		location: SourceLocation,
+		callee: String,
+		name: String,
+	},
+	DefaultParamOrder {
+		location: SourceLocation,
+		name: String,
+	},
 	MissingOperatorSelf {
 		location: SourceLocation,
 		operator: String,

@@ -434,6 +434,60 @@ fn emit_error_message(
 			locations.push(location);
 			message(format!("invalid call to {callee}"))
 		}
+		FrontendError::PositionalAfterNamedArgument { location, callee } => {
+			labels.push(Some("positional after named".to_string()));
+			locations.push(location);
+			message(format!(
+				"positional arguments must appear before named arguments in call to {callee}"
+			))
+		}
+		FrontendError::UnknownNamedArgument {
+			location,
+			callee,
+			name,
+		} => {
+			labels.push(Some("unknown named argument".to_string()));
+			locations.push(location);
+			message(format!("{callee} has no parameter named {name}"))
+		}
+		FrontendError::DuplicateNamedArgument {
+			location,
+			callee,
+			name,
+		} => {
+			labels.push(Some("duplicate named argument".to_string()));
+			locations.push(location);
+			message(format!(
+				"argument {name} provided more than once in call to {callee}"
+			))
+		}
+		FrontendError::DuplicateArgument {
+			location,
+			callee,
+			name,
+		} => {
+			labels.push(Some("duplicate argument".to_string()));
+			locations.push(location);
+			message(format!(
+				"argument {name} already provided positionally in call to {callee}"
+			))
+		}
+		FrontendError::MissingNamedArgument {
+			location,
+			callee,
+			name,
+		} => {
+			labels.push(Some("missing argument".to_string()));
+			locations.push(location);
+			message(format!("call to {callee} missing required argument {name}"))
+		}
+		FrontendError::DefaultParamOrder { location, name } => {
+			labels.push(Some("default parameter order".to_string()));
+			locations.push(location);
+			message(format!(
+				"parameters without defaults must precede defaulted parameters in {name}"
+			))
+		}
 		FrontendError::MissingOperatorSelf {
 			location,
 			operator,

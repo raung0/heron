@@ -95,6 +95,11 @@ pub enum MemberAccess<T> {
 	Missing,
 }
 
+struct ParamEntry {
+	name: String,
+	has_default: bool,
+}
+
 pub(crate) fn pass_4(program: ResolvedProgram) -> Pass4Result {
 	let mut state = Pass4State::new(program);
 	state.collect_type_decls();
@@ -2633,6 +2638,156 @@ impl Pass4State {
 		typed_args
 	}
 
+	#[allow(clippy::vec_box)]
+	fn strip_named_args(&self, args: &[Box<AST>]) -> Vec<Box<AST>> {
+		let mut flattened = Vec::new();
+		for arg in args {
+			if let ASTValue::NamedArg { value, .. } = &arg.v {
+				flattened.push(value.clone());
+			} else {
+				flattened.push(arg.clone());
+			}
+		}
+		flattened
+	}
+
+	fn param_entries_from_defs(&self, params: &[crate::frontend::FnParam]) -> Vec<ParamEntry> {
+		let mut entries = Vec::new();
+		let mut fallback_idx = 0usize;
+		for param in params {
+			let has_default = param.default.is_some();
+			if param.names.is_empty() {
+				entries.push(ParamEntry {
+					name: format!("param{fallback_idx}"),
+					has_default,
+				});
+				fallback_idx += 1;
+				continue;
+			}
+			for name in &param.names {
+				entries.push(ParamEntry {
+					name: name.clone(),
+					has_default,
+				});
+				fallback_idx += 1;
+			}
+		}
+		entries
+	}
+
+	fn param_count_range(&self, params: &[crate::frontend::FnParam], skip: usize) -> (usize, usize) {
+		let entries = self.param_entries_from_defs(params);
+		let required = entries
+			.iter()
+			.skip(skip)
+			.filter(|entry| !entry.has_default)
+			.count();
+		let total = entries.len().saturating_sub(skip);
+		(required, total)
+	}
+
+	#[allow(clippy::vec_box)]
+	fn normalize_call_args(
+		&mut self,
+		args: &[Box<AST>],
+		params: Option<&[crate::frontend::FnParam]>,
+		skip: usize,
+		callee: &str,
+		location: &SourceLocation,
+	) -> (Vec<Box<AST>>, bool) {
+		let mut saw_named = false;
+		let mut positional_after_named = false;
+		let mut has_named = false;
+		for arg in args {
+			if matches!(arg.v, ASTValue::NamedArg { .. }) {
+				saw_named = true;
+				has_named = true;
+			} else if saw_named {
+				positional_after_named = true;
+			}
+		}
+		if positional_after_named {
+			self.errors.push(FrontendError::PositionalAfterNamedArgument {
+				location: location.clone(),
+				callee: callee.to_string(),
+			});
+		}
+		let Some(params) = params else {
+			if has_named {
+				self.errors.push(FrontendError::InvalidCall {
+					location: location.clone(),
+					callee: callee.to_string(),
+				});
+			}
+			return (self.strip_named_args(args), has_named);
+		};
+		let mut entries = self.param_entries_from_defs(params);
+		if skip < entries.len() {
+			entries = entries.split_off(skip);
+		} else {
+			entries.clear();
+		}
+		let mut entry_index: HashMap<String, usize> = HashMap::new();
+		for (idx, entry) in entries.iter().enumerate() {
+			entry_index.insert(entry.name.clone(), idx);
+		}
+		let mut positional_args: Vec<Box<AST>> = Vec::new();
+		let mut named_args: HashMap<String, Box<AST>> = HashMap::new();
+		for arg in args {
+			match &arg.v {
+				ASTValue::NamedArg { name, value } => {
+					if let Some(index) = entry_index.get(name) {
+						if *index < positional_args.len() {
+							self.errors.push(FrontendError::DuplicateArgument {
+								location: arg.location.clone(),
+								callee: callee.to_string(),
+								name: name.clone(),
+							});
+							continue;
+						}
+					} else {
+						self.errors.push(FrontendError::UnknownNamedArgument {
+							location: arg.location.clone(),
+							callee: callee.to_string(),
+							name: name.clone(),
+						});
+						continue;
+					}
+					if named_args.contains_key(name) {
+						self.errors.push(FrontendError::DuplicateNamedArgument {
+							location: arg.location.clone(),
+							callee: callee.to_string(),
+							name: name.clone(),
+						});
+						continue;
+					}
+					named_args.insert(name.clone(), value.clone());
+				}
+				_ => positional_args.push(arg.clone()),
+			}
+		}
+		let mut ordered = Vec::new();
+		for (idx, entry) in entries.iter().enumerate() {
+			if idx < positional_args.len() {
+				ordered.push(positional_args[idx].clone());
+				continue;
+			}
+			if let Some(value) = named_args.remove(&entry.name) {
+				ordered.push(value);
+				continue;
+			}
+			if entry.has_default {
+				continue;
+			}
+			self.errors.push(FrontendError::MissingNamedArgument {
+				location: location.clone(),
+				callee: callee.to_string(),
+				name: entry.name.clone(),
+			});
+		}
+		(ordered, has_named)
+	}
+
 	fn resolve_dot_module_id(&self, lhs: &Box<AST>, ctx: &TypeContext) -> Option<ModuleId> {
 		if let ASTValue::Id(name) = &lhs.v {
 			if let Some(module_id) = ctx.module.imports.alias_to_module.get(name) {
@@ -2862,30 +3017,48 @@ impl Pass4State {
 	) -> Box<TypedAst> {
 		if let ASTValue::GenericApply { target, .. } = &callee.v {
 			if let ASTValue::Id(name) = &target.v {
+				let param_defs = self.fn_param_defs_from_ast(ctx.module_id, name);
+				let (normalized_args, has_named) = self.normalize_call_args(
+					args,
+					param_defs.as_deref(),
+					0,
+					name,
+					&node.location,
+				);
 				if let Some(expected_args) =
 					self.fn_param_count(ctx.module_id, name)
-					&& expected_args != args.len()
 				{
-					self.errors.push(FrontendError::InvalidCall {
-						location: node.location.clone(),
-						callee: name.clone(),
-					});
-					let explicit_types = HashMap::new();
-					let typed_args = self.type_args_with_expected(
-						ctx,
-						args,
-						&[],
-						0,
-						&explicit_types,
-						false,
-					);
-					let typed_callee = self.type_node(callee, ctx, None);
-					return self.build_call(
-						node.location.clone(),
-						typed_callee,
-						typed_args,
-						self.builtins.unknown_id,
-					);
+					let mut count_valid = expected_args == normalized_args.len();
+					if let Some(param_defs) = param_defs.as_deref() {
+						let (required, total) =
+							self.param_count_range(param_defs, 0);
+						count_valid = normalized_args.len() >= required
+							&& normalized_args.len() <= total;
+					} else if has_named {
+						count_valid = true;
+					}
+					if !count_valid {
+						self.errors.push(FrontendError::InvalidCall {
+							location: node.location.clone(),
+							callee: name.clone(),
+						});
+						let explicit_types = HashMap::new();
+						let typed_args = self.type_args_with_expected(
+							ctx,
+							&normalized_args,
+							&[],
+							0,
+							&explicit_types,
+							false,
+						);
+						let typed_callee = self.type_node(callee, ctx, None);
+						return self.build_call(
+							node.location.clone(),
+							typed_callee,
+							typed_args,
+							self.builtins.unknown_id,
+						);
+					}
 				}
 			}
 		}
@@ -2915,6 +3088,15 @@ impl Pass4State {
 					if let Some(callee_ty) = value_ty {
 						let typed_callee =
 							self.type_dot(callee, ctx, lhs, rhs);
+						let param_defs = self
+							.fn_param_defs_from_ast(&module_id, method_name);
+						let (normalized_args, has_named) = self.normalize_call_args(
+							args,
+							param_defs.as_deref(),
+							0,
+							method_name,
+							&node.location,
+						);
 						let mut return_ty = self.builtins.unknown_id;
 						let typed_args = if let ResolvedType::Fn {
 							params,
@@ -2923,10 +3105,27 @@ impl Pass4State {
 						{
 							let params = params.clone();
 							return_ty = *return_type;
+							if let Some(param_defs) = param_defs.as_deref() {
+								let (required, total) =
+									self.param_count_range(param_defs, 0);
+								if normalized_args.len() < required
+									|| normalized_args.len() > total
+								{
+									self.errors.push(FrontendError::InvalidCall {
+										location: node.location.clone(),
+										callee: method_name.clone(),
+									});
+								}
+							} else if !has_named && params.len() != normalized_args.len() {
+								self.errors.push(FrontendError::InvalidCall {
+									location: node.location.clone(),
+									callee: method_name.clone(),
+								});
+							}
 							let explicit_types = HashMap::new();
 							self.type_args_with_expected(
 								ctx,
-								args,
+								&normalized_args,
 								&params,
 								0,
 								&explicit_types,
@@ -2946,7 +3145,7 @@ impl Pass4State {
 							let explicit_types = HashMap::new();
 							self.type_args_with_expected(
 								ctx,
-								args,
+								&normalized_args,
 								&[],
 								0,
 								&explicit_types,
@@ -2994,17 +3193,38 @@ impl Pass4State {
 									);
 								}
 							};
-						let expected_args = params.len().saturating_sub(1);
-						if expected_args != args.len() {
+						let param_defs =
+							self.method_param_defs_from_ast(lhs_ty, method_name);
+						let (normalized_args, has_named) = self.normalize_call_args(
+							args,
+							param_defs.as_deref(),
+							1,
+							method_name,
+							&node.location,
+						);
+						if let Some(param_defs) = param_defs.as_deref() {
+							let (required, total) =
+								self.param_count_range(param_defs, 1);
+							if normalized_args.len() < required
+								|| normalized_args.len() > total
+							{
+								self.errors.push(FrontendError::InvalidCall {
+									location: node.location.clone(),
+									callee: method_name.clone(),
+								});
+							}
+						} else if !has_named
+							&& params.len().saturating_sub(1) != normalized_args.len()
+						{
 							self.errors.push(FrontendError::InvalidCall {
 								location: node.location.clone(),
 								callee: method_name.clone(),
 							});
 						}
-					let this_param = params
-						.first()
-						.copied()
-						.unwrap_or(self.builtins.unknown_id);
+						let this_param = params
+							.first()
+							.copied()
+							.unwrap_or(self.builtins.unknown_id);
 					let mut this_ty = lhs_ty;
 					if let ResolvedType::Reference { mutable, .. } =
 						self.arena.get(this_param)
@@ -3032,7 +3252,7 @@ impl Pass4State {
 						let explicit_types = HashMap::new();
 						let typed_args = self.type_args_with_expected(
 							ctx,
-							args,
+							&normalized_args,
 							&params,
 							1,
 							&explicit_types,
@@ -3064,9 +3284,10 @@ impl Pass4State {
 						});
 						let typed_callee = self.type_node(callee, ctx, None);
 						let explicit_types = HashMap::new();
+						let normalized_args = self.strip_named_args(args);
 						let typed_args = self.type_args_with_expected(
 							ctx,
-							args,
+							&normalized_args,
 							&[],
 							0,
 							&explicit_types,
@@ -3130,16 +3351,53 @@ impl Pass4State {
 				MemberAccess::Missing => None,
 			};
 			if let Some((_method_ty, params, _)) = method_info {
-				let expected_args = params.len().saturating_sub(1);
-				if expected_args != args.len() {
+				let type_name = self.type_name(type_id);
+				let param_defs =
+					self.method_param_defs_from_ast(type_id, "__construct");
+				let (normalized_args, has_named) = self.normalize_call_args(
+					args,
+					param_defs.as_deref(),
+					1,
+					&type_name,
+					&node.location,
+				);
+				if let Some(param_defs) = param_defs.as_deref() {
+					let (required, total) =
+						self.param_count_range(param_defs, 1);
+					if normalized_args.len() < required
+						|| normalized_args.len() > total
+					{
+						self.errors.push(FrontendError::InvalidCall {
+							location: node.location.clone(),
+							callee: type_name.clone(),
+						});
+						let explicit_types = HashMap::new();
+						let typed_args = self.type_args_with_expected(
+							ctx,
+							&normalized_args,
+							&[],
+							0,
+							&explicit_types,
+							false,
+						);
+						return self.build_call(
+							node.location.clone(),
+							typed_callee,
+							typed_args,
+							type_id,
+						);
+					}
+				} else if !has_named
+					&& params.len().saturating_sub(1) != normalized_args.len()
+				{
 					self.errors.push(FrontendError::InvalidCall {
 						location: node.location.clone(),
-						callee: self.type_name(type_id),
+						callee: type_name.clone(),
 					});
 					let explicit_types = HashMap::new();
 					let typed_args = self.type_args_with_expected(
 						ctx,
-						args,
+						&normalized_args,
 						&[],
 						0,
 						&explicit_types,
@@ -3174,7 +3432,7 @@ impl Pass4State {
 				let explicit_types = HashMap::new();
 				typed_args = self.type_args_with_expected(
 					ctx,
-					args,
+					&normalized_args,
 					&params,
 					1,
 					&explicit_types,
@@ -3220,10 +3478,22 @@ impl Pass4State {
 				}
 				_ => None,
 			};
+			let callee_display =
+				callee_name.clone().unwrap_or_else(|| self.type_name(callee_ty));
+			let param_defs = callee_name
+				.as_ref()
+				.and_then(|name| self.fn_param_defs_from_ast(ctx.module_id, name));
+			let (normalized_args, has_named) = self.normalize_call_args(
+				args,
+				param_defs.as_deref(),
+				0,
+				&callee_display,
+				&node.location,
+			);
 			if let Some(name) = callee_name.as_ref() {
 				if let Some(ast_params) =
 					self.fn_param_types_from_ast(ctx.module_id, name)
-					&& ast_params.len() == args.len()
+					&& ast_params.len() == normalized_args.len()
 				{
 					params = ast_params;
 				}
@@ -3240,17 +3510,23 @@ impl Pass4State {
 				_ => None,
 			};
 			let expected_count = expected_count.unwrap_or(params.len());
-			if expected_count != args.len() {
-				let callee_name =
-					callee_name.unwrap_or_else(|| self.type_name(callee_ty));
+			let mut count_valid = expected_count == normalized_args.len();
+			if let Some(param_defs) = param_defs.as_deref() {
+				let (required, total) = self.param_count_range(param_defs, 0);
+				count_valid = normalized_args.len() >= required
+					&& normalized_args.len() <= total;
+			} else if has_named {
+				count_valid = true;
+			}
+			if !count_valid {
 				self.errors.push(FrontendError::InvalidCall {
 					location: node.location.clone(),
-					callee: callee_name,
+					callee: callee_display.clone(),
 				});
 				let explicit_types = HashMap::new();
 				typed_args = self.type_args_with_expected(
 					ctx,
-					args,
+					&normalized_args,
 					&[],
 					0,
 					&explicit_types,
@@ -3340,7 +3616,7 @@ impl Pass4State {
 			let mut inferred_args: Vec<(Option<TypeId>, TypeId, SourceLocation)> =
 				Vec::new();
 			let mut checked_type_params: HashSet<String> = HashSet::new();
-			for (idx, arg) in args.iter().enumerate() {
+			for (idx, arg) in normalized_args.iter().enumerate() {
 				let mut expected = params.get(idx).copied();
 				let mut type_param_name = None;
 				if let Some(expected_ty) = expected
@@ -3452,9 +3728,10 @@ impl Pass4State {
 					callee: "operator()".to_string(),
 				});
 				let explicit_types = HashMap::new();
+				let normalized_args = self.strip_named_args(args);
 				typed_args = self.type_args_with_expected(
 					ctx,
-					args,
+					&normalized_args,
 					&[],
 					0,
 					&explicit_types,
@@ -3467,8 +3744,28 @@ impl Pass4State {
 					self.builtins.unknown_id,
 				);
 			};
-			let expected_args = params.len().saturating_sub(1);
-			if expected_args != args.len() {
+			let param_defs =
+				self.method_param_defs_from_ast(callee_ty, "operator()");
+			let (normalized_args, has_named) = self.normalize_call_args(
+				args,
+				param_defs.as_deref(),
+				1,
+				"operator()",
+				&node.location,
+			);
+			if let Some(param_defs) = param_defs.as_deref() {
+				let (required, total) = self.param_count_range(param_defs, 1);
+				if normalized_args.len() < required
+					|| normalized_args.len() > total
+				{
+					self.errors.push(FrontendError::InvalidCall {
+						location: node.location.clone(),
+						callee: "operator()".to_string(),
+					});
+				}
+			} else if !has_named
+				&& params.len().saturating_sub(1) != normalized_args.len()
+			{
 				self.errors.push(FrontendError::InvalidCall {
 					location: node.location.clone(),
 					callee: "operator()".to_string(),
@@ -3503,7 +3800,7 @@ impl Pass4State {
 			let mut type_name_bindings: HashMap<String, TypeId> = HashMap::new();
 			let mut inferred_args: Vec<(Option<TypeId>, TypeId, SourceLocation)> =
 				Vec::new();
-			for (idx, arg) in args.iter().enumerate() {
+			for (idx, arg) in normalized_args.iter().enumerate() {
 				let expected = params.get(idx + 1).copied();
 				let mut typed_arg = self.type_node(arg, ctx, expected);
 				let mut arg_ty = typed_arg.ty.unwrap_or(self.builtins.unknown_id);
@@ -3590,9 +3887,10 @@ impl Pass4State {
 				member: "operator()".to_string(),
 			});
 			let explicit_types = HashMap::new();
+			let normalized_args = self.strip_named_args(args);
 			typed_args = self.type_args_with_expected(
 				ctx,
-				args,
+				&normalized_args,
 				&[],
 				0,
 				&explicit_types,
@@ -3612,9 +3910,10 @@ impl Pass4State {
 				});
 			}
 			let explicit_types = HashMap::new();
+			let normalized_args = self.strip_named_args(args);
 			typed_args = self.type_args_with_expected(
 				ctx,
-				args,
+				&normalized_args,
 				&[],
 				0,
 				&explicit_types,
@@ -3629,9 +3928,10 @@ impl Pass4State {
 				});
 			}
 			let explicit_types = HashMap::new();
+			let normalized_args = self.strip_named_args(args);
 			typed_args = self.type_args_with_expected(
 				ctx,
-				args,
+				&normalized_args,
 				&[],
 				0,
 				&explicit_types,
@@ -4165,6 +4465,20 @@ impl Pass4State {
 			Some(&ctx.generic_types),
 			ctx.self_type,
 		);
+		let mut seen_default = false;
+		for param in params {
+			if param.default.is_some() {
+				seen_default = true;
+				continue;
+			}
+			if seen_default {
+				self.errors.push(FrontendError::DefaultParamOrder {
+					location: node.location.clone(),
+					name: "<anonymous>".to_string(),
+				});
+				break;
+			}
+		}
 		let mut typed_params = Vec::new();
 		let mut param_types = Vec::new();
 		for param in params {
@@ -4923,6 +5237,160 @@ impl Pass4State {
 		} else {
 			MemberAccess::Inaccessible
 		}
+	}
+
+	fn fn_param_defs_from_ast(
+		&self,
+		module_id: &ModuleId,
+		name: &str,
+	) -> Option<Vec<crate::frontend::FnParam>> {
+		let items = self.module_items(module_id);
+		for item in items {
+			let node = Self::unwrap_pub(item.as_ref());
+			match &node.v {
+				ASTValue::DeclarationConstexpr(decl_name, value)
+				| ASTValue::Declaration {
+					name: decl_name,
+					value,
+					..
+				} if decl_name == name =>
+				{
+					if let ASTValue::Fn { params, .. } = &value.v {
+						return Some(params.clone());
+					}
+				}
+				ASTValue::DeclarationMulti { names, values, .. } => {
+					let Some(values) = values else {
+						continue;
+					};
+					for (idx, decl_name) in names.iter().enumerate() {
+						if decl_name != name {
+							continue;
+						}
+						if let Some(value) = values.get(idx)
+							&& let ASTValue::Fn { params, .. } =
+								&value.v
+						{
+							return Some(params.clone());
+						}
+					}
+				}
+				_ => {}
+			}
+		}
+		None
+	}
+
+	fn method_param_defs_from_ast(
+		&self,
+		ty_id: TypeId,
+		method_name: &str,
+	) -> Option<Vec<crate::frontend::FnParam>> {
+		let base_ty = match self.arena.get(ty_id) {
+			ResolvedType::GenericInstance { base, .. } => *base,
+			_ => ty_id,
+		};
+		let (module_id, type_name) = match self.arena.get(base_ty) {
+			ResolvedType::Struct { module, name, .. }
+			| ResolvedType::Union { module, name, .. } => {
+				(module.clone(), name.clone())
+			}
+			_ => return None,
+		};
+		let module = self.modules.get(&module_id)?;
+		let items = self.module_items(&module_id);
+		for item in items {
+			let node = Self::unwrap_pub(item.as_ref());
+			let (decl_name, value) = match &node.v {
+				ASTValue::DeclarationConstexpr(name, value) => (name, value),
+				ASTValue::DeclarationMulti {
+					names,
+					values: Some(values),
+					constexpr: true,
+					..
+				} => {
+					let mut found = None;
+					for (idx, name) in names.iter().enumerate() {
+						if name == &type_name {
+							found = values.get(idx).map(|value| (name, value));
+							break;
+						}
+					}
+					let Some((decl, value)) = found else {
+						continue;
+					};
+					(decl, value)
+				}
+				_ => continue,
+			};
+			if decl_name != &type_name {
+				continue;
+			}
+			match &value.v {
+				ASTValue::Struct { body, .. } => {
+					if let ASTValue::ExprList(items)
+					| ASTValue::ExprListNoScope(items) = &body.v
+					{
+						if let Some(params) =
+							self.method_param_defs_from_items(
+								items,
+								method_name,
+							)
+						{
+							return Some(params);
+						}
+					}
+				}
+				ASTValue::Union { methods, .. } => {
+					if let Some(params) =
+						self.method_param_defs_from_items(
+							methods,
+							method_name,
+						)
+					{
+						return Some(params);
+					}
+				}
+				_ => {}
+			}
+		}
+		let _ = module;
+		None
+	}
+
+	fn method_param_defs_from_items(
+		&self,
+		items: &[Box<AST>],
+		method_name: &str,
+	) -> Option<Vec<crate::frontend::FnParam>> {
+		for item in items {
+			let node = Self::unwrap_pub(item.as_ref());
+			match &node.v {
+				ASTValue::DeclarationConstexpr(name, value) if name == method_name => {
+					if let ASTValue::Fn { params, .. } = &value.v {
+						return Some(params.clone());
+					}
+				}
+				ASTValue::DeclarationMulti { names, values, .. } => {
+					let Some(values) = values else {
+						continue;
+					};
+					for (idx, name) in names.iter().enumerate() {
+						if name != method_name {
+							continue;
+						}
+						if let Some(value) = values.get(idx)
+							&& let ASTValue::Fn { params, .. } =
+								&value.v
+						{
+							return Some(params.clone());
+						}
+					}
+				}
+				_ => {}
+			}
+		}
+		None
 	}
 
 	fn fn_param_count(&self, module_id: &ModuleId, name: &str) -> Option<usize> {
@@ -6118,6 +6586,65 @@ mod tests {
 			"testdata/pass4_invalid_call",
 			Vec::new(),
 			|err| matches!(err, FrontendError::InvalidCall { .. }),
+		);
+	}
+
+	#[test]
+	fn reports_positional_after_named_argument() {
+		assert_fixture_error(
+			"testdata/pass4_named_positional_after",
+			Vec::new(),
+			|err| {
+				matches!(
+					err,
+					FrontendError::PositionalAfterNamedArgument { .. }
+				)
+			},
+		);
+	}
+
+	#[test]
+	fn reports_duplicate_argument() {
+		assert_fixture_error(
+			"testdata/pass4_duplicate_argument",
+			Vec::new(),
+			|err| matches!(err, FrontendError::DuplicateArgument { .. }),
+		);
+	}
+
+	#[test]
+	fn reports_duplicate_named_argument() {
+		assert_fixture_error(
+			"testdata/pass4_duplicate_named_argument",
+			Vec::new(),
+			|err| matches!(err, FrontendError::DuplicateNamedArgument { .. }),
+		);
+	}
+
+	#[test]
+	fn reports_unknown_named_argument() {
+		assert_fixture_error(
+			"testdata/pass4_unknown_named_argument",
+			Vec::new(),
+			|err| matches!(err, FrontendError::UnknownNamedArgument { .. }),
+		);
+	}
+
+	#[test]
+	fn reports_missing_named_argument() {
+		assert_fixture_error(
+			"testdata/pass4_missing_named_argument",
+			Vec::new(),
+			|err| matches!(err, FrontendError::MissingNamedArgument { .. }),
+		);
+	}
+
+	#[test]
+	fn reports_default_param_order() {
+		assert_fixture_error(
+			"testdata/pass4_default_param_order",
+			Vec::new(),
+			|err| matches!(err, FrontendError::DefaultParamOrder { .. }),
 		);
 	}
 
