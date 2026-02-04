@@ -1,6 +1,12 @@
 use crate::frontend::{LexerError, SourceLocation, Token, TokenValue};
 
 #[derive(Debug, Clone)]
+pub struct SourceLocationBlock {
+	pub location: SourceLocation,
+	pub label: Option<String>,
+}
+
+#[derive(Debug, Clone)]
 pub enum ParseError {
 	LexerError(LexerError),
 	InvalidUnaryOperator(Token),
@@ -148,26 +154,32 @@ pub enum FrontendError {
 	AssignWhileBorrowed {
 		location: SourceLocation,
 		name: String,
+		borrowed_at: Option<SourceLocation>,
 	},
 	UseAfterMove {
 		location: SourceLocation,
 		name: String,
+		moved_at: Option<SourceLocation>,
 	},
 	MoveWhileBorrowed {
 		location: SourceLocation,
 		name: String,
+		borrowed_at: Option<SourceLocation>,
 	},
 	AccessWhileMutBorrowed {
 		location: SourceLocation,
 		name: String,
+		borrowed_at: Option<SourceLocation>,
 	},
 	BorrowSharedWhileMut {
 		location: SourceLocation,
 		name: String,
+		borrowed_at: Option<SourceLocation>,
 	},
 	BorrowMutWhileShared {
 		location: SourceLocation,
 		name: String,
+		borrowed_at: Option<SourceLocation>,
 	},
 	MutBorrowOfImmutable {
 		location: SourceLocation,

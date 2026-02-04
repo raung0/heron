@@ -2,7 +2,7 @@ use std::io;
 
 use crate::frontend::{
 	FrontendError, FrontendWarning, Keyword, LexerError, Operator, ParseError, SourceLocation,
-	TokenValue,
+	SourceLocationBlock, TokenValue,
 };
 use termcolor::{Color, ColorChoice, ColorSpec, StandardStream, WriteColor};
 
@@ -18,16 +18,17 @@ pub fn emit_message<W: WriteColor>(
 	message: Message,
 	input: &str,
 ) -> io::Result<()> {
-	let mut labels: Vec<Option<String>> = Vec::new();
-	let mut locations: Vec<SourceLocation> = Vec::new();
+	let mut blocks: Vec<SourceLocationBlock> = Vec::new();
+	let mut hint_blocks: Vec<SourceLocationBlock> = Vec::new();
 
 	let (message, kind, hint) = match message {
 		Message::Error(err) => {
-			let (message, hint) = emit_error_message(err, &mut labels, &mut locations);
+			let (message, hint) =
+				emit_error_message(err, &mut blocks, &mut hint_blocks);
 			(message, MessageKind::Error, hint)
 		}
 		Message::Warning(warning) => (
-			emit_warning_message(warning, &mut labels, &mut locations),
+			emit_warning_message(warning, &mut blocks),
 			MessageKind::Warning,
 			None,
 		),
@@ -47,7 +48,7 @@ pub fn emit_message<W: WriteColor>(
 		}
 	}
 	writer.reset()?;
-	if let Some(loc) = locations.first() {
+	if let Some(block) = blocks.first() {
 		let mut cyan_spec = ColorSpec::new();
 		cyan_spec.set_fg(Some(Color::Cyan));
 		write!(writer, ": {message} at ")?;
@@ -55,33 +56,65 @@ pub fn emit_message<W: WriteColor>(
 		writeln!(
 			writer,
 			"{}:{}:{}",
-			if loc.file.is_empty() {
+			if block.location.file.is_empty() {
 				"<input>"
 			} else {
-				loc.file.as_str()
+				block.location.file.as_str()
 			},
-			loc.range.begin.1.max(1),
-			loc.range.begin.0.max(1)
+			block.location.range.begin.1.max(1),
+			block.location.range.begin.0.max(1)
 		)?;
 		writer.reset()?;
 	} else {
 		writeln!(writer, ": {message}")?;
 	}
 
-	if !locations.is_empty() {
-		let resolved_input = resolve_input(&locations, input);
-		highlight_locations(writer, &locations, &labels, resolved_input.as_str())?;
+	if !blocks.is_empty() {
+		let resolved_input = resolve_input(&blocks, &hint_blocks, input);
+		highlight_locations(writer, &blocks, resolved_input.as_str(), Color::Red)?;
 	}
 
-	if let Some(hint) = hint {
+	let hint_label = hint.or_else(|| hint_blocks.first().and_then(|block| block.label.clone()));
+	let hint_location = hint_blocks.first().map(|block| &block.location);
+	if hint_label.is_some() || hint_location.is_some() {
+		if !blocks.is_empty() {
+			writeln!(writer)?;
+		}
 		let mut green_spec = ColorSpec::new();
 		green_spec.set_fg(Some(Color::Green));
 		writer.set_color(&green_spec)?;
 		write!(writer, "hint")?;
 		writer.reset()?;
-		write!(writer, ": {hint}")?;
+		if let Some(text) = hint_label {
+			write!(writer, ": {text}")?;
+		} else {
+			write!(writer, ": related location")?;
+		}
+		if let Some(loc) = hint_location {
+			let mut cyan_spec = ColorSpec::new();
+			cyan_spec.set_fg(Some(Color::Cyan));
+			write!(writer, " at ")?;
+			writer.set_color(&cyan_spec)?;
+			write!(
+				writer,
+				"{}:{}:{}",
+				if loc.file.is_empty() {
+					"<input>"
+				} else {
+					loc.file.as_str()
+				},
+				loc.range.begin.1.max(1),
+				loc.range.begin.0.max(1)
+			)?;
+			writer.reset()?;
+		}
 		writeln!(writer)?;
 		writer.reset()?;
+	}
+
+	if !hint_blocks.is_empty() {
+		let resolved_input = resolve_input(&blocks, &hint_blocks, input);
+		highlight_locations(writer, &hint_blocks, resolved_input.as_str(), Color::Green)?;
 	}
 
 	Ok(())
@@ -89,10 +122,12 @@ pub fn emit_message<W: WriteColor>(
 
 fn emit_error_message(
 	err: FrontendError,
-	labels: &mut Vec<Option<String>>,
-	locations: &mut Vec<SourceLocation>,
+	blocks: &mut Vec<SourceLocationBlock>,
+	hint_blocks: &mut Vec<SourceLocationBlock>,
 ) -> (String, Option<String>) {
-	match err {
+	let mut labels: Vec<Option<String>> = Vec::new();
+	let mut locations: Vec<SourceLocation> = Vec::new();
+	let (message, hint) = match err {
 		FrontendError::ParseError(err) => {
 			let mut hint = None;
 			let message = match err {
@@ -493,38 +528,98 @@ fn emit_error_message(
 			locations.push(location);
 			message(format!("cannot assign to immutable value {name}"))
 		}
-		FrontendError::AssignWhileBorrowed { location, name } => {
+		FrontendError::AssignWhileBorrowed {
+			location,
+			name,
+			borrowed_at,
+		} => {
 			labels.push(Some("assign while borrowed".to_string()));
 			locations.push(location);
+			if let Some(borrowed_at) = borrowed_at {
+				hint_blocks.push(SourceLocationBlock {
+					location: borrowed_at,
+					label: Some("first borrowed here".to_string()),
+				});
+			}
 			message(format!("cannot assign to {name} because it is borrowed"))
 		}
-		FrontendError::UseAfterMove { location, name } => {
+		FrontendError::UseAfterMove {
+			location,
+			name,
+			moved_at,
+		} => {
 			labels.push(Some("use after move".to_string()));
 			locations.push(location);
+			if let Some(moved_at) = moved_at {
+				hint_blocks.push(SourceLocationBlock {
+					location: moved_at,
+					label: Some("value moved here".to_string()),
+				});
+			}
 			message(format!("value {name} was moved"))
 		}
-		FrontendError::MoveWhileBorrowed { location, name } => {
+		FrontendError::MoveWhileBorrowed {
+			location,
+			name,
+			borrowed_at,
+		} => {
 			labels.push(Some("move while borrowed".to_string()));
 			locations.push(location);
+			if let Some(borrowed_at) = borrowed_at {
+				hint_blocks.push(SourceLocationBlock {
+					location: borrowed_at,
+					label: Some("first borrowed here".to_string()),
+				});
+			}
 			message(format!("cannot move {name} because it is borrowed"))
 		}
-		FrontendError::AccessWhileMutBorrowed { location, name } => {
+		FrontendError::AccessWhileMutBorrowed {
+			location,
+			name,
+			borrowed_at,
+		} => {
 			labels.push(Some("access while mutably borrowed".to_string()));
 			locations.push(location);
+			if let Some(borrowed_at) = borrowed_at {
+				hint_blocks.push(SourceLocationBlock {
+					location: borrowed_at,
+					label: Some("first borrowed here".to_string()),
+				});
+			}
 			message(format!(
 				"cannot access {name} because it is mutably borrowed"
 			))
 		}
-		FrontendError::BorrowSharedWhileMut { location, name } => {
+		FrontendError::BorrowSharedWhileMut {
+			location,
+			name,
+			borrowed_at,
+		} => {
 			labels.push(Some("borrow conflicts with mutable borrow".to_string()));
 			locations.push(location);
+			if let Some(borrowed_at) = borrowed_at {
+				hint_blocks.push(SourceLocationBlock {
+					location: borrowed_at,
+					label: Some("first borrowed here".to_string()),
+				});
+			}
 			message(format!(
 				"cannot borrow {name} because it is mutably borrowed"
 			))
 		}
-		FrontendError::BorrowMutWhileShared { location, name } => {
+		FrontendError::BorrowMutWhileShared {
+			location,
+			name,
+			borrowed_at,
+		} => {
 			labels.push(Some("borrow conflicts with shared borrow".to_string()));
 			locations.push(location);
+			if let Some(borrowed_at) = borrowed_at {
+				hint_blocks.push(SourceLocationBlock {
+					location: borrowed_at,
+					label: Some("first borrowed here".to_string()),
+				});
+			}
 			message(format!(
 				"cannot mutably borrow {name} because it is already borrowed"
 			))
@@ -632,19 +727,21 @@ fn emit_error_message(
 				Some("mark it as `pub` to expose it".to_string()),
 			)
 		}
+	};
+	for (label, location) in labels.into_iter().zip(locations) {
+		blocks.push(SourceLocationBlock { location, label });
 	}
+	(message, hint)
 }
 
 fn message(text: impl Into<String>) -> (String, Option<String>) {
 	(text.into(), None)
 }
 
-fn emit_warning_message(
-	warning: FrontendWarning,
-	labels: &mut Vec<Option<String>>,
-	locations: &mut Vec<SourceLocation>,
-) -> String {
-	match warning {
+fn emit_warning_message(warning: FrontendWarning, blocks: &mut Vec<SourceLocationBlock>) -> String {
+	let mut labels: Vec<Option<String>> = Vec::new();
+	let mut locations: Vec<SourceLocation> = Vec::new();
+	let message = match warning {
 		FrontendWarning::ModuleConflict {
 			location,
 			module,
@@ -660,7 +757,11 @@ fn emit_warning_message(
 			};
 			format!("module `{module}` resolved to `{chosen_path}`{ignored}")
 		}
+	};
+	for (label, location) in labels.into_iter().zip(locations) {
+		blocks.push(SourceLocationBlock { location, label });
 	}
+	message
 }
 
 pub enum Message {
@@ -673,8 +774,17 @@ enum MessageKind {
 	Warning,
 }
 
-fn resolve_input(locations: &[SourceLocation], default_input: &str) -> String {
-	let Some(location) = locations.iter().find(|loc| !loc.file.is_empty()) else {
+fn resolve_input(
+	blocks: &[SourceLocationBlock],
+	hint_blocks: &[SourceLocationBlock],
+	default_input: &str,
+) -> String {
+	let Some(location) = blocks
+		.iter()
+		.chain(hint_blocks)
+		.map(|block| &block.location)
+		.find(|loc| !loc.file.is_empty())
+	else {
 		return default_input.to_string();
 	};
 
@@ -793,14 +903,19 @@ fn operator_symbol(op: &Operator, has_equals: bool) -> String {
 
 fn highlight_locations<W: WriteColor>(
 	writer: &mut W,
-	locations: &[SourceLocation],
-	labels: &[Option<String>],
+	blocks: &[SourceLocationBlock],
 	input: &str,
+	caret_color: Color,
 ) -> io::Result<()> {
-	for (idx, loc) in locations.iter().enumerate() {
-		let label = labels.get(idx).and_then(|l| l.as_deref());
-		highlight_single_location(writer, loc, label, input)?;
-		if idx + 1 != locations.len() {
+	for (idx, block) in blocks.iter().enumerate() {
+		highlight_single_location(
+			writer,
+			&block.location,
+			block.label.as_deref(),
+			input,
+			caret_color,
+		)?;
+		if idx + 1 != blocks.len() {
 			writeln!(writer)?;
 		}
 	}
@@ -812,6 +927,7 @@ fn highlight_single_location<W: WriteColor>(
 	loc: &SourceLocation,
 	label: Option<&str>,
 	input: &str,
+	caret_color: Color,
 ) -> io::Result<()> {
 	let line_number = loc.range.begin.1.max(1) as usize;
 	let column_number = loc.range.begin.0.max(1) as usize;
@@ -834,7 +950,7 @@ fn highlight_single_location<W: WriteColor>(
 	let mut dim_spec = ColorSpec::new();
 	dim_spec.set_fg(Some(Color::Ansi256(8)));
 	let mut caret_spec = ColorSpec::new();
-	caret_spec.set_fg(Some(Color::Red)).set_bold(true);
+	caret_spec.set_fg(Some(caret_color)).set_bold(true);
 	let mut context_spec = ColorSpec::new();
 	context_spec
 		.set_fg(Some(Color::Ansi256(8)))
