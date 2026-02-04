@@ -1,0 +1,6 @@
+package main
+
+mut value: int = 1
+
+main := fn {
+}

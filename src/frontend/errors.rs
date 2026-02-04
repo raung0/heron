@@ -141,6 +141,21 @@ pub enum FrontendError {
 		location: SourceLocation,
 		name: String,
 	},
+	AssignToImmutable {
+		location: SourceLocation,
+		name: String,
+	},
+	UseAfterMove {
+		location: SourceLocation,
+		name: String,
+	},
+	NonStaticModuleMut {
+		location: SourceLocation,
+		name: String,
+	},
+	PointerInConstexpr {
+		location: SourceLocation,
+	},
 	MissingOperatorSelf {
 		location: SourceLocation,
 		operator: String,

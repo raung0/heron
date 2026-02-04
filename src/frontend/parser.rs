@@ -4598,8 +4598,7 @@ mod tests {
 		.expect("ok");
 
 		let inner = expect_pub(ast.as_ref());
-		let (constexpr, names, types, values, _mutable) =
-			expect_declaration_multi(inner);
+		let (constexpr, names, types, values, _mutable) = expect_declaration_multi(inner);
 		assert!(!constexpr);
 		assert_eq!(names, &["main".to_string()]);
 		assert!(types.is_empty());

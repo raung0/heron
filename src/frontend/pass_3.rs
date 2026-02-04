@@ -126,7 +126,8 @@ pub(crate) fn pass_3(entry: Box<AST>, entry_file: &str, module_paths: &[String])
 			match parse_module(&item.file_path) {
 				ModuleParseResult::Ok { ast, .. } => {
 					let ast = pass_1(ast);
-					let mut pass_errors = pass_2(&ast);
+					let mut ast = ast;
+					let mut pass_errors = pass_2(&mut ast);
 					errors.append(&mut pass_errors);
 					match extract_package(&ast, &item.file_path) {
 						Ok((package_path, package_loc)) => (

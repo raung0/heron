@@ -1,0 +1,14 @@
+package main
+
+Foo :: struct {
+	value: int
+}
+
+consume := fn (value: Foo) {
+}
+
+main := fn {
+	value := Foo .{ value = 1 }
+	consume(value)
+	_ = value.value
+}

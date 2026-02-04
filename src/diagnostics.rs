@@ -488,6 +488,28 @@ fn emit_error_message(
 				"parameters without defaults must precede defaulted parameters in {name}"
 			))
 		}
+		FrontendError::AssignToImmutable { location, name } => {
+			labels.push(Some("assign to immutable".to_string()));
+			locations.push(location);
+			message(format!("cannot assign to immutable value {name}"))
+		}
+		FrontendError::UseAfterMove { location, name } => {
+			labels.push(Some("use after move".to_string()));
+			locations.push(location);
+			message(format!("value {name} was moved"))
+		}
+		FrontendError::NonStaticModuleMut { location, name } => {
+			labels.push(Some("non-static module mut".to_string()));
+			locations.push(location);
+			message(format!(
+				"module-level mutable value {name} must have type &'s mut T"
+			))
+		}
+		FrontendError::PointerInConstexpr { location } => {
+			labels.push(Some("pointer in constexpr".to_string()));
+			locations.push(location);
+			message("pointers are not allowed in constexpr functions".to_string())
+		}
 		FrontendError::MissingOperatorSelf {
 			location,
 			operator,

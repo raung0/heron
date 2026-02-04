@@ -3,12 +3,12 @@ use std::fs::read_to_string;
 
 use crate::frontend::{
 	AST, ASTValue, BuiltinType, EnumVariantInfo, FieldInfo, FrontendError, GenericArg,
-	GenericParam, InitializerItem, MatchCase, MatchCasePattern, ModuleExports, ModuleId,
-	MethodInfo, ModuleImports, ResolvedGenericArg, ResolvedProgram, ResolvedType,
-	SourceLocation, Type, TypeArena, TypeId, TypedAst, TypedEnsuresClause, TypedEnumVariant,
-	TypedFnBody, TypedFnParam, TypedGenericArg, TypedGenericParam, TypedInitializerItem,
-	TypedMatchBinder, TypedMatchCase, TypedMatchCasePattern, TypedModule, TypedPostClause,
-	TypedProgram, TypedValue,
+	GenericParam, InitializerItem, MatchCase, MatchCasePattern, MethodInfo, ModuleExports,
+	ModuleId, ModuleImports, ResolvedGenericArg, ResolvedProgram, ResolvedType, SourceLocation,
+	Type, TypeArena, TypeId, TypedAst, TypedEnsuresClause, TypedEnumVariant, TypedFnBody,
+	TypedFnParam, TypedGenericArg, TypedGenericParam, TypedInitializerItem, TypedMatchBinder,
+	TypedMatchCase, TypedMatchCasePattern, TypedModule, TypedPostClause, TypedProgram,
+	TypedValue,
 };
 
 pub struct Pass4Result {
@@ -49,6 +49,8 @@ pub struct ValueInfo {
 	pub ty: TypeId,
 	#[allow(dead_code)]
 	pub constexpr: bool,
+	pub mutable: bool,
+	pub moved: bool,
 }
 
 #[derive(Clone)]
@@ -71,6 +73,7 @@ struct TypeContext<'a> {
 	self_type: Option<TypeId>,
 	return_type: Option<TypeId>,
 	in_constexpr: bool,
+	suppress_move: bool,
 }
 
 struct Pass4State {
@@ -518,7 +521,9 @@ impl Pass4State {
 				if let ASTValue::ExprList(items) = &body.v {
 					for item in items {
 						let (node, is_public) = match &item.v {
-							ASTValue::Pub(inner) => (inner.as_ref(), true),
+							ASTValue::Pub(inner) => {
+								(inner.as_ref(), true)
+							}
 							_ => (item.as_ref(), false),
 						};
 						if let ASTValue::DeclarationMulti {
@@ -992,6 +997,101 @@ impl Pass4State {
 		)
 	}
 
+	fn is_copy_type(&self, ty: TypeId) -> bool {
+		match self.arena.get(ty) {
+			ResolvedType::Builtin(_) => true,
+			ResolvedType::Pointer { .. } => true,
+			ResolvedType::Reference { mutable, .. } => !*mutable,
+			ResolvedType::UntypedInt | ResolvedType::UntypedFloat => true,
+			ResolvedType::Alias { underlying, .. } => self.is_copy_type(*underlying),
+			ResolvedType::GenericInstance { base, .. } => self.is_copy_type(*base),
+			_ => false,
+		}
+	}
+
+	fn is_static_mut_ref(&self, ty: TypeId) -> bool {
+		match self.arena.get(ty) {
+			ResolvedType::Reference {
+				mutable: true,
+				lifetime: Some('s'),
+				..
+			} => true,
+			ResolvedType::Alias { underlying, .. } => {
+				self.is_static_mut_ref(*underlying)
+			}
+			ResolvedType::GenericInstance { base, .. } => self.is_static_mut_ref(*base),
+			_ => false,
+		}
+	}
+
+	fn type_contains_pointer(&self, ty: TypeId) -> bool {
+		match self.arena.get(ty) {
+			ResolvedType::Pointer { .. } => true,
+			ResolvedType::Array { underlying, .. }
+			| ResolvedType::Slice { underlying }
+			| ResolvedType::CArray { underlying }
+			| ResolvedType::Reference { underlying, .. }
+			| ResolvedType::Alias { underlying, .. } => self.type_contains_pointer(*underlying),
+			ResolvedType::GenericInstance { base, args } => {
+				self.type_contains_pointer(*base)
+					|| args.iter().any(|arg| match arg {
+						ResolvedGenericArg::Type(arg_ty) => {
+							self.type_contains_pointer(*arg_ty)
+						}
+						_ => false,
+					})
+			}
+			ResolvedType::Fn {
+				params,
+				return_type,
+			} => {
+				params.iter()
+					.any(|param| self.type_contains_pointer(*param))
+					|| self.type_contains_pointer(*return_type)
+			}
+			_ => false,
+		}
+	}
+
+	fn is_module_scope(&self, ctx: &TypeContext) -> bool {
+		ctx.return_type.is_none() && ctx.value_scopes.len() <= 2
+	}
+
+	fn lhs_base_id<'a>(&self, node: &'a AST) -> Option<&'a str> {
+		match &node.v {
+			ASTValue::Id(name) => Some(name.as_str()),
+			ASTValue::Deref(inner) => self.lhs_base_id(inner),
+			ASTValue::BinExpr { op, lhs, .. }
+				if matches!(op, crate::frontend::Operator::Dot) =>
+			{
+				self.lhs_base_id(lhs)
+			}
+			ASTValue::Index { target, .. } => self.lhs_base_id(target),
+			ASTValue::ExprList(items) | ASTValue::ExprListNoScope(items) => {
+				items.last().and_then(|item| self.lhs_base_id(item))
+			}
+			_ => None,
+		}
+	}
+
+	fn mark_moved(&mut self, ctx: &mut TypeContext, name: &str, location: &SourceLocation) {
+		for scope in ctx.value_scopes.iter_mut().rev() {
+			if let Some(info) = scope.get_mut(name) {
+				if info.moved {
+					self.errors.push(FrontendError::UseAfterMove {
+						location: location.clone(),
+						name: name.to_string(),
+					});
+					return;
+				}
+				if !self.is_copy_type(info.ty) {
+					info.moved = true;
+				}
+				return;
+			}
+		}
+	}
+
 	fn record_field_location(
 		&mut self,
 		self_type: Option<TypeId>,
@@ -1008,12 +1108,7 @@ impl Pass4State {
 			.or_insert(location);
 	}
 
-	fn record_type_param_op(
-		&mut self,
-		ty: TypeId,
-		op_name: &str,
-		location: &SourceLocation,
-	) {
+	fn record_type_param_op(&mut self, ty: TypeId, op_name: &str, location: &SourceLocation) {
 		self.type_param_ops
 			.entry(ty)
 			.or_default()
@@ -1121,10 +1216,18 @@ impl Pass4State {
 		name: &str,
 		ty: TypeId,
 		constexpr: bool,
+		mutable: bool,
 	) {
 		if let Some(module) = self.modules.get_mut(module_id) {
-			module.values
-				.insert(name.to_string(), ValueInfo { ty, constexpr });
+			module.values.insert(
+				name.to_string(),
+				ValueInfo {
+					ty,
+					constexpr,
+					mutable,
+					moved: false,
+				},
+			);
 		}
 	}
 
@@ -1146,6 +1249,7 @@ impl Pass4State {
 						) {
 							self.insert_value_decl(
 								&module_id, name, fn_ty, true,
+								false,
 							);
 						}
 					}
@@ -1154,7 +1258,7 @@ impl Pass4State {
 						types,
 						values: Some(values),
 						constexpr,
-						..
+						mutable,
 					} => {
 						for (idx, name) in names.iter().enumerate() {
 							if let Some(value) = values.get(idx)
@@ -1168,7 +1272,7 @@ impl Pass4State {
 									) {
 								self.insert_value_decl(
 									&module_id, name, fn_ty,
-									*constexpr,
+									*constexpr, *mutable,
 								);
 								continue;
 							}
@@ -1185,7 +1289,7 @@ impl Pass4State {
 								);
 								self.insert_value_decl(
 									&module_id, name, resolved,
-									*constexpr,
+									*constexpr, *mutable,
 								);
 							}
 						}
@@ -1212,6 +1316,7 @@ impl Pass4State {
 				self_type: None,
 				return_type: None,
 				in_constexpr: false,
+				suppress_move: false,
 			};
 			let typed_ast = self.type_node(&module_snapshot.ast, &mut ctx, None);
 			let values = module_snapshot
@@ -1296,8 +1401,22 @@ impl Pass4State {
 			ASTValue::Id(name) => {
 				let mut found = None;
 				let bool_literal = name == "true" || name == "false";
-				for scope in ctx.value_scopes.iter().rev() {
-					if let Some(info) = scope.get(name) {
+				for scope in ctx.value_scopes.iter_mut().rev() {
+					if let Some(info) = scope.get_mut(name) {
+						if info.moved {
+							self.errors.push(
+								FrontendError::UseAfterMove {
+									location: node
+										.location
+										.clone(),
+									name: name.clone(),
+								},
+							);
+						}
+						if !ctx.suppress_move && !self.is_copy_type(info.ty)
+						{
+							info.moved = true;
+						}
 						found = Some(*info);
 						break;
 					}
@@ -1336,27 +1455,21 @@ impl Pass4State {
 					slice_ty,
 				)
 			}
-			ASTValue::Char(value) => {
-				self.typed_with_ty(
-					node.location.clone(),
-					TypedValue::Char(*value),
-					self.builtins.rune_id,
-				)
-			}
-			ASTValue::Integer(value) => {
-				self.typed_with_ty(
-					node.location.clone(),
-					TypedValue::Integer(*value),
-					self.builtins.untyped_int_id,
-				)
-			}
-			ASTValue::Float(value) => {
-				self.typed_with_ty(
-					node.location.clone(),
-					TypedValue::Float(*value),
-					self.builtins.untyped_float_id,
-				)
-			}
+			ASTValue::Char(value) => self.typed_with_ty(
+				node.location.clone(),
+				TypedValue::Char(*value),
+				self.builtins.rune_id,
+			),
+			ASTValue::Integer(value) => self.typed_with_ty(
+				node.location.clone(),
+				TypedValue::Integer(*value),
+				self.builtins.untyped_int_id,
+			),
+			ASTValue::Float(value) => self.typed_with_ty(
+				node.location.clone(),
+				TypedValue::Float(*value),
+				self.builtins.untyped_float_id,
+			),
 			ASTValue::DotId(name) => {
 				let mut ty = self.builtins.unknown_id;
 				if let Some(expected) = expected {
@@ -1421,7 +1534,7 @@ impl Pass4State {
 				out
 			}
 			ASTValue::Ref { mutable, v } => {
-				let typed_inner = self.type_node(v, ctx, None);
+				let typed_inner = self.type_node_without_move(v, ctx, None);
 				let underlying = typed_inner.ty.unwrap_or(self.builtins.unknown_id);
 				let ref_ty = self.arena.add(ResolvedType::Reference {
 					mutable: *mutable,
@@ -1461,7 +1574,12 @@ impl Pass4State {
 				)
 			}
 			ASTValue::PtrOf(inner) => {
-				let typed_inner = self.type_node(inner, ctx, None);
+				if ctx.in_constexpr {
+					self.errors.push(FrontendError::PointerInConstexpr {
+						location: node.location.clone(),
+					});
+				}
+				let typed_inner = self.type_node_without_move(inner, ctx, None);
 				let underlying = typed_inner.ty.unwrap_or(self.builtins.unknown_id);
 				let ptr_ty = self.arena.add(ResolvedType::Pointer { underlying });
 				self.typed_with_ty(
@@ -1534,8 +1652,7 @@ impl Pass4State {
 				out
 			}
 			ASTValue::InitializerList(items) => {
-				let typed_items =
-					self.type_initializer_items(ctx, items, None);
+				let typed_items = self.type_initializer_items(ctx, items, None);
 				let mut out = TypedAst::from(
 					node.location.clone(),
 					TypedValue::InitializerList(typed_items),
@@ -1608,99 +1725,104 @@ impl Pass4State {
 					ctx.self_type,
 				) {
 					MemberAccess::Found((method_ty, needs_ref)) => {
-						let (params, return_type) = match self.arena.get(method_ty)
-						{
-						ResolvedType::Fn {
-							params,
-							return_type,
-						} => (params.clone(), *return_type),
-						_ => {
-							let mut out = TypedAst::from(
+						let (params, return_type) =
+							match self.arena.get(method_ty) {
+								ResolvedType::Fn {
+									params,
+									return_type,
+								} => (params.clone(), *return_type),
+								_ => {
+									let mut out = TypedAst::from(
 								node.location.clone(),
 								TypedValue::Index {
 									target: typed_target,
 									indices: Vec::new(),
 								},
 							);
-							out.ty = Some(self.builtins.unknown_id);
-							return out;
+									out.ty = Some(self
+										.builtins
+										.unknown_id);
+									return out;
+								}
+							};
+						let expected_args = params.len().saturating_sub(1);
+						if expected_args != indices.len() {
+							self.errors.push(
+								FrontendError::InvalidCall {
+									location: node
+										.location
+										.clone(),
+									callee: "operator[]"
+										.to_string(),
+								},
+							);
 						}
-					};
-					let expected_args = params.len().saturating_sub(1);
-					if expected_args != indices.len() {
-						self.errors.push(FrontendError::InvalidCall {
-							location: node.location.clone(),
-							callee: "operator[]".to_string(),
-						});
-					}
-					let this_param = params
-						.first()
-						.copied()
-						.unwrap_or(self.builtins.unknown_id);
-					let mut this_ty = target_ty;
-					if needs_ref {
-						if !matches!(
-							self.arena.get(this_ty),
-							ResolvedType::Reference { .. }
-						) {
-							this_ty = self.arena.add(ResolvedType::Reference {
-								mutable: false,
-								lifetime: None,
-								underlying: target_ty,
-							});
-						}
-					}
-					if !self.type_matches(this_ty, this_param)
-						&& !self.reference_allows_inheritance(this_ty, this_param)
-					{
-						self.errors.push(FrontendError::TypeMismatch {
-							location: node.location.clone(),
-							expected: self.type_name(this_param),
-							found: self.type_name(this_ty),
-						});
-					}
-					for (idx, index) in indices.iter().enumerate() {
-						let expected = params.get(idx + 1).copied();
-						let mut typed_index =
-							self.type_node(index, ctx, expected);
-						let mut index_ty = typed_index
-							.ty
+						let this_param = params
+							.first()
+							.copied()
 							.unwrap_or(self.builtins.unknown_id);
-						if let Some(expected) = expected {
-							let mut coerced = index_ty;
-							if !self.type_matches(index_ty, expected)
-								&& !self.coerce_untyped(
+						let mut this_ty = target_ty;
+						if needs_ref {
+							if !matches!(
+								self.arena.get(this_ty),
+								ResolvedType::Reference { .. }
+							) {
+								this_ty = self.arena.add(
+									ResolvedType::Reference {
+										mutable: false,
+										lifetime: None,
+										underlying:
+											target_ty,
+									},
+								);
+							}
+						}
+						if !self.type_matches(this_ty, this_param)
+							&& !self.reference_allows_inheritance(
+								this_ty, this_param,
+							) {
+							self.errors.push(
+								FrontendError::TypeMismatch {
+									location: node
+										.location
+										.clone(),
+									expected: self.type_name(
+										this_param,
+									),
+									found: self
+										.type_name(this_ty),
+								},
+							);
+						}
+						for (idx, index) in indices.iter().enumerate() {
+							let expected = params.get(idx + 1).copied();
+							let mut typed_index = self
+								.type_node(index, ctx, expected);
+							let mut index_ty =
+								typed_index.ty.unwrap_or(
+									self.builtins.unknown_id,
+								);
+							if let Some(expected) = expected {
+								let mut coerced = index_ty;
+								if !self.type_matches(
+									index_ty, expected,
+								) && !self.coerce_untyped(
 									&mut coerced,
 									expected,
 								) {
-								self.errors.push(FrontendError::TypeMismatch {
+									self.errors.push(FrontendError::TypeMismatch {
 									location: index.location.clone(),
 									expected: self.type_name(expected),
 									found: self.type_name(index_ty),
 								});
-							} else {
-								index_ty = coerced;
-								typed_index.ty = Some(index_ty);
+								} else {
+									index_ty = coerced;
+									typed_index.ty =
+										Some(index_ty);
+								}
 							}
+							typed_indices.push(typed_index);
 						}
-						typed_indices.push(typed_index);
-					}
-					let mut out = TypedAst::from(
-						node.location.clone(),
-						TypedValue::Index {
-							target: typed_target,
-							indices: typed_indices,
-						},
-					);
-					out.ty = Some(return_type);
-					out
-				},
-				MemberAccess::Inaccessible => {
-						self.errors.push(FrontendError::InaccessibleMember {
-							location: node.location.clone(),
-							type_name: self.type_name(target_ty),
-							member: "operator[]".to_string(),
-						});
 						let mut out = TypedAst::from(
 							node.location.clone(),
 							TypedValue::Index {
@@ -1708,10 +1830,29 @@ impl Pass4State {
 								indices: typed_indices,
 							},
 						);
-					out.ty = Some(self.builtins.unknown_id);
-					out
-				},
-				MemberAccess::Missing => {
+						out.ty = Some(return_type);
+						out
+					}
+					MemberAccess::Inaccessible => {
+						self.errors.push(
+							FrontendError::InaccessibleMember {
+								location: node.location.clone(),
+								type_name: self
+									.type_name(target_ty),
+								member: "operator[]".to_string(),
+							},
+						);
+						let mut out = TypedAst::from(
+							node.location.clone(),
+							TypedValue::Index {
+								target: typed_target,
+								indices: typed_indices,
+							},
+						);
+						out.ty = Some(self.builtins.unknown_id);
+						out
+					}
+					MemberAccess::Missing => {
 						if matches!(
 							self.arena.get(target_ty),
 							ResolvedType::Struct { .. }
@@ -1723,20 +1864,32 @@ impl Pass4State {
 						) {
 							let mut arg_types = Vec::new();
 							for index in indices {
-								let typed_index =
-									self.type_node(index, ctx, None);
-								let index_ty = typed_index.ty.unwrap_or(
-										self.builtins.unknown_id,
+								let typed_index = self.type_node(
+									index, ctx, None,
 								);
-								arg_types.push(self.type_name(index_ty));
+								let index_ty =
+									typed_index.ty.unwrap_or(
+										self.builtins
+											.unknown_id,
+									);
+								arg_types.push(
+									self.type_name(index_ty)
+								);
 								typed_indices.push(typed_index);
 							}
-							self.errors.push(FrontendError::InvalidOperator {
-								location: node.location.clone(),
-								operator: "[]".to_string(),
-								lhs: self.type_name(target_ty),
-								rhs: Some(arg_types.join(", ")),
-							});
+							self.errors.push(
+								FrontendError::InvalidOperator {
+									location: node
+										.location
+										.clone(),
+									operator: "[]".to_string(),
+									lhs: self.type_name(
+										target_ty,
+									),
+									rhs: Some(arg_types
+										.join(", ")),
+								},
+							);
 							let mut out = TypedAst::from(
 								node.location.clone(),
 								TypedValue::Index {
@@ -1749,13 +1902,15 @@ impl Pass4State {
 						}
 						let mut current_ty = target_ty;
 						for index in indices {
-							let typed_index = self.type_node(index, ctx, None);
-							let index_ty = typed_index
-								.ty
-								.unwrap_or(self.builtins.unknown_id);
+							let typed_index =
+								self.type_node(index, ctx, None);
+							let index_ty = typed_index.ty.unwrap_or(
+								self.builtins.unknown_id,
+							);
 							if !self.is_integer_type(index_ty)
-								&& !self.is_untyped_numeric(index_ty)
-							{
+								&& !self.is_untyped_numeric(
+									index_ty,
+								) {
 								self.errors.push(
 									FrontendError::InvalidIndex {
 										location: index
@@ -1772,9 +1927,12 @@ impl Pass4State {
 							}
 							match self.arena.get(current_ty) {
 								ResolvedType::Array {
-									underlying, ..
+									underlying,
+									..
 								}
-								| ResolvedType::Slice { underlying } => {
+								| ResolvedType::Slice {
+									underlying,
+								} => {
 									current_ty = *underlying;
 								}
 								_ => {
@@ -1798,7 +1956,7 @@ impl Pass4State {
 						out
 					}
 				}
-			},
+			}
 			ASTValue::ExprList(exprs) | ASTValue::ExprListNoScope(exprs) => {
 				let is_scoped = matches!(node.v, ASTValue::ExprList(_));
 				if is_scoped {
@@ -1812,10 +1970,13 @@ impl Pass4State {
 					typed_exprs.push(typed_expr);
 				}
 				if typed_exprs.len() > 1 {
-					for typed_expr in typed_exprs.iter().take(typed_exprs.len() - 1) {
+					for typed_expr in
+						typed_exprs.iter().take(typed_exprs.len() - 1)
+					{
 						if let Some(ty) = typed_expr.ty
-							&& ty != self.builtins.void_id
-							&& ty != self.builtins.unknown_id
+							&& ty != self.builtins.void_id && ty != self
+							.builtins
+							.unknown_id
 						{
 							self.errors.push(FrontendError::UnusedValue {
 								location: typed_expr.location.clone(),
@@ -1946,6 +2107,39 @@ impl Pass4State {
 				let mut typed_values = Vec::new();
 				for value in values {
 					typed_values.push(self.type_node(value, ctx, None));
+				}
+				for name in names {
+					let mut target_mutable = None;
+					let mut target_info: Option<&mut ValueInfo> = None;
+					for scope in ctx.value_scopes.iter_mut().rev() {
+						if let Some(info) = scope.get_mut(name) {
+							target_mutable = Some(info.mutable);
+							target_info = Some(info);
+							break;
+						}
+					}
+					if target_mutable.is_none() {
+						if let Some(info) = ctx.module.values.get(name) {
+							target_mutable = Some(info.mutable);
+						}
+					}
+					if let Some(target_mutable) = target_mutable {
+						if !target_mutable && name != "_" {
+							self.errors.push(
+								FrontendError::AssignToImmutable {
+									location: node
+										.location
+										.clone(),
+									name: name.clone(),
+								},
+							);
+						}
+						if target_mutable {
+							if let Some(info) = target_info {
+								info.moved = false;
+							}
+						}
+					}
 				}
 				self.typed_with_ty(
 					node.location.clone(),
@@ -2195,8 +2389,7 @@ impl Pass4State {
 		if matches!(op, crate::frontend::Operator::Dot) {
 			return self.type_dot(node, ctx, lhs, rhs);
 		}
-		let is_assignment =
-			matches!(op, crate::frontend::Operator::Set) && !has_eq;
+		let is_assignment = matches!(op, crate::frontend::Operator::Set) && !has_eq;
 		if is_assignment {
 			if let ASTValue::Id(name) = &lhs.v
 				&& name == "_"
@@ -2215,6 +2408,99 @@ impl Pass4State {
 					has_eq,
 					self.builtins.void_id,
 				);
+			}
+			if let ASTValue::Id(name) = &lhs.v {
+				let mut target_ty = None;
+				let mut target_mutable = None;
+				let mut found_in_scope = false;
+				for scope in ctx.value_scopes.iter().rev() {
+					if let Some(info) = scope.get(name) {
+						target_ty = Some(info.ty);
+						target_mutable = Some(info.mutable);
+						found_in_scope = true;
+						break;
+					}
+				}
+				if target_ty.is_none() {
+					if let Some(info) = ctx.module.values.get(name) {
+						target_ty = Some(info.ty);
+						target_mutable = Some(info.mutable);
+					}
+				}
+				let mut typed_rhs = self.type_node(rhs, ctx, target_ty);
+				let mut rhs_ty = typed_rhs.ty.unwrap_or(self.builtins.unknown_id);
+				if let Some(expected) = target_ty {
+					let mut coerced = rhs_ty;
+					if !self.type_matches(rhs_ty, expected)
+						&& !self.coerce_untyped(&mut coerced, expected)
+					{
+						self.errors.push(FrontendError::TypeMismatch {
+							location: node.location.clone(),
+							expected: self.type_name(expected),
+							found: self.type_name(rhs_ty),
+						});
+					} else {
+						rhs_ty = coerced;
+						typed_rhs.ty = Some(rhs_ty);
+					}
+				} else if name != "_" {
+					self.errors.push(FrontendError::UnknownValue {
+						location: node.location.clone(),
+						name: name.clone(),
+					});
+				}
+				if let Some(target_mutable) = target_mutable {
+					if !target_mutable {
+						self.errors.push(
+							FrontendError::AssignToImmutable {
+								location: node.location.clone(),
+								name: name.clone(),
+							},
+						);
+					} else if found_in_scope {
+						for scope in ctx.value_scopes.iter_mut().rev() {
+							if let Some(info) = scope.get_mut(name) {
+								info.moved = false;
+								break;
+							}
+						}
+					}
+				}
+				let typed_lhs = self.build_typed_id(
+					lhs.location.clone(),
+					name.clone(),
+					target_ty.unwrap_or(self.builtins.unknown_id),
+				);
+				return self.build_bin_expr(
+					node.location.clone(),
+					op.clone(),
+					typed_lhs,
+					typed_rhs,
+					has_eq,
+					self.builtins.void_id,
+				);
+			}
+			if let Some(name) = self.lhs_base_id(lhs.as_ref())
+				&& name != "_"
+			{
+				let mut target_mutable = None;
+				for scope in ctx.value_scopes.iter().rev() {
+					if let Some(info) = scope.get(name) {
+						target_mutable = Some(info.mutable);
+						break;
+					}
+				}
+				if target_mutable.is_none() {
+					if let Some(info) = ctx.module.values.get(name) {
+						target_mutable = Some(info.mutable);
+					}
+				}
+				if let Some(false) = target_mutable {
+					self.errors.push(FrontendError::AssignToImmutable {
+						location: node.location.clone(),
+						name: name.to_string(),
+					});
+				}
 			}
 		}
 		let mut typed_lhs = self.type_node(lhs, ctx, None);
@@ -2375,12 +2661,7 @@ impl Pass4State {
 
 		let numeric_op = self.is_numeric_operator(op);
 		if numeric_op {
-			self.record_numeric_type_param_ops(
-				lhs_ty,
-				rhs_ty,
-				op_name,
-				&node.location,
-			);
+			self.record_numeric_type_param_ops(lhs_ty, rhs_ty, op_name, &node.location);
 			let invalid_lhs =
 				!self.is_numeric_type(lhs_ty) && !self.is_untyped_numeric(lhs_ty);
 			let invalid_rhs =
@@ -2396,8 +2677,7 @@ impl Pass4State {
 					lhs_ty,
 					rhs_ty,
 					ctx.self_type,
-				)
-			{
+				) {
 				self.errors.push(FrontendError::InvalidOperator {
 					location: node.location.clone(),
 					operator: op_name.to_string(),
@@ -2435,8 +2715,7 @@ impl Pass4State {
 					lhs_ty,
 					rhs_ty,
 					ctx.self_type,
-				)
-			{
+				) {
 				self.errors.push(FrontendError::TypeMismatch {
 					location: rhs.location.clone(),
 					expected: self.type_name(lhs_ty),
@@ -2527,11 +2806,7 @@ impl Pass4State {
 		args: Vec<Box<TypedAst>>,
 		return_ty: TypeId,
 	) -> Box<TypedAst> {
-		self.typed_with_ty(
-			location,
-			TypedValue::Call { callee, args },
-			return_ty,
-		)
+		self.typed_with_ty(location, TypedValue::Call { callee, args }, return_ty)
 	}
 
 	fn build_dot_expr(
@@ -2573,7 +2848,12 @@ impl Pass4State {
 	) -> Box<TypedAst> {
 		self.typed_with_ty(
 			location,
-			TypedValue::BinExpr { op, lhs, rhs, has_eq },
+			TypedValue::BinExpr {
+				op,
+				lhs,
+				rhs,
+				has_eq,
+			},
 			ty,
 		)
 	}
@@ -2586,6 +2866,19 @@ impl Pass4State {
 	) -> Box<TypedAst> {
 		let mut out = TypedAst::from(location, value);
 		out.ty = Some(ty);
+		out
+	}
+
+	fn type_node_without_move(
+		&mut self,
+		node: &Box<AST>,
+		ctx: &mut TypeContext,
+		expected: Option<TypeId>,
+	) -> Box<TypedAst> {
+		let prev = ctx.suppress_move;
+		ctx.suppress_move = true;
+		let out = self.type_node(node, ctx, expected);
+		ctx.suppress_move = prev;
 		out
 	}
 
@@ -2675,7 +2968,11 @@ impl Pass4State {
 		entries
 	}
 
-	fn param_count_range(&self, params: &[crate::frontend::FnParam], skip: usize) -> (usize, usize) {
+	fn param_count_range(
+		&self,
+		params: &[crate::frontend::FnParam],
+		skip: usize,
+	) -> (usize, usize) {
 		let entries = self.param_entries_from_defs(params);
 		let required = entries
 			.iter()
@@ -2707,10 +3004,11 @@ impl Pass4State {
 			}
 		}
 		if positional_after_named {
-			self.errors.push(FrontendError::PositionalAfterNamedArgument {
-				location: location.clone(),
-				callee: callee.to_string(),
-			});
+			self.errors
+				.push(FrontendError::PositionalAfterNamedArgument {
+					location: location.clone(),
+					callee: callee.to_string(),
+				});
 		}
 		let Some(params) = params else {
 			if has_named {
@@ -2738,27 +3036,35 @@ impl Pass4State {
 				ASTValue::NamedArg { name, value } => {
 					if let Some(index) = entry_index.get(name) {
 						if *index < positional_args.len() {
-							self.errors.push(FrontendError::DuplicateArgument {
-								location: arg.location.clone(),
-								callee: callee.to_string(),
-								name: name.clone(),
-							});
+							self.errors.push(
+								FrontendError::DuplicateArgument {
+									location: arg
+										.location
+										.clone(),
+									callee: callee.to_string(),
+									name: name.clone(),
+								},
+							);
 							continue;
 						}
 					} else {
-						self.errors.push(FrontendError::UnknownNamedArgument {
-							location: arg.location.clone(),
-							callee: callee.to_string(),
-							name: name.clone(),
-						});
+						self.errors.push(
+							FrontendError::UnknownNamedArgument {
+								location: arg.location.clone(),
+								callee: callee.to_string(),
+								name: name.clone(),
+							},
+						);
 						continue;
 					}
 					if named_args.contains_key(name) {
-						self.errors.push(FrontendError::DuplicateNamedArgument {
-							location: arg.location.clone(),
-							callee: callee.to_string(),
-							name: name.clone(),
-						});
+						self.errors.push(
+							FrontendError::DuplicateNamedArgument {
+								location: arg.location.clone(),
+								callee: callee.to_string(),
+								name: name.clone(),
+							},
+						);
 						continue;
 					}
 					named_args.insert(name.clone(), value.clone());
@@ -2903,7 +3209,7 @@ impl Pass4State {
 			}
 		}
 
-		let typed_lhs = self.type_node(lhs, ctx, None);
+		let typed_lhs = self.type_node_without_move(lhs, ctx, None);
 		let lhs_ty = typed_lhs.ty.unwrap_or(self.builtins.unknown_id);
 		if matches!(self.arena.get(lhs_ty), ResolvedType::TypeParam(_)) {
 			self.record_type_param_member(lhs_ty, &rhs_name, &rhs.location);
@@ -2921,6 +3227,11 @@ impl Pass4State {
 		}
 		match self.lookup_field_access(lhs_ty, &rhs_name, ctx.self_type) {
 			MemberAccess::Found(field_ty) => {
+				if let ASTValue::Id(name) = &lhs.v {
+					if !self.is_copy_type(field_ty) {
+						self.mark_moved(ctx, name, &lhs.location);
+					}
+				}
 				let typed_rhs = self.build_typed_id(
 					rhs.location.clone(),
 					rhs_name.clone(),
@@ -3028,7 +3339,8 @@ impl Pass4State {
 				if let Some(expected_args) =
 					self.fn_param_count(ctx.module_id, name)
 				{
-					let mut count_valid = expected_args == normalized_args.len();
+					let mut count_valid =
+						expected_args == normalized_args.len();
 					if let Some(param_defs) = param_defs.as_deref() {
 						let (required, total) =
 							self.param_count_range(param_defs, 0);
@@ -3051,7 +3363,8 @@ impl Pass4State {
 							&explicit_types,
 							false,
 						);
-						let typed_callee = self.type_node(callee, ctx, None);
+						let typed_callee =
+							self.type_node(callee, ctx, None);
 						return self.build_call(
 							node.location.clone(),
 							typed_callee,
@@ -3088,70 +3401,81 @@ impl Pass4State {
 					if let Some(callee_ty) = value_ty {
 						let typed_callee =
 							self.type_dot(callee, ctx, lhs, rhs);
-						let param_defs = self
-							.fn_param_defs_from_ast(&module_id, method_name);
-						let (normalized_args, has_named) = self.normalize_call_args(
-							args,
-							param_defs.as_deref(),
-							0,
+						let param_defs = self.fn_param_defs_from_ast(
+							&module_id,
 							method_name,
-							&node.location,
 						);
+						let (normalized_args, has_named) = self
+							.normalize_call_args(
+								args,
+								param_defs.as_deref(),
+								0,
+								method_name,
+								&node.location,
+							);
 						let mut return_ty = self.builtins.unknown_id;
-						let typed_args = if let ResolvedType::Fn {
-							params,
-							return_type,
-						} = self.arena.get(callee_ty)
-						{
-							let params = params.clone();
-							return_ty = *return_type;
-							if let Some(param_defs) = param_defs.as_deref() {
-								let (required, total) =
-									self.param_count_range(param_defs, 0);
-								if normalized_args.len() < required
-									|| normalized_args.len() > total
+						let typed_args =
+							if let ResolvedType::Fn {
+								params,
+								return_type,
+							} = self.arena.get(callee_ty)
+							{
+								let params = params.clone();
+								return_ty = *return_type;
+								if let Some(param_defs) =
+									param_defs.as_deref()
 								{
-									self.errors.push(FrontendError::InvalidCall {
+									let (required, total) =
+									self.param_count_range(param_defs, 0);
+									if normalized_args.len()
+										< required
+										|| normalized_args
+											.len() > total
+									{
+										self.errors.push(FrontendError::InvalidCall {
 										location: node.location.clone(),
 										callee: method_name.clone(),
 									});
-								}
-							} else if !has_named && params.len() != normalized_args.len() {
-								self.errors.push(FrontendError::InvalidCall {
+									}
+								} else if !has_named
+									&& params.len()
+										!= normalized_args
+											.len()
+								{
+									self.errors.push(FrontendError::InvalidCall {
 									location: node.location.clone(),
 									callee: method_name.clone(),
 								});
-							}
-							let explicit_types = HashMap::new();
-							self.type_args_with_expected(
-								ctx,
-								&normalized_args,
-								&params,
-								0,
-								&explicit_types,
-								true,
-							)
-						} else {
-							self.errors.push(
-								FrontendError::InvalidCall {
+								}
+								let explicit_types = HashMap::new();
+								self.type_args_with_expected(
+									ctx,
+									&normalized_args,
+									&params,
+									0,
+									&explicit_types,
+									true,
+								)
+							} else {
+								self.errors
+									.push(FrontendError::InvalidCall {
 									location: callee
 										.location
 										.clone(),
 									callee: self.type_name(
 										callee_ty,
 									),
-								},
-							);
-							let explicit_types = HashMap::new();
-							self.type_args_with_expected(
-								ctx,
-								&normalized_args,
-								&[],
-								0,
-								&explicit_types,
-								false,
-							)
-						};
+								});
+								let explicit_types = HashMap::new();
+								self.type_args_with_expected(
+									ctx,
+									&normalized_args,
+									&[],
+									0,
+									&explicit_types,
+									false,
+								)
+							};
 						return self.build_call(
 							node.location.clone(),
 							typed_callee,
@@ -3160,94 +3484,126 @@ impl Pass4State {
 						);
 					}
 				}
-				let typed_lhs = self.type_node(lhs, ctx, None);
+				let typed_lhs = self.type_node_without_move(lhs, ctx, None);
 				let lhs_ty = typed_lhs.ty.unwrap_or(self.builtins.unknown_id);
-				match self.lookup_method_access(
-					lhs_ty,
-					method_name,
-					ctx.self_type,
-				) {
+				match self.lookup_method_access(lhs_ty, method_name, ctx.self_type)
+				{
 					MemberAccess::Found((method_ty, _needs_ref)) => {
-						let (params, return_type) =
-							match self.arena.get(method_ty) {
-								ResolvedType::Fn {
-									params,
-									return_type,
-								} => (params.clone(), *return_type),
-								_ => {
-									self.errors.push(
-										FrontendError::InvalidCall {
-											location: node
-												.location
-												.clone(),
-											callee: method_name.clone(),
-										},
-									);
-									let typed_callee =
-										self.type_node(callee, ctx, None);
-									return self.build_call(
-										node.location.clone(),
-										typed_callee,
-										Vec::new(),
-										self.builtins.unknown_id,
-									);
-								}
-							};
-						let param_defs =
-							self.method_param_defs_from_ast(lhs_ty, method_name);
-						let (normalized_args, has_named) = self.normalize_call_args(
-							args,
-							param_defs.as_deref(),
-							1,
+						let (params, return_type) = match self
+							.arena
+							.get(method_ty)
+						{
+							ResolvedType::Fn {
+								params,
+								return_type,
+							} => (params.clone(), *return_type),
+							_ => {
+								self.errors
+									.push(FrontendError::InvalidCall {
+									location: node
+										.location
+										.clone(),
+									callee: method_name.clone(),
+								});
+								let typed_callee = self.type_node(
+									callee, ctx, None,
+								);
+								return self.build_call(
+									node.location.clone(),
+									typed_callee,
+									Vec::new(),
+									self.builtins.unknown_id,
+								);
+							}
+						};
+						let param_defs = self.method_param_defs_from_ast(
+							lhs_ty,
 							method_name,
-							&node.location,
 						);
+						let (normalized_args, has_named) = self
+							.normalize_call_args(
+								args,
+								param_defs.as_deref(),
+								1,
+								method_name,
+								&node.location,
+							);
 						if let Some(param_defs) = param_defs.as_deref() {
-							let (required, total) =
-								self.param_count_range(param_defs, 1);
+							let (required, total) = self
+								.param_count_range(param_defs, 1);
 							if normalized_args.len() < required
 								|| normalized_args.len() > total
 							{
-								self.errors.push(FrontendError::InvalidCall {
-									location: node.location.clone(),
+								self.errors
+									.push(FrontendError::InvalidCall {
+									location: node
+										.location
+										.clone(),
 									callee: method_name.clone(),
 								});
 							}
 						} else if !has_named
-							&& params.len().saturating_sub(1) != normalized_args.len()
+							&& params.len().saturating_sub(1)
+								!= normalized_args.len()
 						{
-							self.errors.push(FrontendError::InvalidCall {
-								location: node.location.clone(),
-								callee: method_name.clone(),
-							});
+							self.errors.push(
+								FrontendError::InvalidCall {
+									location: node
+										.location
+										.clone(),
+									callee: method_name.clone(),
+								},
+							);
 						}
 						let this_param = params
 							.first()
 							.copied()
 							.unwrap_or(self.builtins.unknown_id);
-					let mut this_ty = lhs_ty;
-					if let ResolvedType::Reference { mutable, .. } =
-						self.arena.get(this_param)
-					{
 						if !matches!(
-							self.arena.get(this_ty),
+							self.arena.get(this_param),
 							ResolvedType::Reference { .. }
 						) {
-							this_ty = self.arena.add(ResolvedType::Reference {
-								mutable: *mutable,
-								lifetime: None,
-								underlying: lhs_ty,
-							});
+							if let ASTValue::Id(name) = &lhs.v {
+								self.mark_moved(
+									ctx,
+									name,
+									&lhs.location,
+								);
+							}
 						}
-					}
-					if !self.type_matches(this_ty, this_param)
-						&& !self.reference_allows_inheritance(this_ty, this_param)
-					{
-						self.errors.push(FrontendError::TypeMismatch {
-							location: lhs.location.clone(),
-							expected: self.type_name(this_param),
-								found: self.type_name(this_ty),
-							});
+						let mut this_ty = lhs_ty;
+						if let ResolvedType::Reference { mutable, .. } =
+							self.arena.get(this_param)
+						{
+							if !matches!(
+								self.arena.get(this_ty),
+								ResolvedType::Reference { .. }
+							) {
+								this_ty = self.arena.add(
+									ResolvedType::Reference {
+										mutable: *mutable,
+										lifetime: None,
+										underlying: lhs_ty,
+									},
+								);
+							}
+						}
+						if !self.type_matches(this_ty, this_param)
+							&& !self.reference_allows_inheritance(
+								this_ty, this_param,
+							) {
+							self.errors.push(
+								FrontendError::TypeMismatch {
+									location: lhs
+										.location
+										.clone(),
+									expected: self.type_name(
+										this_param,
+									),
+									found: self
+										.type_name(this_ty),
+								},
+							);
 						}
 						let explicit_types = HashMap::new();
 						let typed_args = self.type_args_with_expected(
@@ -3277,12 +3633,15 @@ impl Pass4State {
 						);
 					}
 					MemberAccess::Inaccessible => {
-						self.errors.push(FrontendError::InaccessibleMember {
-							location: node.location.clone(),
-							type_name: self.type_name(lhs_ty),
-							member: method_name.clone(),
-						});
-						let typed_callee = self.type_node(callee, ctx, None);
+						self.errors.push(
+							FrontendError::InaccessibleMember {
+								location: node.location.clone(),
+								type_name: self.type_name(lhs_ty),
+								member: method_name.clone(),
+							},
+						);
+						let typed_callee =
+							self.type_node(callee, ctx, None);
 						let explicit_types = HashMap::new();
 						let normalized_args = self.strip_named_args(args);
 						let typed_args = self.type_args_with_expected(
@@ -3305,7 +3664,7 @@ impl Pass4State {
 			}
 		}
 
-		let typed_callee = self.type_node(callee, ctx, None);
+		let typed_callee = self.type_node_without_move(callee, ctx, None);
 		let mut callee_ty = typed_callee.ty.unwrap_or(self.builtins.unknown_id);
 		if callee_ty == self.builtins.unknown_id {
 			if let ASTValue::GenericApply { target, .. } = &callee.v {
@@ -3333,13 +3692,15 @@ impl Pass4State {
 				"__construct",
 				ctx.self_type,
 			) {
-				MemberAccess::Found((method_ty, _)) => match self.arena.get(method_ty) {
-					ResolvedType::Fn {
-						params,
-						return_type,
-					} => Some((method_ty, params.clone(), *return_type)),
-					_ => None,
-				},
+				MemberAccess::Found((method_ty, _)) => {
+					match self.arena.get(method_ty) {
+						ResolvedType::Fn {
+							params,
+							return_type,
+						} => Some((method_ty, params.clone(), *return_type)),
+						_ => None,
+					}
+				}
 				MemberAccess::Inaccessible => {
 					self.errors.push(FrontendError::InaccessibleMember {
 						location: node.location.clone(),
@@ -3478,8 +3839,9 @@ impl Pass4State {
 				}
 				_ => None,
 			};
-			let callee_display =
-				callee_name.clone().unwrap_or_else(|| self.type_name(callee_ty));
+			let callee_display = callee_name
+				.clone()
+				.unwrap_or_else(|| self.type_name(callee_ty));
 			let param_defs = callee_name
 				.as_ref()
 				.and_then(|name| self.fn_param_defs_from_ast(ctx.module_id, name));
@@ -3709,11 +4071,7 @@ impl Pass4State {
 				}
 			}
 		} else if let MemberAccess::Found((method_ty, _needs_ref)) =
-			self.lookup_method_access(
-				callee_ty,
-				"operator()",
-				ctx.self_type,
-			)
+			self.lookup_method_access(callee_ty, "operator()", ctx.self_type)
 		{
 			let method_info = match self.arena.get(method_ty) {
 				ResolvedType::Fn {
@@ -3744,8 +4102,7 @@ impl Pass4State {
 					self.builtins.unknown_id,
 				);
 			};
-			let param_defs =
-				self.method_param_defs_from_ast(callee_ty, "operator()");
+			let param_defs = self.method_param_defs_from_ast(callee_ty, "operator()");
 			let (normalized_args, has_named) = self.normalize_call_args(
 				args,
 				param_defs.as_deref(),
@@ -3755,8 +4112,7 @@ impl Pass4State {
 			);
 			if let Some(param_defs) = param_defs.as_deref() {
 				let (required, total) = self.param_count_range(param_defs, 1);
-				if normalized_args.len() < required
-					|| normalized_args.len() > total
+				if normalized_args.len() < required || normalized_args.len() > total
 				{
 					self.errors.push(FrontendError::InvalidCall {
 						location: node.location.clone(),
@@ -3773,6 +4129,11 @@ impl Pass4State {
 			}
 			let this_param =
 				params.first().copied().unwrap_or(self.builtins.unknown_id);
+			if !matches!(self.arena.get(this_param), ResolvedType::Reference { .. }) {
+				if let ASTValue::Id(name) = &callee.v {
+					self.mark_moved(ctx, name, &callee.location);
+				}
+			}
 			let mut this_ty = callee_ty;
 			if let ResolvedType::Reference { mutable, .. } = self.arena.get(this_param)
 			{
@@ -3970,6 +4331,8 @@ impl Pass4State {
 					ValueInfo {
 						ty: binder_ty,
 						constexpr: ctx.in_constexpr,
+						mutable: b.mutable,
+						moved: false,
 					},
 				);
 				TypedMatchBinder {
@@ -4210,6 +4573,8 @@ impl Pass4State {
 					ValueInfo {
 						ty: iter_ty,
 						constexpr: false,
+						mutable: false,
+						moved: false,
 					},
 				);
 			}
@@ -4241,19 +4606,40 @@ impl Pass4State {
 		value: &Box<AST>,
 	) -> Box<TypedAst> {
 		let mut target_ty = None;
+		let mut target_mutable = None;
+		let mut found_in_scope = false;
 		for scope in ctx.value_scopes.iter().rev() {
 			if let Some(info) = scope.get(name) {
 				target_ty = Some(info.ty);
+				target_mutable = Some(info.mutable);
+				found_in_scope = true;
 				break;
 			}
 		}
 		if target_ty.is_none() {
 			if let Some(info) = ctx.module.values.get(name) {
 				target_ty = Some(info.ty);
+				target_mutable = Some(info.mutable);
 			}
 		}
 		let mut typed_value = self.type_node(value, ctx, target_ty);
 		let mut value_ty = typed_value.ty.unwrap_or(self.builtins.unknown_id);
+		if let Some(target_mutable) = target_mutable {
+			if !target_mutable && name != "_" {
+				self.errors.push(FrontendError::AssignToImmutable {
+					location: node.location.clone(),
+					name: name.to_string(),
+				});
+			}
+			if target_mutable && found_in_scope {
+				for scope in ctx.value_scopes.iter_mut().rev() {
+					if let Some(info) = scope.get_mut(name) {
+						info.moved = false;
+						break;
+					}
+				}
+			}
+		}
 		if let Some(expected) = target_ty {
 			let mut coerced = value_ty;
 			if !self.type_matches(value_ty, expected)
@@ -4313,11 +4699,21 @@ impl Pass4State {
 				value_ty = self.builtins.f64_id;
 			}
 		}
+		if mutable && !constexpr && self.is_module_scope(ctx) {
+			if !self.is_static_mut_ref(value_ty) {
+				self.errors.push(FrontendError::NonStaticModuleMut {
+					location: node.location.clone(),
+					name: name.to_string(),
+				});
+			}
+		}
 		ctx.value_scopes.last_mut().expect("scope").insert(
 			name.to_string(),
 			ValueInfo {
 				ty: value_ty,
 				constexpr,
+				mutable,
+				moved: false,
 			},
 		);
 		let mut out = TypedAst::from(
@@ -4421,11 +4817,21 @@ impl Pass4State {
 					}
 				}
 			}
+			if mutable && !constexpr && self.is_module_scope(ctx) {
+				if !self.is_static_mut_ref(final_ty) {
+					self.errors.push(FrontendError::NonStaticModuleMut {
+						location: node.location.clone(),
+						name: name.clone(),
+					});
+				}
+			}
 			ctx.value_scopes.last_mut().expect("scope").insert(
 				name.clone(),
 				ValueInfo {
 					ty: final_ty,
 					constexpr,
+					mutable,
+					moved: false,
 				},
 			);
 		}
@@ -4497,6 +4903,11 @@ impl Pass4State {
 				typed_default = Some(self.type_node(default, ctx, resolved_ty));
 			}
 			if let Some(ty) = resolved_ty {
+				if ctx.in_constexpr && self.type_contains_pointer(ty) {
+					self.errors.push(FrontendError::PointerInConstexpr {
+						location: node.location.clone(),
+					});
+				}
 				param_types.push(ty);
 			} else {
 				param_types.push(self.builtins.unknown_id);
@@ -4519,6 +4930,11 @@ impl Pass4State {
 				)
 			})
 			.unwrap_or(self.builtins.void_id);
+		if ctx.in_constexpr && self.type_contains_pointer(resolved_return) {
+			self.errors.push(FrontendError::PointerInConstexpr {
+				location: node.location.clone(),
+			});
+		}
 		let fn_ty = self.arena.add(ResolvedType::Fn {
 			params: param_types.clone(),
 			return_type: resolved_return,
@@ -4527,7 +4943,7 @@ impl Pass4State {
 		let prev_return = ctx.return_type;
 		let prev_constexpr = ctx.in_constexpr;
 		ctx.return_type = Some(resolved_return);
-		ctx.in_constexpr = false;
+		ctx.in_constexpr = prev_constexpr;
 		ctx.value_scopes.push(HashMap::new());
 		for (idx, param) in params.iter().enumerate() {
 			let ty = param_types
@@ -4540,6 +4956,8 @@ impl Pass4State {
 					ValueInfo {
 						ty,
 						constexpr: false,
+						mutable: false,
+						moved: false,
 					},
 				);
 			}
@@ -4612,8 +5030,8 @@ impl Pass4State {
 			{
 				self.errors.push(FrontendError::UnusedValue {
 					location: body_location.clone(),
-					hint:
-						"use `_ = <expr>` to ignore the return value".to_string(),
+					hint: "use `_ = <expr>` to ignore the return value"
+						.to_string(),
 				});
 			}
 		}
@@ -5114,17 +5532,16 @@ impl Pass4State {
 				},
 			) => {
 				actual_mut == expected_mut
-					&& self.is_child_of(*actual_underlying, *expected_underlying)
+					&& self.is_child_of(
+						*actual_underlying,
+						*expected_underlying,
+					)
 			}
 			_ => false,
 		}
 	}
 
-	fn lookup_field_info(
-		&self,
-		ty: TypeId,
-		name: &str,
-	) -> Option<(TypeId, TypeId, bool)> {
+	fn lookup_field_info(&self, ty: TypeId, name: &str) -> Option<(TypeId, TypeId, bool)> {
 		match self.arena.get(ty) {
 			ResolvedType::Struct {
 				fields, extends, ..
@@ -5165,8 +5582,7 @@ impl Pass4State {
 		name: &str,
 		ctx_self: Option<TypeId>,
 	) -> MemberAccess<TypeId> {
-		let Some((field_ty, owner, public)) = self.lookup_field_info(ty, name)
-		else {
+		let Some((field_ty, owner, public)) = self.lookup_field_info(ty, name) else {
 			return MemberAccess::Missing;
 		};
 		if public || self.can_access_member(owner, ctx_self) {
@@ -5176,11 +5592,7 @@ impl Pass4State {
 		}
 	}
 
-	fn lookup_method_info(
-		&self,
-		ty: TypeId,
-		name: &str,
-	) -> Option<(TypeId, TypeId, bool)> {
+	fn lookup_method_info(&self, ty: TypeId, name: &str) -> Option<(TypeId, TypeId, bool)> {
 		match self.arena.get(ty) {
 			ResolvedType::Struct {
 				methods, extends, ..
@@ -5228,8 +5640,7 @@ impl Pass4State {
 		name: &str,
 		ctx_self: Option<TypeId>,
 	) -> MemberAccess<(TypeId, bool)> {
-		let Some((method_ty, owner, public)) = self.lookup_method_info(ty, name)
-		else {
+		let Some((method_ty, owner, public)) = self.lookup_method_info(ty, name) else {
 			return MemberAccess::Missing;
 		};
 		if public || self.can_access_member(owner, ctx_self) {
@@ -5253,8 +5664,7 @@ impl Pass4State {
 					name: decl_name,
 					value,
 					..
-				} if decl_name == name =>
-				{
+				} if decl_name == name => {
 					if let ASTValue::Fn { params, .. } = &value.v {
 						return Some(params.clone());
 					}
@@ -5292,9 +5702,7 @@ impl Pass4State {
 		};
 		let (module_id, type_name) = match self.arena.get(base_ty) {
 			ResolvedType::Struct { module, name, .. }
-			| ResolvedType::Union { module, name, .. } => {
-				(module.clone(), name.clone())
-			}
+			| ResolvedType::Union { module, name, .. } => (module.clone(), name.clone()),
 			_ => return None,
 		};
 		let module = self.modules.get(&module_id)?;
@@ -5312,7 +5720,9 @@ impl Pass4State {
 					let mut found = None;
 					for (idx, name) in names.iter().enumerate() {
 						if name == &type_name {
-							found = values.get(idx).map(|value| (name, value));
+							found = values
+								.get(idx)
+								.map(|value| (name, value));
 							break;
 						}
 					}
@@ -5331,22 +5741,18 @@ impl Pass4State {
 					if let ASTValue::ExprList(items)
 					| ASTValue::ExprListNoScope(items) = &body.v
 					{
-						if let Some(params) =
-							self.method_param_defs_from_items(
+						if let Some(params) = self
+							.method_param_defs_from_items(
 								items,
 								method_name,
-							)
-						{
+							) {
 							return Some(params);
 						}
 					}
 				}
 				ASTValue::Union { methods, .. } => {
-					if let Some(params) =
-						self.method_param_defs_from_items(
-							methods,
-							method_name,
-						)
+					if let Some(params) = self
+						.method_param_defs_from_items(methods, method_name)
 					{
 						return Some(params);
 					}
@@ -5366,7 +5772,9 @@ impl Pass4State {
 		for item in items {
 			let node = Self::unwrap_pub(item.as_ref());
 			match &node.v {
-				ASTValue::DeclarationConstexpr(name, value) if name == method_name => {
+				ASTValue::DeclarationConstexpr(name, value)
+					if name == method_name =>
+				{
 					if let ASTValue::Fn { params, .. } = &value.v {
 						return Some(params.clone());
 					}
@@ -5403,8 +5811,7 @@ impl Pass4State {
 					name: decl_name,
 					value,
 					..
-				} if decl_name == name =>
-				{
+				} if decl_name == name => {
 					if let ASTValue::Fn { params, .. } = &value.v {
 						let mut count = 0;
 						for param in params {
@@ -5453,8 +5860,7 @@ impl Pass4State {
 					name: decl_name,
 					value,
 					..
-				} if decl_name == name =>
-				{
+				} if decl_name == name => {
 					if let ASTValue::Fn {
 						generics, params, ..
 					} = &value.v
@@ -5534,8 +5940,7 @@ impl Pass4State {
 					name: decl_name,
 					value,
 					..
-				} if decl_name == name =>
-				{
+				} if decl_name == name => {
 					if let ASTValue::Fn { generics, .. } = &value.v {
 						return Some(self.flatten_generic_names(generics));
 					}
@@ -5768,8 +6173,7 @@ impl Pass4State {
 		if let MemberAccess::Found((method_ty, _)) =
 			self.lookup_method_access(lhs_ty, &method, ctx_self)
 			&& let ResolvedType::Fn { params, .. } = self.arena.get(method_ty)
-			&& params.len() == 2
-			&& self.type_matches(params[1], rhs_ty)
+			&& params.len() == 2 && self.type_matches(params[1], rhs_ty)
 		{
 			return true;
 		}
@@ -5851,16 +6255,17 @@ impl Pass4State {
 		by_id: &'a HashMap<TypeId, Vec<(String, SourceLocation)>>,
 		by_name: &'a HashMap<String, Vec<(String, SourceLocation)>>,
 	) -> Option<&'a Vec<(String, SourceLocation)>> {
-		by_id.get(&expected).or_else(|| match self.arena.get(expected) {
-			ResolvedType::TypeParam(name) => explicit_types
-				.get(name)
-				.and_then(|explicit| by_id.get(explicit))
-				.or_else(|| by_name.get(name)),
-			_ => explicit_types
-				.iter()
-				.find(|(_, ty)| **ty == expected)
-				.and_then(|(name, _)| by_name.get(name)),
-		})
+		by_id.get(&expected)
+			.or_else(|| match self.arena.get(expected) {
+				ResolvedType::TypeParam(name) => explicit_types
+					.get(name)
+					.and_then(|explicit| by_id.get(explicit))
+					.or_else(|| by_name.get(name)),
+				_ => explicit_types
+					.iter()
+					.find(|(_, ty)| **ty == expected)
+					.and_then(|(name, _)| by_name.get(name)),
+			})
 	}
 
 	fn check_type_param_ops(
@@ -6102,8 +6507,7 @@ impl Semantics {
 		if let MemberAccess::Found((method_ty, _)) =
 			self.lookup_method_access(lhs_ty, &method, ctx_self)
 			&& let ResolvedType::Fn { params, .. } = self.arena.get(method_ty)
-			&& params.len() == 2
-			&& self.type_matches(params[1], rhs_ty)
+			&& params.len() == 2 && self.type_matches(params[1], rhs_ty)
 		{
 			return true;
 		}
@@ -6114,7 +6518,8 @@ impl Semantics {
 		let variants = match self.arena.get(union_ty) {
 			ResolvedType::Union { variants, .. } => variants,
 			ResolvedType::GenericInstance { base, .. } => {
-				if let ResolvedType::Union { variants, .. } = self.arena.get(*base) {
+				if let ResolvedType::Union { variants, .. } = self.arena.get(*base)
+				{
 					variants
 				} else {
 					return false;
@@ -6227,14 +6632,8 @@ impl Semantics {
 				ResolvedType::GenericInstance { base: a, .. },
 				ResolvedType::GenericInstance { base: b, .. },
 			) => self.type_matches(*a, *b),
-			(
-				ResolvedType::UntypedInt,
-				ResolvedType::UntypedInt,
-			)
-			| (
-				ResolvedType::UntypedFloat,
-				ResolvedType::UntypedFloat,
-			) => true,
+			(ResolvedType::UntypedInt, ResolvedType::UntypedInt)
+			| (ResolvedType::UntypedFloat, ResolvedType::UntypedFloat) => true,
 			_ => false,
 		}
 	}
@@ -6280,11 +6679,7 @@ impl Semantics {
 		ctx_self.is_some_and(|self_ty| self.is_child_of(self_ty, owner))
 	}
 
-	pub fn reference_allows_inheritance(
-		&self,
-		actual: TypeId,
-		expected: TypeId,
-	) -> bool {
+	pub fn reference_allows_inheritance(&self, actual: TypeId, expected: TypeId) -> bool {
 		match (self.arena.get(actual), self.arena.get(expected)) {
 			(
 				ResolvedType::Reference {
@@ -6299,7 +6694,10 @@ impl Semantics {
 				},
 			) => {
 				actual_mut == expected_mut
-					&& self.is_child_of(*actual_underlying, *expected_underlying)
+					&& self.is_child_of(
+						*actual_underlying,
+						*expected_underlying,
+					)
 			}
 			_ => false,
 		}
@@ -6328,10 +6726,14 @@ impl Semantics {
 				}
 				None
 			}
-			ResolvedType::GenericInstance { base, .. } => self.lookup_field_info(*base, name),
+			ResolvedType::GenericInstance { base, .. } => {
+				self.lookup_field_info(*base, name)
+			}
 			ResolvedType::Reference { underlying, .. }
 			| ResolvedType::Pointer { underlying } => self.lookup_field_info(*underlying, name),
-			ResolvedType::Alias { underlying, .. } => self.lookup_field_info(*underlying, name),
+			ResolvedType::Alias { underlying, .. } => {
+				self.lookup_field_info(*underlying, name)
+			}
 			_ => None,
 		}
 	}
@@ -6371,10 +6773,14 @@ impl Semantics {
 				}
 				None
 			}
-			ResolvedType::GenericInstance { base, .. } => self.lookup_method_info(*base, name),
+			ResolvedType::GenericInstance { base, .. } => {
+				self.lookup_method_info(*base, name)
+			}
 			ResolvedType::Reference { underlying, .. }
 			| ResolvedType::Pointer { underlying } => self.lookup_method_info(*underlying, name),
-			ResolvedType::Alias { underlying, .. } => self.lookup_method_info(*underlying, name),
+			ResolvedType::Alias { underlying, .. } => {
+				self.lookup_method_info(*underlying, name)
+			}
 			_ => None,
 		}
 	}
@@ -6416,8 +6822,7 @@ mod tests {
 
 	fn parse_entry(entry_file: &Path) -> Box<AST> {
 		let input = read_to_string(entry_file).expect("read entry file");
-		let mut lexer =
-			Lexer::new(input, entry_file.to_string_lossy().to_string());
+		let mut lexer = Lexer::new(input, entry_file.to_string_lossy().to_string());
 		let mut parser = Parser::new(&mut lexer).expect("parser init");
 		let ast = parser.parse().expect("parse entry file");
 		let errors = parser.take_errors();
@@ -6449,25 +6854,24 @@ mod tests {
 		module_paths: Vec<String>,
 		check: impl Fn(&FrontendError) -> bool,
 	) {
-		let (_typed, _resolved, errors, _warnings) =
-			run_fixture(root_name, module_paths);
+		let (_typed, _resolved, errors, _warnings) = run_fixture(root_name, module_paths);
 		let has_error = errors.iter().any(check);
 		assert!(has_error, "errors: {errors:?}");
 	}
 
 	#[test]
 	fn reports_generic_operator_constraints_in_fixture() {
-		let root =
-			PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("testdata/pass4");
+		let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("testdata/pass4");
 		let module_root = root.join("modules");
 		let module_paths = vec![module_root.to_string_lossy().to_string()];
 		let (typed, _resolved, errors, warnings) =
 			run_fixture("testdata/pass4", module_paths);
 
 		assert!(
-			errors
-				.iter()
-				.any(|err| matches!(err, FrontendError::GenericOperatorConstraint { .. })),
+			errors.iter().any(|err| matches!(
+				err,
+				FrontendError::GenericOperatorConstraint { .. }
+			)),
 			"errors: {errors:?}"
 		);
 		assert!(warnings.is_empty(), "warnings: {warnings:?}");
@@ -6477,50 +6881,38 @@ mod tests {
 
 	#[test]
 	fn reports_missing_operator_self() {
-		assert_fixture_error(
-			"testdata/pass4_missing_self",
-			Vec::new(),
-			|err| {
-				matches!(
-					err,
-					FrontendError::MissingOperatorSelf { operator, .. }
-						if operator == "operator+"
-				)
-			},
-		);
+		assert_fixture_error("testdata/pass4_missing_self", Vec::new(), |err| {
+			matches!(
+				err,
+				FrontendError::MissingOperatorSelf { operator, .. }
+					if operator == "operator+"
+			)
+		});
 	}
 
 	#[test]
 	fn reports_duplicate_union_variant_type() {
-		assert_fixture_error(
-			"testdata/pass4_duplicate_union",
-			Vec::new(),
-			|err| matches!(err, FrontendError::DuplicateUnionVariantType { .. }),
-		);
+		assert_fixture_error("testdata/pass4_duplicate_union", Vec::new(), |err| {
+			matches!(err, FrontendError::DuplicateUnionVariantType { .. })
+		});
 	}
 
 	#[test]
 	fn reports_cyclic_type_definition() {
-		assert_fixture_error(
-			"testdata/pass4_cycle",
-			Vec::new(),
-			|err| matches!(err, FrontendError::CyclicTypeDefinition { .. }),
-		);
+		assert_fixture_error("testdata/pass4_cycle", Vec::new(), |err| {
+			matches!(err, FrontendError::CyclicTypeDefinition { .. })
+		});
 	}
 
 	#[test]
 	fn reports_invalid_index_operator() {
-		assert_fixture_error(
-			"testdata/pass4_invalid_index",
-			Vec::new(),
-			|err| {
-				matches!(
-					err,
-					FrontendError::InvalidOperator { operator, .. }
-						if operator == "[]"
-				)
-			},
-		);
+		assert_fixture_error("testdata/pass4_invalid_index", Vec::new(), |err| {
+			matches!(
+				err,
+				FrontendError::InvalidOperator { operator, .. }
+					if operator == "[]"
+			)
+		});
 	}
 
 	#[test]
@@ -6555,61 +6947,44 @@ mod tests {
 
 	#[test]
 	fn reports_unknown_value() {
-		assert_fixture_error(
-			"testdata/pass4_unknown_value",
-			Vec::new(),
-			|err| matches!(err, FrontendError::UnknownValue { .. }),
-		);
+		assert_fixture_error("testdata/pass4_unknown_value", Vec::new(), |err| {
+			matches!(err, FrontendError::UnknownValue { .. })
+		});
 	}
 
 	#[test]
 	fn reports_type_mismatch() {
-		assert_fixture_error(
-			"testdata/pass4_type_mismatch",
-			Vec::new(),
-			|err| matches!(err, FrontendError::TypeMismatch { .. }),
-		);
+		assert_fixture_error("testdata/pass4_type_mismatch", Vec::new(), |err| {
+			matches!(err, FrontendError::TypeMismatch { .. })
+		});
 	}
 
 	#[test]
 	fn reports_invalid_operator() {
-		assert_fixture_error(
-			"testdata/pass4_invalid_operator",
-			Vec::new(),
-			|err| matches!(err, FrontendError::InvalidOperator { .. }),
-		);
+		assert_fixture_error("testdata/pass4_invalid_operator", Vec::new(), |err| {
+			matches!(err, FrontendError::InvalidOperator { .. })
+		});
 	}
 
 	#[test]
 	fn reports_invalid_call() {
-		assert_fixture_error(
-			"testdata/pass4_invalid_call",
-			Vec::new(),
-			|err| matches!(err, FrontendError::InvalidCall { .. }),
-		);
+		assert_fixture_error("testdata/pass4_invalid_call", Vec::new(), |err| {
+			matches!(err, FrontendError::InvalidCall { .. })
+		});
 	}
 
 	#[test]
 	fn reports_positional_after_named_argument() {
-		assert_fixture_error(
-			"testdata/pass4_named_positional_after",
-			Vec::new(),
-			|err| {
-				matches!(
-					err,
-					FrontendError::PositionalAfterNamedArgument { .. }
-				)
-			},
-		);
+		assert_fixture_error("testdata/pass4_named_positional_after", Vec::new(), |err| {
+			matches!(err, FrontendError::PositionalAfterNamedArgument { .. })
+		});
 	}
 
 	#[test]
 	fn reports_duplicate_argument() {
-		assert_fixture_error(
-			"testdata/pass4_duplicate_argument",
-			Vec::new(),
-			|err| matches!(err, FrontendError::DuplicateArgument { .. }),
-		);
+		assert_fixture_error("testdata/pass4_duplicate_argument", Vec::new(), |err| {
+			matches!(err, FrontendError::DuplicateArgument { .. })
+		});
 	}
 
 	#[test]
@@ -6623,56 +6998,79 @@ mod tests {
 
 	#[test]
 	fn reports_unknown_named_argument() {
-		assert_fixture_error(
-			"testdata/pass4_unknown_named_argument",
-			Vec::new(),
-			|err| matches!(err, FrontendError::UnknownNamedArgument { .. }),
-		);
+		assert_fixture_error("testdata/pass4_unknown_named_argument", Vec::new(), |err| {
+			matches!(err, FrontendError::UnknownNamedArgument { .. })
+		});
 	}
 
 	#[test]
 	fn reports_missing_named_argument() {
-		assert_fixture_error(
-			"testdata/pass4_missing_named_argument",
-			Vec::new(),
-			|err| matches!(err, FrontendError::MissingNamedArgument { .. }),
-		);
+		assert_fixture_error("testdata/pass4_missing_named_argument", Vec::new(), |err| {
+			matches!(err, FrontendError::MissingNamedArgument { .. })
+		});
 	}
 
 	#[test]
 	fn reports_default_param_order() {
-		assert_fixture_error(
-			"testdata/pass4_default_param_order",
-			Vec::new(),
-			|err| matches!(err, FrontendError::DefaultParamOrder { .. }),
-		);
+		assert_fixture_error("testdata/pass4_default_param_order", Vec::new(), |err| {
+			matches!(err, FrontendError::DefaultParamOrder { .. })
+		});
+	}
+
+	#[test]
+	fn reports_assign_to_immutable() {
+		assert_fixture_error("testdata/pass4_assign_immutable", Vec::new(), |err| {
+			matches!(err, FrontendError::AssignToImmutable { .. })
+		});
+	}
+
+	#[test]
+	fn reports_assign_to_immutable_deref() {
+		assert_fixture_error("testdata/pass4_assign_immutable_deref", Vec::new(), |err| {
+			matches!(err, FrontendError::AssignToImmutable { .. })
+		});
+	}
+
+	#[test]
+	fn reports_use_after_move() {
+		assert_fixture_error("testdata/pass4_use_after_move", Vec::new(), |err| {
+			matches!(err, FrontendError::UseAfterMove { .. })
+		});
+	}
+
+	#[test]
+	fn reports_nonstatic_module_mut() {
+		assert_fixture_error("testdata/pass4_nonstatic_module_mut", Vec::new(), |err| {
+			matches!(err, FrontendError::NonStaticModuleMut { .. })
+		});
+	}
+
+	#[test]
+	fn reports_pointer_in_constexpr() {
+		assert_fixture_error("testdata/pass4_pointer_in_constexpr", Vec::new(), |err| {
+			matches!(err, FrontendError::PointerInConstexpr { .. })
+		});
 	}
 
 	#[test]
 	fn reports_missing_field() {
-		assert_fixture_error(
-			"testdata/pass4_missing_field",
-			Vec::new(),
-			|err| matches!(err, FrontendError::MissingField { .. }),
-		);
+		assert_fixture_error("testdata/pass4_missing_field", Vec::new(), |err| {
+			matches!(err, FrontendError::MissingField { .. })
+		});
 	}
 
 	#[test]
 	fn reports_non_bool_condition() {
-		assert_fixture_error(
-			"testdata/pass4_non_bool_condition",
-			Vec::new(),
-			|err| matches!(err, FrontendError::NonBoolCondition { .. }),
-		);
+		assert_fixture_error("testdata/pass4_non_bool_condition", Vec::new(), |err| {
+			matches!(err, FrontendError::NonBoolCondition { .. })
+		});
 	}
 
 	#[test]
 	fn reports_unknown_type() {
-		assert_fixture_error(
-			"testdata/pass4_unknown_type",
-			Vec::new(),
-			|err| matches!(err, FrontendError::UnknownType { .. }),
-		);
+		assert_fixture_error("testdata/pass4_unknown_type", Vec::new(), |err| {
+			matches!(err, FrontendError::UnknownType { .. })
+		});
 	}
 
 	#[test]
@@ -6715,10 +7113,8 @@ mod tests {
 
 	#[test]
 	fn reports_inaccessible_member() {
-		assert_fixture_error(
-			"testdata/pass4_inheritance_private",
-			Vec::new(),
-			|err| matches!(err, FrontendError::InaccessibleMember { .. }),
-		);
+		assert_fixture_error("testdata/pass4_inheritance_private", Vec::new(), |err| {
+			matches!(err, FrontendError::InaccessibleMember { .. })
+		});
 	}
 }

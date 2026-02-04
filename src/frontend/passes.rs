@@ -4,8 +4,8 @@ use crate::frontend::{
 };
 
 pub fn run_passes(ast: Box<AST>) -> (Box<AST>, Vec<FrontendError>) {
-	let ast = pass_1(ast);
-	let errors = pass_2(&ast);
+	let mut ast = pass_1(ast);
+	let errors = pass_2(&mut ast);
 	(ast, errors)
 }
 
@@ -19,8 +19,8 @@ pub fn run_passes_with_modules(
 	Vec<FrontendError>,
 	Vec<FrontendWarning>,
 ) {
-	let ast = pass_1(ast);
-	let mut errors = pass_2(&ast);
+	let mut ast = pass_1(ast);
+	let mut errors = pass_2(&mut ast);
 	let pass_3 = pass_3(ast, entry_file, module_paths);
 	errors.extend(pass_3.errors);
 	let pass_4 = pass_4(pass_3.program.clone());

@@ -1,0 +1,6 @@
+package main
+
+const_ptr :: fn (value: int) -> ^int do ^value
+
+main := fn {
+}
