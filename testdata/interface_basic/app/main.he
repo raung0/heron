@@ -1,0 +1,13 @@
+package main
+
+Drawable :: interface {
+	draw := fn() ---
+	pub get_area := fn() -> f32 ---
+}
+
+Container :: interface<T> {
+	add := fn(item: T) ---
+	get := fn(index: u32) -> T ---
+}
+
+extern_c_function :: fn(x: i32) -> i32 ---

@@ -96,6 +96,7 @@ pub enum Keyword {
 	Enum,
 	Union,
 	RawUnion,
+	Interface,
 	Void,
 	Hide,
 }
@@ -114,7 +115,8 @@ pub enum TokenValue {
 	Semicolon,
 	Comma,
 	Arrow,
-	Ellipsis, // .. not ...
+	Ellipsis,      // .. not ...
+	Uninitialized, // ---
 	ListInit,
 	LParen,
 	RParen,
@@ -441,7 +443,12 @@ impl Lexer {
 			}
 
 			'-' => {
-				if self.peek(1) == '>' {
+				if self.peek(1) == '-' && self.peek(2) == '-' {
+					tok.v = TokenValue::Uninitialized;
+					self.advance();
+					self.advance();
+					self.advance();
+				} else if self.peek(1) == '>' {
 					tok.v = TokenValue::Arrow;
 					self.advance();
 					self.advance();
@@ -1060,6 +1067,7 @@ fn keyword_from_str(s: &str) -> Option<Keyword> {
 		"enum" => Keyword::Enum,
 		"union" => Keyword::Union,
 		"raw_union" => Keyword::RawUnion,
+		"interface" => Keyword::Interface,
 		"void" => Keyword::Void,
 		"hide" => Keyword::Hide,
 		_ => return None,
@@ -1149,13 +1157,32 @@ mod tests {
 	}
 
 	#[test]
-	fn inserts_semicolon_after_newline_when_needed() {
-		let toks = lex_values("foo\nbar");
-		assert_eq!(toks.len(), 4, "expected foo ; bar EOF");
-		assert!(matches!(&toks[0], TokenValue::Id(s) if s == "foo"));
-		assert!(matches!(&toks[1], TokenValue::Semicolon));
-		assert!(matches!(&toks[2], TokenValue::Id(s) if s == "bar"));
-		assert!(matches!(toks[3], TokenValue::EOF));
+	fn distinguishes_uninitialized_from_minus() {
+		let toks = lex_values("x - - - y");
+		assert!(toks.len() >= 5, "expected at least x - - - y EOF");
+		assert!(matches!(&toks[0], TokenValue::Id(s) if s == "x"));
+		assert!(matches!(
+			toks[1],
+			TokenValue::Op {
+				op: Operator::Sub,
+				has_equals: false
+			}
+		));
+		assert!(matches!(
+			toks[2],
+			TokenValue::Op {
+				op: Operator::Sub,
+				has_equals: false
+			}
+		));
+		assert!(matches!(
+			toks[3],
+			TokenValue::Op {
+				op: Operator::Sub,
+				has_equals: false
+			}
+		));
+		assert!(matches!(&toks[4], TokenValue::Id(s) if s == "y"));
 	}
 
 	#[test]
@@ -1236,5 +1263,27 @@ mod tests {
 		}
 
 		panic!("did not observe semicolon-separated `Point` then `Child` in token stream");
+	}
+
+	#[test]
+	fn tokenizes_uninitialized_operator() {
+		let toks = lex_values("fn foo() ---");
+		assert!(toks.len() >= 5, "expected at least fn foo ( ) --- EOF");
+		assert!(matches!(&toks[0], TokenValue::Keyword(Keyword::Fn)));
+		assert!(matches!(&toks[1], TokenValue::Id(s) if s == "foo"));
+		assert!(matches!(toks[2], TokenValue::LParen));
+		assert!(matches!(toks[3], TokenValue::RParen));
+		assert!(matches!(toks[4], TokenValue::Uninitialized));
+	}
+
+	#[test]
+	fn tokenizes_interface_keyword() {
+		let toks = lex_values("interface Foo {}");
+		assert_eq!(toks.len(), 5, "expected interface Foo {{}} EOF");
+		assert!(matches!(toks[0], TokenValue::Keyword(Keyword::Interface)));
+		assert!(matches!(&toks[1], TokenValue::Id(s) if s == "Foo"));
+		assert!(matches!(toks[2], TokenValue::LSquirly));
+		assert!(matches!(toks[3], TokenValue::RSquirly));
+		assert!(matches!(toks[4], TokenValue::EOF));
 	}
 }

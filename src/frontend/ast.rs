@@ -146,6 +146,7 @@ pub struct MatchCase {
 pub enum FnBody {
 	Block(Box<AST>),
 	Expr(Box<AST>),
+	Uninitialized,
 }
 
 #[derive(Clone)]
@@ -467,6 +468,11 @@ pub enum ASTValue {
 		generics: Vec<GenericParam>,
 		extends: Vec<Box<Type>>,
 		implements: Vec<Box<Type>>,
+		body: Box<AST>,
+	},
+	Interface {
+		attributes: Vec<String>,
+		generics: Vec<GenericParam>,
 		body: Box<AST>,
 	},
 	Enum {
@@ -1132,6 +1138,7 @@ impl fmt::Display for AST {
 				match body {
 					FnBody::Block(b) => write!(f, " (BodyBlock {})", b)?,
 					FnBody::Expr(e) => write!(f, " (BodyExpr {})", e)?,
+					FnBody::Uninitialized => write!(f, " (BodyUninitialized)")?,
 				}
 				write!(f, ")")
 			}
@@ -1154,6 +1161,20 @@ impl fmt::Display for AST {
 				}
 				if !implements.is_empty() {
 					write_type_list(f, "implements", implements)?;
+				}
+				write!(f, " {})", body)
+			}
+			Interface {
+				attributes,
+				generics,
+				body,
+			} => {
+				write!(f, "(Interface")?;
+				if !attributes.is_empty() {
+					write!(f, " (Attributes {:?})", attributes)?;
+				}
+				if !generics.is_empty() {
+					write_generic_list(f, generics)?;
 				}
 				write!(f, " {})", body)
 			}
@@ -1369,7 +1390,9 @@ where
 			}
 		}
 
-		ASTValue::Struct { body, .. } | ASTValue::RawUnion { body, .. } => {
+		ASTValue::Struct { body, .. }
+		| ASTValue::RawUnion { body, .. }
+		| ASTValue::Interface { body, .. } => {
 			walk_ast(body, Some(node), predicate);
 		}
 		ASTValue::Union { methods, .. } => {
@@ -1530,10 +1553,13 @@ where
 			}
 			match body {
 				FnBody::Block(b) | FnBody::Expr(b) => walk_ast_mut(b, predicate),
+				FnBody::Uninitialized => {}
 			}
 		}
 
-		ASTValue::Struct { body, .. } | ASTValue::RawUnion { body, .. } => {
+		ASTValue::Struct { body, .. }
+		| ASTValue::RawUnion { body, .. }
+		| ASTValue::Interface { body, .. } => {
 			walk_ast_mut(body, predicate);
 		}
 		ASTValue::Union { methods, .. } => {

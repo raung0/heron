@@ -27,9 +27,18 @@ pub(crate) fn pass_2(ast: &mut Box<AST>) -> Vec<FrontendError> {
 				parent.map(|p| &p.v),
 				Some(ASTValue::Struct { .. } | ASTValue::RawUnion { .. })
 			);
-			check_duplicate_declarations(items, is_struct_body, &mut errors);
+			let is_interface_body =
+				matches!(parent.map(|p| &p.v), Some(ASTValue::Interface { .. }));
+			check_duplicate_declarations(
+				items,
+				is_struct_body || is_interface_body,
+				&mut errors,
+			);
 			if is_struct_body {
 				check_struct_members(items, &mut errors);
+			}
+			if is_interface_body {
+				check_interface_members(items, &mut errors);
 			}
 		}
 		ASTValue::DeclarationMulti {
@@ -86,6 +95,10 @@ pub(crate) fn pass_2(ast: &mut Box<AST>) -> Vec<FrontendError> {
 			for ty in extends {
 				check_inline_struct_type(ty, &node.location, &mut errors);
 			}
+			check_struct_or_union_comptime(parent, &node.location, &mut errors);
+		}
+
+		ASTValue::Interface { .. } => {
 			check_struct_or_union_comptime(parent, &node.location, &mut errors);
 		}
 
@@ -246,6 +259,55 @@ fn check_struct_members(items: &[Box<AST>], errors: &mut Vec<FrontendError>) {
 			| ASTValue::DeclarationConstexpr(..) => {}
 			_ => {
 				errors.push(FrontendError::InvalidStructMember {
+					location: node.location.clone(),
+				});
+			}
+		}
+	}
+}
+
+fn check_interface_members(items: &[Box<AST>], errors: &mut Vec<FrontendError>) {
+	for item in items {
+		let node = unwrap_pub(item.as_ref());
+		match &node.v {
+			ASTValue::Declaration { value, .. } => {
+				if let ASTValue::Fn { body, .. } = &value.v {
+					if !matches!(body, crate::frontend::FnBody::Uninitialized) {
+						errors.push(FrontendError::InterfaceFunctionMustBeUninitialized {
+							location: node.location.clone(),
+						});
+					}
+				} else {
+					errors.push(FrontendError::InvalidInterfaceMember {
+						location: node.location.clone(),
+					});
+				}
+			}
+			ASTValue::DeclarationMulti {
+				values: Some(values),
+				..
+			} => {
+				for value in values {
+					if let ASTValue::Fn { body, .. } = &value.v {
+						if !matches!(
+							body,
+							crate::frontend::FnBody::Uninitialized
+						) {
+							errors.push(FrontendError::InterfaceFunctionMustBeUninitialized {
+								location: node.location.clone(),
+							});
+						}
+					} else {
+						errors.push(
+							FrontendError::InvalidInterfaceMember {
+								location: node.location.clone(),
+							},
+						);
+					}
+				}
+			}
+			_ => {
+				errors.push(FrontendError::InvalidInterfaceMember {
 					location: node.location.clone(),
 				});
 			}
@@ -457,5 +519,27 @@ mod tests {
 			}
 		});
 		assert!(found, "expected member assignment to stay BinExpr");
+	}
+
+	#[test]
+	fn interface_function_must_use_uninitialized() {
+		let src = r#"Bad :: interface {
+	method := fn() do 42
+}"#;
+		let mut ast = parse_all(src);
+
+		let errors = pass_2(&mut ast);
+		assert!(
+			!errors.is_empty(),
+			"expected pass 2 error for interface with function body"
+		);
+		assert!(
+			matches!(
+				&errors[0],
+				FrontendError::InterfaceFunctionMustBeUninitialized { .. }
+			),
+			"expected InterfaceFunctionMustBeUninitialized error, got {:?}",
+			errors[0]
+		);
 	}
 }

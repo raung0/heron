@@ -55,6 +55,12 @@ pub enum FrontendError {
 	InvalidStructMember {
 		location: SourceLocation,
 	},
+	InvalidInterfaceMember {
+		location: SourceLocation,
+	},
+	InterfaceFunctionMustBeUninitialized {
+		location: SourceLocation,
+	},
 	InlineStructTypeNotAllowed {
 		location: SourceLocation,
 	},

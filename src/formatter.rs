@@ -1041,6 +1041,11 @@ impl Formatter {
 				implements,
 				body,
 			} => self.format_struct(attributes, generics, extends, implements, body),
+			ASTValue::Interface {
+				attributes,
+				generics,
+				body,
+			} => self.format_interface(attributes, generics, body),
 			ASTValue::Enum {
 				variants,
 				implements,
@@ -1287,6 +1292,7 @@ impl Formatter {
 		let body_start_line = match body {
 			FnBody::Block(block) => block.location.range.begin.1,
 			FnBody::Expr(expr) => expr.location.range.begin.1,
+			FnBody::Uninitialized => loc.range.end.1,
 		};
 		let header_end_line = body_start_line.saturating_sub(1);
 		if header_end_line >= fn_start_line
@@ -1463,6 +1469,39 @@ impl Formatter {
 		if !implements.is_empty() {
 			self.out.push_str(" implements ");
 			self.format_type_list(implements);
+		}
+
+		if matches!(body.v, ASTValue::ExprList { .. }) {
+			self.out.push(' ');
+			self.format_block(body);
+		} else {
+			self.out.push_str(" { }");
+		}
+	}
+
+	fn format_interface(
+		&mut self,
+		attributes: &[String],
+		generics: &[GenericParam],
+		body: &AST,
+	) {
+		self.out.push_str("interface");
+		if !attributes.is_empty() {
+			self.out.push(' ');
+			self.out.push_str("[[");
+			self.out.push_str(&attributes.join(","));
+			self.out.push_str("]]");
+		}
+
+		if !generics.is_empty() {
+			let generics_s = generics
+				.iter()
+				.map(|g| g.to_string())
+				.collect::<Vec<_>>()
+				.join("; ");
+			self.out.push('<');
+			self.out.push_str(&generics_s);
+			self.out.push('>');
 		}
 
 		if matches!(body.v, ASTValue::ExprList { .. }) {
@@ -1833,6 +1872,7 @@ impl Formatter {
 			| ASTValue::Match { .. }
 			| ASTValue::Fn { .. }
 			| ASTValue::Struct { .. }
+			| ASTValue::Interface { .. }
 			| ASTValue::Enum { .. }
 			| ASTValue::Union { .. }
 			| ASTValue::RawUnion { .. }
@@ -2277,11 +2317,12 @@ impl Formatter {
 			ASTValue::Fn { body, .. } => match body {
 				FnBody::Block(block) => self.statement_end_line(block),
 				FnBody::Expr(expr) => expr.location.range.end.1,
+				FnBody::Uninitialized => ast.location.range.end.1,
 			},
 
-			ASTValue::Struct { body, .. } | ASTValue::RawUnion { body, .. } => {
-				self.statement_end_line(body)
-			}
+			ASTValue::Struct { body, .. }
+			| ASTValue::RawUnion { body, .. }
+			| ASTValue::Interface { body, .. } => self.statement_end_line(body),
 			ASTValue::Enum { .. } | ASTValue::Union { .. } => ast.location.range.end.1,
 
 			ASTValue::Match { cases, .. } => {
@@ -2481,6 +2522,15 @@ impl Formatter {
 					self.out.push_str(&self.format_expr(expr, 0));
 				}
 			}
+			FnBody::Uninitialized => {
+				if multiline_clauses {
+					self.ensure_newline();
+					self.write_indent();
+				} else {
+					self.out.push(' ');
+				}
+				self.out.push_str("---");
+			}
 		}
 	}
 
@@ -2661,11 +2711,11 @@ impl Formatter {
 		matches!(
 			ast.v,
 			ASTValue::Fn { .. }
-				| ASTValue::Struct { .. } | ASTValue::Enum { .. }
-				| ASTValue::Union { .. } | ASTValue::RawUnion { .. }
-				| ASTValue::Match { .. } | ASTValue::If { .. }
-				| ASTValue::While { .. } | ASTValue::For { .. }
-				| ASTValue::ForLoop { .. }
+				| ASTValue::Struct { .. } | ASTValue::Interface { .. }
+				| ASTValue::Enum { .. } | ASTValue::Union { .. }
+				| ASTValue::RawUnion { .. } | ASTValue::Match { .. }
+				| ASTValue::If { .. } | ASTValue::While { .. }
+				| ASTValue::For { .. } | ASTValue::ForLoop { .. }
 		)
 	}
 

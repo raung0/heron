@@ -338,6 +338,20 @@ fn emit_error_message(
 			locations.push(location);
 			message("struct bodies may only contain declarations")
 		}
+		FrontendError::InvalidInterfaceMember { location } => {
+			labels.push(Some("invalid interface member".to_string()));
+			locations.push(location);
+			message("interface bodies may only contain function declarations with ---")
+		}
+		FrontendError::InterfaceFunctionMustBeUninitialized { location } => {
+			labels.push(Some("function must use ---".to_string()));
+			locations.push(location);
+			(
+				"interface functions must use --- instead of a body".to_string(),
+				Some("use --- instead of a function body for interface methods"
+					.to_string()),
+			)
+		}
 		FrontendError::InlineStructTypeNotAllowed { location } => {
 			labels.push(Some("use a named struct type".to_string()));
 			locations.push(location);
@@ -827,6 +841,7 @@ fn describe_token_value(value: &TokenValue) -> String {
 		TokenValue::Comma => "symbol `,`".to_string(),
 		TokenValue::Arrow => "symbol `->`".to_string(),
 		TokenValue::Ellipsis => "symbol `..`".to_string(),
+		TokenValue::Uninitialized => "symbol `---`".to_string(),
 		TokenValue::ListInit => "symbol `.{`".to_string(),
 		TokenValue::LParen => "symbol `(`".to_string(),
 		TokenValue::RParen => "symbol `)`".to_string(),
@@ -871,6 +886,7 @@ fn keyword_lexeme(keyword: &Keyword) -> &'static str {
 		Keyword::Enum => "enum",
 		Keyword::Union => "union",
 		Keyword::RawUnion => "raw_union",
+		Keyword::Interface => "interface",
 		Keyword::Void => "void",
 		Keyword::Hide => "hide",
 	}

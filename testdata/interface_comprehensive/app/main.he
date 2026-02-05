@@ -1,0 +1,22 @@
+package main
+
+Printable :: interface {
+	print := fn() ---
+}
+
+Collection :: interface<T> {
+	add := fn(item: T) ---
+	size := fn() -> u32 ---
+	pub get := fn(index: u32) -> T ---
+}
+
+Comparable :: interface {
+	compare := fn(other: i32) -> i32 ---
+	equals := fn(other: i32) -> bool ---
+}
+
+external_lib_function :: fn (x: i32; y: i32) -> i32 ---
+
+pub main := fn {
+	x := 42
+}

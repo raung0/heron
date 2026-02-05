@@ -1,0 +1,6 @@
+package main
+
+InvalidInterface :: interface {
+	bad_method := fn() {
+	}
+}

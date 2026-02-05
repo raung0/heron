@@ -1225,7 +1225,8 @@ impl Pass4State {
 		match kind {
 			BorrowKind::Shared => state.mutable_location.is_some(),
 			BorrowKind::Mutable => {
-				state.mutable_location.is_some() || !state.shared_locations.is_empty()
+				state.mutable_location.is_some()
+					|| !state.shared_locations.is_empty()
 			}
 		}
 	}
@@ -1271,11 +1272,13 @@ impl Pass4State {
 				state.shared_locations.push(location.clone());
 			}
 			BorrowKind::Mutable => {
-				if state.mutable_location.is_some() || !state.shared_locations.is_empty() {
-					let borrowed_at = state
-						.mutable_location
-						.clone()
-						.or_else(|| state.shared_locations.first().cloned());
+				if state.mutable_location.is_some()
+					|| !state.shared_locations.is_empty()
+				{
+					let borrowed_at =
+						state.mutable_location.clone().or_else(|| {
+							state.shared_locations.first().cloned()
+						});
 					self.errors.push(FrontendError::BorrowMutWhileShared {
 						location: location.clone(),
 						name: name.to_string(),
@@ -1373,10 +1376,10 @@ impl Pass4State {
 				if !state.shared_locations.is_empty()
 					|| state.mutable_location.is_some()
 				{
-					let borrowed_at = state
-						.mutable_location
-						.clone()
-						.or_else(|| state.shared_locations.first().cloned());
+					let borrowed_at =
+						state.mutable_location.clone().or_else(|| {
+							state.shared_locations.first().cloned()
+						});
 					self.errors.push(FrontendError::MoveWhileBorrowed {
 						location: location.clone(),
 						name: name.to_string(),
@@ -1721,32 +1724,35 @@ impl Pass4State {
 				let bool_literal = name == "true" || name == "false";
 				for scope in ctx.value_scopes.iter_mut().rev() {
 					if let Some(info) = scope.get_mut(name) {
-					if !ctx.suppress_borrow_check {
-						if let Some(state) =
-							ctx.borrow_state.get(name)
-						{
-							if state.mutable_location.is_some() {
-								self.errors.push(
+						if !ctx.suppress_borrow_check {
+							if let Some(state) =
+								ctx.borrow_state.get(name)
+							{
+								if state.mutable_location.is_some()
+								{
+									self.errors.push(
 									FrontendError::AccessWhileMutBorrowed {
 										location: node.location.clone(),
 										name: name.clone(),
 										borrowed_at: state.mutable_location.clone(),
 									},
 								);
+								}
 							}
 						}
-					}
-					if info.moved {
-						self.errors.push(
-							FrontendError::UseAfterMove {
-								location: node
-									.location
-									.clone(),
-								name: name.clone(),
-								moved_at: info.moved_at.clone(),
-							},
-						);
-					}
+						if info.moved {
+							self.errors.push(
+								FrontendError::UseAfterMove {
+									location: node
+										.location
+										.clone(),
+									name: name.clone(),
+									moved_at: info
+										.moved_at
+										.clone(),
+								},
+							);
+						}
 						if !ctx.suppress_move && !self.is_copy_type(info.ty)
 						{
 							let mut can_move = true;
@@ -1754,8 +1760,11 @@ impl Pass4State {
 								if let Some(state) =
 									ctx.borrow_state.get(name)
 								{
-									if !state.shared_locations.is_empty()
-										|| state.mutable_location.is_some()
+									if !state
+										.shared_locations
+										.is_empty() || state
+										.mutable_location
+										.is_some()
 									{
 										let borrowed_at = state
 											.mutable_location
@@ -1776,7 +1785,8 @@ impl Pass4State {
 							}
 							if can_move {
 								info.moved = true;
-								info.moved_at = Some(node.location.clone());
+								info.moved_at =
+									Some(node.location.clone());
 							}
 						}
 						found = Some(info.clone());
@@ -1789,7 +1799,8 @@ impl Pass4State {
 							if let Some(state) =
 								ctx.borrow_state.get(name)
 							{
-								if state.mutable_location.is_some() {
+								if state.mutable_location.is_some()
+								{
 									self.errors.push(
 										FrontendError::AccessWhileMutBorrowed {
 											location: node.location.clone(),
@@ -2783,6 +2794,34 @@ impl Pass4State {
 				out.ty = Some(self.builtins.type_id);
 				out
 			}
+			ASTValue::Interface {
+				attributes,
+				generics,
+				body,
+			} => {
+				let (typed_generics, generic_map) = self.resolve_generic_params(
+					ctx.module_id,
+					generics,
+					None,
+					None,
+				);
+				let prev_generic_types = std::mem::replace(
+					&mut ctx.generic_types,
+					generic_map.clone(),
+				);
+				let typed_body = self.type_node(body, ctx, None);
+				ctx.generic_types = prev_generic_types;
+				let mut out = TypedAst::from(
+					node.location.clone(),
+					TypedValue::Interface {
+						attributes: attributes.clone(),
+						generics: typed_generics,
+						body: typed_body,
+					},
+				);
+				out.ty = Some(self.builtins.type_id);
+				out
+			}
 			ASTValue::Enum {
 				variants,
 				implements,
@@ -3007,12 +3046,12 @@ impl Pass4State {
 						if !state.shared_locations.is_empty()
 							|| state.mutable_location.is_some()
 						{
-							let borrowed_at = state
-								.mutable_location
-								.clone()
-								.or_else(|| {
-									state.shared_locations.first().cloned()
-								});
+							let borrowed_at =
+								state.mutable_location
+									.clone()
+									.or_else(|| {
+										state.shared_locations.first().cloned()
+									});
 							self.errors
 								.push(FrontendError::AssignWhileBorrowed {
 								location: node.location.clone(),
@@ -3072,13 +3111,13 @@ impl Pass4State {
 							},
 						);
 					} else if found_in_scope {
-					for scope in ctx.value_scopes.iter_mut().rev() {
-						if let Some(info) = scope.get_mut(name) {
-							info.moved = false;
-							info.moved_at = None;
-							break;
+						for scope in ctx.value_scopes.iter_mut().rev() {
+							if let Some(info) = scope.get_mut(name) {
+								info.moved = false;
+								info.moved_at = None;
+								break;
+							}
 						}
-					}
 					}
 				}
 				if name != "_" {
@@ -3135,7 +3174,9 @@ impl Pass4State {
 							.mutable_location
 							.clone()
 							.or_else(|| {
-								state.shared_locations.first().cloned()
+								state.shared_locations
+									.first()
+									.cloned()
 							});
 						self.errors.push(
 							FrontendError::AssignWhileBorrowed {
@@ -5343,10 +5384,10 @@ impl Pass4State {
 				if !state.shared_locations.is_empty()
 					|| state.mutable_location.is_some()
 				{
-					let borrowed_at = state
-						.mutable_location
-						.clone()
-						.or_else(|| state.shared_locations.first().cloned());
+					let borrowed_at =
+						state.mutable_location.clone().or_else(|| {
+							state.shared_locations.first().cloned()
+						});
 					self.errors.push(FrontendError::AssignWhileBorrowed {
 						location: node.location.clone(),
 						name: name.to_string(),
@@ -5384,13 +5425,13 @@ impl Pass4State {
 				});
 			}
 			if target_mutable && found_in_scope {
-			for scope in ctx.value_scopes.iter_mut().rev() {
-				if let Some(info) = scope.get_mut(name) {
-					info.moved = false;
-					info.moved_at = None;
-					break;
+				for scope in ctx.value_scopes.iter_mut().rev() {
+					if let Some(info) = scope.get_mut(name) {
+						info.moved = false;
+						info.moved_at = None;
+						break;
+					}
 				}
-			}
 			}
 		}
 		if let Some(expected) = target_ty {
@@ -5647,13 +5688,13 @@ impl Pass4State {
 			}
 			ctx.value_scopes.last_mut().expect("scope").insert(
 				name.clone(),
-			ValueInfo {
-				ty: final_ty,
-				constexpr,
-				mutable,
-				moved: false,
-				moved_at: None,
-			},
+				ValueInfo {
+					ty: final_ty,
+					constexpr,
+					mutable,
+					moved: false,
+					moved_at: None,
+				},
 			);
 			if name != "_" {
 				if let Some(values) = values {
@@ -5860,12 +5901,14 @@ impl Pass4State {
 			crate::frontend::FnBody::Expr(e) => {
 				TypedFnBody::Expr(self.type_node(e, ctx, None))
 			}
+			crate::frontend::FnBody::Uninitialized => TypedFnBody::Uninitialized,
 		};
 		self.clear_temporary_borrows(ctx);
 		if return_type.is_some() {
 			let (body_ty, body_location) = match &typed_body {
 				TypedFnBody::Block(block) => (block.ty, &block.location),
 				TypedFnBody::Expr(expr) => (expr.ty, &expr.location),
+				TypedFnBody::Uninitialized => (None, &node.location),
 			};
 			if let Some(mut body_ty) = body_ty {
 				if !self.type_matches(body_ty, resolved_return)
@@ -5884,6 +5927,7 @@ impl Pass4State {
 						TypedFnBody::Expr(expr) => {
 							expr.ty = Some(body_ty);
 						}
+						TypedFnBody::Uninitialized => {}
 					}
 				}
 			}
@@ -5898,6 +5942,7 @@ impl Pass4State {
 					_ => (block.ty, &block.location),
 				},
 				TypedFnBody::Expr(expr) => (expr.ty, &expr.location),
+				TypedFnBody::Uninitialized => (None, &node.location),
 			};
 			if let Some(body_ty) = body_ty
 				&& body_ty != self.builtins.void_id
@@ -6370,7 +6415,6 @@ impl Pass4State {
 		}
 	}
 
-
 	fn push_inheritance_bases(
 		&self,
 		bases: &[TypeId],
@@ -6441,18 +6485,25 @@ impl Pass4State {
 						continue;
 					}
 					let ResolvedType::Struct {
-						fields,
-						extends,
-						..
-					} = self.arena.get(current) else {
+						fields, extends, ..
+					} = self.arena.get(current)
+					else {
 						continue;
 					};
 					for field in fields {
 						if field.name == name {
-							return Some((field.ty, current, field.public));
+							return Some((
+								field.ty,
+								current,
+								field.public,
+							));
 						}
 					}
-					self.push_inheritance_bases(extends, &mut queue, &mut visited);
+					self.push_inheritance_bases(
+						extends,
+						&mut queue,
+						&mut visited,
+					);
 				}
 				None
 			}
@@ -6502,16 +6553,19 @@ impl Pass4State {
 						continue;
 					}
 					let ResolvedType::Struct {
-						methods,
-						extends,
-						..
-					} = self.arena.get(current) else {
+						methods, extends, ..
+					} = self.arena.get(current)
+					else {
 						continue;
 					};
 					if let Some(method) = methods.get(name) {
 						return Some((method.ty, current, method.public));
 					}
-					self.push_inheritance_bases(extends, &mut queue, &mut visited);
+					self.push_inheritance_bases(
+						extends,
+						&mut queue,
+						&mut visited,
+					);
 				}
 				None
 			}
@@ -7636,18 +7690,25 @@ impl Semantics {
 						continue;
 					}
 					let ResolvedType::Struct {
-						fields,
-						extends,
-						..
-					} = self.arena.get(current) else {
+						fields, extends, ..
+					} = self.arena.get(current)
+					else {
 						continue;
 					};
 					for field in fields {
 						if field.name == name {
-							return Some((field.ty, current, field.public));
+							return Some((
+								field.ty,
+								current,
+								field.public,
+							));
 						}
 					}
-					self.push_inheritance_bases(extends, &mut queue, &mut visited);
+					self.push_inheritance_bases(
+						extends,
+						&mut queue,
+						&mut visited,
+					);
 				}
 				None
 			}
@@ -7697,16 +7758,19 @@ impl Semantics {
 						continue;
 					}
 					let ResolvedType::Struct {
-						methods,
-						extends,
-						..
-					} = self.arena.get(current) else {
+						methods, extends, ..
+					} = self.arena.get(current)
+					else {
 						continue;
 					};
 					if let Some(method) = methods.get(name) {
 						return Some((method.ty, current, method.public));
 					}
-					self.push_inheritance_bases(extends, &mut queue, &mut visited);
+					self.push_inheritance_bases(
+						extends,
+						&mut queue,
+						&mut visited,
+					);
 				}
 				None
 			}

@@ -211,6 +211,7 @@ pub struct TypedMatchCase {
 pub enum TypedFnBody {
 	Block(Box<TypedAst>),
 	Expr(Box<TypedAst>),
+	Uninitialized,
 }
 
 #[derive(Clone, Debug)]
@@ -359,6 +360,11 @@ pub enum TypedValue {
 		generics: Vec<TypedGenericParam>,
 		extends: Vec<TypeId>,
 		implements: Vec<TypeId>,
+		body: Box<TypedAst>,
+	},
+	Interface {
+		attributes: Vec<String>,
+		generics: Vec<TypedGenericParam>,
 		body: Box<TypedAst>,
 	},
 	Enum {

@@ -552,6 +552,7 @@ impl<'a> Parser<'a> {
 				Keyword::Match => return self.parse_match(),
 				Keyword::Fn => return self.parse_fn(),
 				Keyword::Struct => return self.parse_struct(),
+				Keyword::Interface => return self.parse_interface(),
 				Keyword::Enum => return self.parse_enum(),
 				Keyword::Union => return self.parse_union(),
 				Keyword::RawUnion => return self.parse_raw_union(),
@@ -1682,6 +1683,9 @@ impl<'a> Parser<'a> {
 			FnBody::Expr(self.parse_expression_with_stop(stop)?)
 		} else if self.cur.v == TokenValue::LSquirly {
 			FnBody::Block(self.parse_block()?)
+		} else if self.cur.v == TokenValue::Uninitialized {
+			self.next()?; // consume '---'
+			FnBody::Uninitialized
 		} else {
 			return Err(ParseError::ExpectedBody(self.cur.location.clone()));
 		};
@@ -1689,6 +1693,7 @@ impl<'a> Parser<'a> {
 		loc.range.end = match &body {
 			FnBody::Block(b) => b.location.range.end,
 			FnBody::Expr(e) => e.location.range.end,
+			FnBody::Uninitialized => self.cur.location.range.begin,
 		};
 
 		Ok(AST::from(
@@ -1749,6 +1754,37 @@ impl<'a> Parser<'a> {
 				generics,
 				extends,
 				implements,
+				body,
+			},
+		))
+	}
+
+	fn parse_interface(&mut self) -> ParseResult {
+		let mut loc = self.cur.location.clone();
+		self.next()?; // consume 'interface'
+		let attributes = self.parse_attributes()?;
+
+		let generics = if Self::is_lt(&self.cur.v) {
+			self.parse_generic_params()?
+		} else {
+			Vec::new()
+		};
+
+		if self.cur.v != TokenValue::LSquirly {
+			return Err(ParseError::ExpectedToken(
+				self.cur.clone(),
+				TokenValue::LSquirly,
+			));
+		}
+
+		let body = self.parse_block()?;
+		loc.range.end = body.location.range.end;
+
+		Ok(AST::from(
+			loc,
+			ASTValue::Interface {
+				attributes,
+				generics,
 				body,
 			},
 		))
@@ -3666,6 +3702,7 @@ impl<'a> Parser<'a> {
 			TokenValue::Comma => ",".to_string(),
 			TokenValue::Arrow => "->".to_string(),
 			TokenValue::Ellipsis => "..".to_string(),
+			TokenValue::Uninitialized => "---".to_string(),
 			TokenValue::ListInit => ".{".to_string(),
 			TokenValue::LParen => "(".to_string(),
 			TokenValue::RParen => ")".to_string(),
@@ -5914,9 +5951,7 @@ mod tests {
 
 		match &ast.v {
 			ASTValue::RawUnion {
-				body,
-				implements,
-				..
+				body, implements, ..
 			} => match &body.v {
 				ASTValue::ExprList { items, .. } => {
 					assert_eq!(items.len(), 2);
@@ -6204,5 +6239,89 @@ Child :: struct extends Base { };
 			"expected semicolon after first decl, got {:?}",
 			p.cur.v
 		);
+	}
+
+	#[test]
+	fn interface_basic_parsing() {
+		let lx = Lexer::new(
+			"Drawable :: interface { draw := fn() --- }".to_string(),
+			"<test>".to_string(),
+		);
+		let exprs = parse_all(lx).expect("ok");
+		assert!(!exprs.is_empty());
+
+		match &exprs[0].v {
+			ASTValue::DeclarationMulti {
+				values: Some(values),
+				..
+			} => match &values[0].v {
+				ASTValue::Interface {
+					attributes,
+					generics,
+					body,
+				} => {
+					assert!(attributes.is_empty());
+					assert!(generics.is_empty());
+					assert!(matches!(body.v, ASTValue::ExprList { .. }));
+				}
+				_ => panic!("expected Interface in declaration"),
+			},
+			_ => panic!("expected DeclarationMulti"),
+		}
+	}
+
+	#[test]
+	fn interface_with_generics() {
+		let lx = Lexer::new(
+			"Container :: interface<T> { add := fn(item: T) --- }".to_string(),
+			"<test>".to_string(),
+		);
+		let exprs = parse_all(lx).expect("ok");
+		assert!(!exprs.is_empty());
+
+		match &exprs[0].v {
+			ASTValue::DeclarationMulti {
+				values: Some(values),
+				..
+			} => match &values[0].v {
+				ASTValue::Interface {
+					attributes,
+					generics,
+					body,
+				} => {
+					assert!(attributes.is_empty());
+					assert_eq!(generics.len(), 1);
+					assert!(matches!(body.v, ASTValue::ExprList { .. }));
+				}
+				_ => panic!("expected Interface in declaration"),
+			},
+			_ => panic!("expected DeclarationMulti with Interface"),
+		}
+	}
+
+	#[test]
+	fn function_with_uninitialized_body() {
+		let lx = Lexer::new(
+			"extern_func :: fn(x: i32) -> i32 ---".to_string(),
+			"<test>".to_string(),
+		);
+		let exprs = parse_all(lx).expect("ok");
+		assert!(!exprs.is_empty());
+
+		match &exprs[0].v {
+			ASTValue::DeclarationMulti {
+				values: Some(values),
+				..
+			} => match &values[0].v {
+				ASTValue::Fn { body, .. } => {
+					assert!(matches!(
+						body,
+						crate::frontend::FnBody::Uninitialized
+					));
+				}
+				_ => panic!("expected Fn in declaration"),
+			},
+			_ => panic!("expected DeclarationMulti with Fn"),
+		}
 	}
 }
