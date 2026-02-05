@@ -1720,9 +1720,16 @@ impl<'a> Parser<'a> {
 
 		let extends = if self.cur.v == TokenValue::Keyword(Keyword::Extends) {
 			self.next()?; // consume 'extends'
-			Some(self.parse_type_inner()?)
+			self.parse_type_list()?
 		} else {
-			None
+			Vec::new()
+		};
+
+		let implements = if self.cur.v == TokenValue::Keyword(Keyword::Implements) {
+			self.next()?; // consume 'implements'
+			self.parse_type_list()?
+		} else {
+			Vec::new()
 		};
 
 		if self.cur.v != TokenValue::LSquirly {
@@ -1741,14 +1748,59 @@ impl<'a> Parser<'a> {
 				attributes,
 				generics,
 				extends,
+				implements,
 				body,
 			},
 		))
 	}
 
+	#[allow(clippy::vec_box)]
+	fn parse_type_list(&mut self) -> Result<Vec<Box<Type>>, ParseError> {
+		let mut items = Vec::new();
+		if self.cur.v == TokenValue::LParen {
+			self.next()?; // consume '('
+			if self.cur.v == TokenValue::RParen {
+				return Err(ParseError::ExpectedToken(
+					self.cur.clone(),
+					TokenValue::Id("type".to_string()),
+				));
+			}
+			loop {
+				items.push(self.parse_type_inner()?);
+				match self.cur.v {
+					TokenValue::Comma => {
+						self.next()?;
+						if self.cur.v == TokenValue::RParen {
+							break;
+						}
+					}
+					TokenValue::RParen => break,
+					_ => {
+						return Err(ParseError::ExpectedToken(
+							self.cur.clone(),
+							TokenValue::RParen,
+						));
+					}
+				}
+			}
+			self.next()?; // consume ')'
+			Ok(items)
+		} else {
+			items.push(self.parse_type_inner()?);
+			Ok(items)
+		}
+	}
+
 	fn parse_enum(&mut self) -> ParseResult {
 		let mut loc = self.cur.location.clone();
 		self.next()?; // consume 'enum'
+
+		let implements = if self.cur.v == TokenValue::Keyword(Keyword::Implements) {
+			self.next()?; // consume 'implements'
+			self.parse_type_list()?
+		} else {
+			Vec::new()
+		};
 
 		if self.cur.v != TokenValue::LSquirly {
 			return Err(ParseError::ExpectedToken(
@@ -1823,7 +1875,13 @@ impl<'a> Parser<'a> {
 		loc.range.end = self.cur.location.range.end;
 		self.next()?; // consume '}'
 
-		Ok(AST::from(loc, ASTValue::Enum { variants }))
+		Ok(AST::from(
+			loc,
+			ASTValue::Enum {
+				variants,
+				implements,
+			},
+		))
 	}
 
 	fn parse_union(&mut self) -> ParseResult {
@@ -1832,6 +1890,13 @@ impl<'a> Parser<'a> {
 
 		let generics = if Self::is_lt(&self.cur.v) {
 			self.parse_generic_params()?
+		} else {
+			Vec::new()
+		};
+
+		let implements = if self.cur.v == TokenValue::Keyword(Keyword::Implements) {
+			self.next()?; // consume 'implements'
+			self.parse_type_list()?
 		} else {
 			Vec::new()
 		};
@@ -1897,6 +1962,7 @@ impl<'a> Parser<'a> {
 				generics,
 				variants,
 				methods,
+				implements,
 			},
 		))
 	}
@@ -1911,6 +1977,13 @@ impl<'a> Parser<'a> {
 			Vec::new()
 		};
 
+		let implements = if self.cur.v == TokenValue::Keyword(Keyword::Implements) {
+			self.next()?; // consume 'implements'
+			self.parse_type_list()?
+		} else {
+			Vec::new()
+		};
+
 		if self.cur.v != TokenValue::LSquirly {
 			return Err(ParseError::ExpectedToken(
 				self.cur.clone(),
@@ -1921,7 +1994,14 @@ impl<'a> Parser<'a> {
 		let body = self.parse_block()?;
 		loc.range.end = body.location.range.end;
 
-		Ok(AST::from(loc, ASTValue::RawUnion { generics, body }))
+		Ok(AST::from(
+			loc,
+			ASTValue::RawUnion {
+				generics,
+				body,
+				implements,
+			},
+		))
 	}
 
 	fn parse_newtype(&mut self) -> ParseResult {
@@ -5624,6 +5704,7 @@ mod tests {
 				attributes,
 				generics,
 				extends,
+				implements,
 				body,
 			} => {
 				assert!(attributes.is_empty());
@@ -5638,16 +5719,56 @@ mod tests {
 						)),
 					}]
 				);
+				assert_eq!(extends.len(), 1);
 				assert_eq!(
-					extends.as_ref().map(|t| t.as_ref()),
-					Some(&crate::frontend::Type::Id("Base".to_string()))
+					extends[0].as_ref(),
+					&crate::frontend::Type::Id("Base".to_string())
 				);
+				assert!(implements.is_empty());
 				match &body.v {
 					ASTValue::ExprList { items, .. } => {
 						assert_eq!(items.len(), 1)
 					}
 					_ => panic!("expected struct body expr list"),
 				}
+			}
+			_ => panic!("expected Struct"),
+		}
+	}
+
+	#[test]
+	fn struct_extends_and_implements_parse() {
+		let lx = Lexer::new(
+			r#"struct extends (Base1, Base2) implements (Iface1, Iface2) { }"#
+				.to_string(),
+			"<test>".to_string(),
+		);
+		let ast = parse_one(lx).expect("ok");
+
+		match &ast.v {
+			ASTValue::Struct {
+				extends,
+				implements,
+				..
+			} => {
+				assert_eq!(extends.len(), 2);
+				assert_eq!(
+					extends[0].as_ref(),
+					&crate::frontend::Type::Id("Base1".to_string())
+				);
+				assert_eq!(
+					extends[1].as_ref(),
+					&crate::frontend::Type::Id("Base2".to_string())
+				);
+				assert_eq!(implements.len(), 2);
+				assert_eq!(
+					implements[0].as_ref(),
+					&crate::frontend::Type::Id("Iface1".to_string())
+				);
+				assert_eq!(
+					implements[1].as_ref(),
+					&crate::frontend::Type::Id("Iface2".to_string())
+				);
 			}
 			_ => panic!("expected Struct"),
 		}
@@ -5690,7 +5811,10 @@ mod tests {
 		let ast = parse_one(lx).expect("ok");
 
 		match &ast.v {
-			ASTValue::Enum { variants } => {
+			ASTValue::Enum {
+				variants,
+				implements,
+			} => {
 				assert_eq!(variants.len(), 3);
 				assert_eq!(variants[0].name, "Up");
 				assert!(variants[0].value.is_none());
@@ -5704,6 +5828,23 @@ mod tests {
 				}
 				assert_eq!(variants[2].name, "Left");
 				assert!(variants[2].value.is_none());
+				assert!(implements.is_empty());
+			}
+			_ => panic!("expected Enum"),
+		}
+	}
+
+	#[test]
+	fn enum_implements_parse() {
+		let lx = Lexer::new(
+			"enum implements (Iface1, Iface2) { Up; Down }".to_string(),
+			"<test>".to_string(),
+		);
+		let ast = parse_one(lx).expect("ok");
+
+		match &ast.v {
+			ASTValue::Enum { implements, .. } => {
+				assert_eq!(implements.len(), 2);
 			}
 			_ => panic!("expected Enum"),
 		}
@@ -5716,7 +5857,10 @@ mod tests {
 
 		match &ast.v {
 			ASTValue::Union {
-				generics, variants, ..
+				generics,
+				variants,
+				implements,
+				..
 			} => {
 				assert_eq!(
 					generics,
@@ -5738,6 +5882,23 @@ mod tests {
 					*variants[1].as_ref(),
 					crate::frontend::Type::Id("T".to_string())
 				);
+				assert!(implements.is_empty());
+			}
+			_ => panic!("expected Union"),
+		}
+	}
+
+	#[test]
+	fn union_implements_parse() {
+		let lx = Lexer::new(
+			"union implements Interface { int }".to_string(),
+			"<test>".to_string(),
+		);
+		let ast = parse_one(lx).expect("ok");
+
+		match &ast.v {
+			ASTValue::Union { implements, .. } => {
+				assert_eq!(implements.len(), 1);
 			}
 			_ => panic!("expected Union"),
 		}
@@ -5752,10 +5913,33 @@ mod tests {
 		let ast = parse_one(lx).expect("ok");
 
 		match &ast.v {
-			ASTValue::RawUnion { body, .. } => match &body.v {
-				ASTValue::ExprList { items, .. } => assert_eq!(items.len(), 2),
+			ASTValue::RawUnion {
+				body,
+				implements,
+				..
+			} => match &body.v {
+				ASTValue::ExprList { items, .. } => {
+					assert_eq!(items.len(), 2);
+					assert!(implements.is_empty());
+				}
 				_ => panic!("expected raw_union body expr list"),
 			},
+			_ => panic!("expected RawUnion"),
+		}
+	}
+
+	#[test]
+	fn raw_union_implements_parse() {
+		let lx = Lexer::new(
+			"raw_union implements Interface { x: int }".to_string(),
+			"<test>".to_string(),
+		);
+		let ast = parse_one(lx).expect("ok");
+
+		match &ast.v {
+			ASTValue::RawUnion { implements, .. } => {
+				assert_eq!(implements.len(), 1);
+			}
 			_ => panic!("expected RawUnion"),
 		}
 	}

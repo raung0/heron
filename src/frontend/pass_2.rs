@@ -83,7 +83,7 @@ pub(crate) fn pass_2(ast: &mut Box<AST>) -> Vec<FrontendError> {
 		}
 
 		ASTValue::Struct { extends, .. } => {
-			if let Some(ty) = extends {
+			for ty in extends {
 				check_inline_struct_type(ty, &node.location, &mut errors);
 			}
 			check_struct_or_union_comptime(parent, &node.location, &mut errors);

@@ -1038,21 +1038,28 @@ impl Formatter {
 				attributes,
 				generics,
 				extends,
+				implements,
 				body,
-			} => self.format_struct(attributes, generics, extends.as_deref(), body),
-			ASTValue::Enum { variants } => self.format_enum(variants),
+			} => self.format_struct(attributes, generics, extends, implements, body),
+			ASTValue::Enum {
+				variants,
+				implements,
+			} => self.format_enum(variants, implements),
 			ASTValue::Union {
 				generics,
 				variants,
 				methods,
-			} => self.format_union(generics, variants, methods),
+				implements,
+			} => self.format_union(generics, variants, methods, implements),
 			ASTValue::Hide(name) => {
 				self.out.push_str("hide ");
 				self.out.push_str(name);
 			}
-			ASTValue::RawUnion { generics, body } => {
-				self.format_raw_union(generics, body)
-			}
+			ASTValue::RawUnion {
+				generics,
+				body,
+				implements,
+			} => self.format_raw_union(generics, body, implements),
 			ASTValue::Newtype {
 				underlying,
 				constraint,
@@ -1407,11 +1414,27 @@ impl Formatter {
 		self.format_fn_body(multiline_clauses, body);
 	}
 
+	fn format_type_list(&mut self, types: &[Box<Type>]) {
+		if types.len() == 1 {
+			self.out.push_str(&self.format_type(types[0].as_ref()));
+			return;
+		}
+		self.out.push('(');
+		for (idx, ty) in types.iter().enumerate() {
+			if idx != 0 {
+				self.out.push_str(", ");
+			}
+			self.out.push_str(&self.format_type(ty.as_ref()));
+		}
+		self.out.push(')');
+	}
+
 	fn format_struct(
 		&mut self,
 		attributes: &[String],
 		generics: &[GenericParam],
-		extends: Option<&Type>,
+		extends: &[Box<Type>],
+		implements: &[Box<Type>],
 		body: &AST,
 	) {
 		self.out.push_str("struct");
@@ -1433,9 +1456,13 @@ impl Formatter {
 			self.out.push('>');
 		}
 
-		if let Some(extends) = extends {
+		if !extends.is_empty() {
 			self.out.push_str(" extends ");
-			self.out.push_str(&self.format_type(extends));
+			self.format_type_list(extends);
+		}
+		if !implements.is_empty() {
+			self.out.push_str(" implements ");
+			self.format_type_list(implements);
 		}
 
 		if matches!(body.v, ASTValue::ExprList { .. }) {
@@ -1446,8 +1473,17 @@ impl Formatter {
 		}
 	}
 
-	fn format_enum(&mut self, variants: &[crate::frontend::EnumVariant]) {
-		self.out.push_str("enum {");
+	fn format_enum(
+		&mut self,
+		variants: &[crate::frontend::EnumVariant],
+		implements: &[Box<Type>],
+	) {
+		self.out.push_str("enum");
+		if !implements.is_empty() {
+			self.out.push_str(" implements ");
+			self.format_type_list(implements);
+		}
+		self.out.push_str(" {");
 		self.out.push('\n');
 
 		self.indent += 1;
@@ -1471,6 +1507,7 @@ impl Formatter {
 		generics: &[GenericParam],
 		variants: &[Box<Type>],
 		methods: &[Box<AST>],
+		implements: &[Box<Type>],
 	) {
 		self.out.push_str("union");
 
@@ -1485,6 +1522,10 @@ impl Formatter {
 			self.out.push('>');
 		}
 
+		if !implements.is_empty() {
+			self.out.push_str(" implements ");
+			self.format_type_list(implements);
+		}
 		self.out.push_str(" {");
 		self.out.push('\n');
 
@@ -1508,7 +1549,12 @@ impl Formatter {
 		self.out.push('}');
 	}
 
-	fn format_raw_union(&mut self, generics: &[GenericParam], body: &AST) {
+	fn format_raw_union(
+		&mut self,
+		generics: &[GenericParam],
+		body: &AST,
+		implements: &[Box<Type>],
+	) {
 		self.out.push_str("raw_union");
 
 		if !generics.is_empty() {
@@ -1520,6 +1566,11 @@ impl Formatter {
 			self.out.push('<');
 			self.out.push_str(&generics_s);
 			self.out.push('>');
+		}
+
+		if !implements.is_empty() {
+			self.out.push_str(" implements ");
+			self.format_type_list(implements);
 		}
 
 		if matches!(body.v, ASTValue::ExprList { .. }) {

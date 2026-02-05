@@ -27,7 +27,7 @@ pub enum ResolvedType {
 	Struct {
 		name: String,
 		module: ModuleId,
-		extends: Option<TypeId>,
+		extends: Vec<TypeId>,
 		fields: Vec<FieldInfo>,
 		methods: HashMap<String, MethodInfo>,
 	},
@@ -357,19 +357,23 @@ pub enum TypedValue {
 	Struct {
 		attributes: Vec<String>,
 		generics: Vec<TypedGenericParam>,
-		extends: Option<TypeId>,
+		extends: Vec<TypeId>,
+		implements: Vec<TypeId>,
 		body: Box<TypedAst>,
 	},
 	Enum {
 		variants: Vec<TypedEnumVariant>,
+		implements: Vec<TypeId>,
 	},
 	Union {
 		generics: Vec<TypedGenericParam>,
 		variants: Vec<TypeId>,
+		implements: Vec<TypeId>,
 	},
 	RawUnion {
 		generics: Vec<TypedGenericParam>,
 		body: Box<TypedAst>,
+		implements: Vec<TypeId>,
 	},
 	Newtype {
 		underlying: TypeId,

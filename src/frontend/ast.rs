@@ -465,20 +465,24 @@ pub enum ASTValue {
 	Struct {
 		attributes: Vec<String>,
 		generics: Vec<GenericParam>,
-		extends: Option<Box<Type>>,
+		extends: Vec<Box<Type>>,
+		implements: Vec<Box<Type>>,
 		body: Box<AST>,
 	},
 	Enum {
 		variants: Vec<EnumVariant>,
+		implements: Vec<Box<Type>>,
 	},
 	Union {
 		generics: Vec<GenericParam>,
 		variants: Vec<Box<Type>>,
 		methods: Vec<Box<AST>>,
+		implements: Vec<Box<Type>>,
 	},
 	RawUnion {
 		generics: Vec<GenericParam>,
 		body: Box<AST>,
+		implements: Vec<Box<Type>>,
 	},
 	Newtype {
 		underlying: Box<Type>,
@@ -726,6 +730,19 @@ impl fmt::Display for AST {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		use ASTValue::*;
 		let quote_type = |t: &crate::frontend::Type| format!("\"{}\"", t);
+		let write_type_list = |f: &mut fmt::Formatter<'_>,
+		                       label: &str,
+		                       list: &[Box<crate::frontend::Type>]|
+		 -> fmt::Result {
+			write!(f, " ({label} [")?;
+			for (i, ty) in list.iter().enumerate() {
+				if i != 0 {
+					write!(f, " | ")?;
+				}
+				write!(f, "{}", quote_type(ty.as_ref()))?;
+			}
+			write!(f, "])")
+		};
 		fn write_generic_arg(
 			f: &mut fmt::Formatter<'_>,
 			a: &crate::frontend::GenericArg,
@@ -1122,6 +1139,7 @@ impl fmt::Display for AST {
 				attributes,
 				generics,
 				extends,
+				implements,
 				body,
 			} => {
 				write!(f, "(Struct")?;
@@ -1131,12 +1149,18 @@ impl fmt::Display for AST {
 				if !generics.is_empty() {
 					write_generic_list(f, generics)?;
 				}
-				if let Some(ex) = extends {
-					write!(f, " (extends {})", quote_type(ex.as_ref()))?;
+				if !extends.is_empty() {
+					write_type_list(f, "extends", extends)?;
+				}
+				if !implements.is_empty() {
+					write_type_list(f, "implements", implements)?;
 				}
 				write!(f, " {})", body)
 			}
-			Enum { variants } => {
+			Enum {
+				variants,
+				implements,
+			} => {
 				write!(f, "(Enum")?;
 				for variant in variants {
 					write!(f, " (Variant {:?}", variant.name)?;
@@ -1145,10 +1169,16 @@ impl fmt::Display for AST {
 					}
 					write!(f, ")")?;
 				}
+				if !implements.is_empty() {
+					write_type_list(f, "implements", implements)?;
+				}
 				write!(f, ")")
 			}
 			Union {
-				generics, variants, ..
+				generics,
+				variants,
+				implements,
+				..
 			} => {
 				write!(f, "(Union")?;
 				if !generics.is_empty() {
@@ -1161,12 +1191,23 @@ impl fmt::Display for AST {
 					}
 					write!(f, "{}", quote_type(v.as_ref()))?;
 				}
-				write!(f, "])")
+				write!(f, "]")?;
+				if !implements.is_empty() {
+					write_type_list(f, "implements", implements)?;
+				}
+				write!(f, ")")
 			}
-			RawUnion { generics, body } => {
+			RawUnion {
+				generics,
+				body,
+				implements,
+			} => {
 				write!(f, "(RawUnion")?;
 				if !generics.is_empty() {
 					write_generic_list(f, generics)?;
+				}
+				if !implements.is_empty() {
+					write_type_list(f, "implements", implements)?;
 				}
 				write!(f, " {})", body)
 			}

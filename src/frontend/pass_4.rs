@@ -332,7 +332,7 @@ impl Pass4State {
 			ASTValue::Struct { .. } => self.arena.add(ResolvedType::Struct {
 				name: name.to_string(),
 				module: module_id.clone(),
-				extends: None,
+				extends: Vec::new(),
 				fields: Vec::new(),
 				methods: HashMap::new(),
 			}),
@@ -415,6 +415,7 @@ impl Pass4State {
 				attributes,
 				generics,
 				extends,
+				implements: _,
 				body,
 			} => {
 				let struct_is_unsafe =
@@ -423,15 +424,21 @@ impl Pass4State {
 					.resolve_generic_params(module_id, generics, None, None);
 				let self_type = Some(ty_id);
 				generic_map.insert("Self".to_string(), ty_id);
-				let extends_ty = extends.as_ref().map(|t| {
-					self.resolve_type(
+				let mut extends_ty = Vec::new();
+				for ty in extends {
+					extends_ty.push(self.resolve_type(
 						module_id,
-						t,
+						ty,
 						&generic_map,
 						self_type,
 						&value.location,
-					)
-				});
+					));
+				}
+				if let ResolvedType::Struct { extends, .. } =
+					self.arena.get_mut(ty_id)
+				{
+					*extends = extends_ty.clone();
+				}
 				let mut fields = Vec::new();
 				let mut methods: HashMap<String, MethodInfo> = HashMap::new();
 				let ASTValue::ExprList { items, .. } = &body.v else {
@@ -482,7 +489,10 @@ impl Pass4State {
 				}
 				let _ = typed_generics;
 			}
-			ASTValue::Enum { variants } => {
+			ASTValue::Enum {
+				variants,
+				implements: _,
+			} => {
 				let mut info = Vec::new();
 				for variant in variants {
 					info.push(EnumVariantInfo {
@@ -500,6 +510,7 @@ impl Pass4State {
 				generics,
 				variants,
 				methods,
+				implements: _,
 			} => {
 				let (_, generic_map) = self
 					.resolve_generic_params(module_id, generics, None, None);
@@ -572,7 +583,11 @@ impl Pass4State {
 					*dst_methods = methods_map;
 				}
 			}
-			ASTValue::RawUnion { generics, body } => {
+			ASTValue::RawUnion {
+				generics,
+				body,
+				implements: _,
+			} => {
 				let (_, generic_map) = self
 					.resolve_generic_params(module_id, generics, None, None);
 				let mut fields = Vec::new();
@@ -852,8 +867,8 @@ impl Pass4State {
 				fields, extends, ..
 			} => {
 				let mut deps = Vec::new();
-				if let Some(extends) = extends {
-					if let Some(dep) = self.by_value_dep(*extends) {
+				for extend in extends {
+					if let Some(dep) = self.by_value_dep(*extend) {
 						deps.push((dep, "extends".to_string(), None));
 					}
 				}
@@ -2720,6 +2735,7 @@ impl Pass4State {
 				attributes,
 				generics,
 				extends,
+				implements,
 				body,
 			} => {
 				let (typed_generics, generic_map) = self.resolve_generic_params(
@@ -2728,15 +2744,26 @@ impl Pass4State {
 					None,
 					None,
 				);
-				let typed_extends = extends.as_ref().map(|t| {
-					self.resolve_type(
+				let mut typed_extends = Vec::new();
+				for ty in extends {
+					typed_extends.push(self.resolve_type(
 						ctx.module_id,
-						t,
+						ty,
 						&generic_map,
 						ctx.self_type,
 						&node.location,
-					)
-				});
+					));
+				}
+				let mut typed_implements = Vec::new();
+				for ty in implements {
+					typed_implements.push(self.resolve_type(
+						ctx.module_id,
+						ty,
+						&generic_map,
+						ctx.self_type,
+						&node.location,
+					));
+				}
 				let prev_generic_types = std::mem::replace(
 					&mut ctx.generic_types,
 					generic_map.clone(),
@@ -2749,13 +2776,27 @@ impl Pass4State {
 						attributes: attributes.clone(),
 						generics: typed_generics,
 						extends: typed_extends,
+						implements: typed_implements,
 						body: typed_body,
 					},
 				);
 				out.ty = Some(self.builtins.type_id);
 				out
 			}
-			ASTValue::Enum { variants } => {
+			ASTValue::Enum {
+				variants,
+				implements,
+			} => {
+				let mut typed_implements = Vec::new();
+				for ty in implements {
+					typed_implements.push(self.resolve_type(
+						ctx.module_id,
+						ty,
+						&HashMap::new(),
+						ctx.self_type,
+						&node.location,
+					));
+				}
 				let mut typed_variants = Vec::new();
 				for variant in variants {
 					let typed_value = variant
@@ -2771,6 +2812,7 @@ impl Pass4State {
 					node.location.clone(),
 					TypedValue::Enum {
 						variants: typed_variants,
+						implements: typed_implements,
 					},
 				);
 				out.ty = Some(self.builtins.type_id);
@@ -2780,6 +2822,7 @@ impl Pass4State {
 				generics,
 				variants,
 				methods,
+				implements,
 			} => {
 				let (typed_generics, generic_map) = self.resolve_generic_params(
 					ctx.module_id,
@@ -2798,6 +2841,16 @@ impl Pass4State {
 					);
 					typed_variants.push(resolved);
 				}
+				let mut typed_implements = Vec::new();
+				for ty in implements {
+					typed_implements.push(self.resolve_type(
+						ctx.module_id,
+						ty,
+						&generic_map,
+						ctx.self_type,
+						&node.location,
+					));
+				}
 				let prev_generic_types = std::mem::replace(
 					&mut ctx.generic_types,
 					generic_map.clone(),
@@ -2811,24 +2864,40 @@ impl Pass4State {
 					TypedValue::Union {
 						generics: typed_generics,
 						variants: typed_variants,
+						implements: typed_implements,
 					},
 				);
 				out.ty = Some(self.builtins.type_id);
 				out
 			}
-			ASTValue::RawUnion { generics, body } => {
-				let (typed_generics, _) = self.resolve_generic_params(
+			ASTValue::RawUnion {
+				generics,
+				body,
+				implements,
+			} => {
+				let (typed_generics, generic_map) = self.resolve_generic_params(
 					ctx.module_id,
 					generics,
 					None,
 					None,
 				);
+				let mut typed_implements = Vec::new();
+				for ty in implements {
+					typed_implements.push(self.resolve_type(
+						ctx.module_id,
+						ty,
+						&generic_map,
+						ctx.self_type,
+						&node.location,
+					));
+				}
 				let typed_body = self.type_node(body, ctx, None);
 				let mut out = TypedAst::from(
 					node.location.clone(),
 					TypedValue::RawUnion {
 						generics: typed_generics,
 						body: typed_body,
+						implements: typed_implements,
 					},
 				);
 				out.ty = Some(self.builtins.type_id);
@@ -6301,23 +6370,37 @@ impl Pass4State {
 		}
 	}
 
+
+	fn push_inheritance_bases(
+		&self,
+		bases: &[TypeId],
+		queue: &mut Vec<TypeId>,
+		visited: &mut HashSet<TypeId>,
+	) {
+		for base in bases {
+			let base = self.unwrap_inheritance_type(*base);
+			if !visited.contains(&base) {
+				queue.push(base);
+			}
+		}
+	}
+
 	fn is_child_of(&self, child: TypeId, parent: TypeId) -> bool {
-		let mut current = self.unwrap_inheritance_type(child);
 		let parent = self.unwrap_inheritance_type(parent);
-		loop {
+		let mut queue = vec![self.unwrap_inheritance_type(child)];
+		let mut visited = HashSet::new();
+		while let Some(current) = queue.pop() {
 			if current == parent {
 				return true;
 			}
-			match self.arena.get(current) {
-				ResolvedType::Struct { extends, .. } => {
-					let Some(extends) = extends else {
-						return false;
-					};
-					current = self.unwrap_inheritance_type(*extends);
-				}
-				_ => return false,
+			if !visited.insert(current) {
+				continue;
+			}
+			if let ResolvedType::Struct { extends, .. } = self.arena.get(current) {
+				self.push_inheritance_bases(extends, &mut queue, &mut visited);
 			}
 		}
+		false
 	}
 
 	fn can_access_member(&self, owner: TypeId, ctx_self: Option<TypeId>) -> bool {
@@ -6350,16 +6433,26 @@ impl Pass4State {
 
 	fn lookup_field_info(&self, ty: TypeId, name: &str) -> Option<(TypeId, TypeId, bool)> {
 		match self.arena.get(ty) {
-			ResolvedType::Struct {
-				fields, extends, ..
-			} => {
-				for field in fields {
-					if field.name == name {
-						return Some((field.ty, ty, field.public));
+			ResolvedType::Struct { .. } => {
+				let mut queue = vec![ty];
+				let mut visited = HashSet::new();
+				while let Some(current) = queue.pop() {
+					if !visited.insert(current) {
+						continue;
 					}
-				}
-				if let Some(extends) = extends {
-					return self.lookup_field_info(*extends, name);
+					let ResolvedType::Struct {
+						fields,
+						extends,
+						..
+					} = self.arena.get(current) else {
+						continue;
+					};
+					for field in fields {
+						if field.name == name {
+							return Some((field.ty, current, field.public));
+						}
+					}
+					self.push_inheritance_bases(extends, &mut queue, &mut visited);
 				}
 				None
 			}
@@ -6401,14 +6494,24 @@ impl Pass4State {
 
 	fn lookup_method_info(&self, ty: TypeId, name: &str) -> Option<(TypeId, TypeId, bool)> {
 		match self.arena.get(ty) {
-			ResolvedType::Struct {
-				methods, extends, ..
-			} => {
-				if let Some(method) = methods.get(name) {
-					return Some((method.ty, ty, method.public));
-				}
-				if let Some(extends) = extends {
-					return self.lookup_method_info(*extends, name);
+			ResolvedType::Struct { .. } => {
+				let mut queue = vec![ty];
+				let mut visited = HashSet::new();
+				while let Some(current) = queue.pop() {
+					if !visited.insert(current) {
+						continue;
+					}
+					let ResolvedType::Struct {
+						methods,
+						extends,
+						..
+					} = self.arena.get(current) else {
+						continue;
+					};
+					if let Some(method) = methods.get(name) {
+						return Some((method.ty, current, method.public));
+					}
+					self.push_inheritance_bases(extends, &mut queue, &mut visited);
 				}
 				None
 			}
@@ -7463,23 +7566,36 @@ impl Semantics {
 		}
 	}
 
+	fn push_inheritance_bases(
+		&self,
+		bases: &[TypeId],
+		queue: &mut Vec<TypeId>,
+		visited: &mut HashSet<TypeId>,
+	) {
+		for base in bases {
+			let base = self.unwrap_inheritance_type(*base);
+			if !visited.contains(&base) {
+				queue.push(base);
+			}
+		}
+	}
+
 	fn is_child_of(&self, child: TypeId, parent: TypeId) -> bool {
-		let mut current = self.unwrap_inheritance_type(child);
 		let parent = self.unwrap_inheritance_type(parent);
-		loop {
+		let mut queue = vec![self.unwrap_inheritance_type(child)];
+		let mut visited = HashSet::new();
+		while let Some(current) = queue.pop() {
 			if current == parent {
 				return true;
 			}
-			match self.arena.get(current) {
-				ResolvedType::Struct { extends, .. } => {
-					let Some(extends) = extends else {
-						return false;
-					};
-					current = self.unwrap_inheritance_type(*extends);
-				}
-				_ => return false,
+			if !visited.insert(current) {
+				continue;
+			}
+			if let ResolvedType::Struct { extends, .. } = self.arena.get(current) {
+				self.push_inheritance_bases(extends, &mut queue, &mut visited);
 			}
 		}
+		false
 	}
 
 	fn can_access_member(&self, owner: TypeId, ctx_self: Option<TypeId>) -> bool {
@@ -7512,16 +7628,26 @@ impl Semantics {
 
 	fn lookup_field_info(&self, ty: TypeId, name: &str) -> Option<(TypeId, TypeId, bool)> {
 		match self.arena.get(ty) {
-			ResolvedType::Struct {
-				fields, extends, ..
-			} => {
-				for field in fields {
-					if field.name == name {
-						return Some((field.ty, ty, field.public));
+			ResolvedType::Struct { .. } => {
+				let mut queue = vec![ty];
+				let mut visited = HashSet::new();
+				while let Some(current) = queue.pop() {
+					if !visited.insert(current) {
+						continue;
 					}
-				}
-				if let Some(extends) = extends {
-					return self.lookup_field_info(*extends, name);
+					let ResolvedType::Struct {
+						fields,
+						extends,
+						..
+					} = self.arena.get(current) else {
+						continue;
+					};
+					for field in fields {
+						if field.name == name {
+							return Some((field.ty, current, field.public));
+						}
+					}
+					self.push_inheritance_bases(extends, &mut queue, &mut visited);
 				}
 				None
 			}
@@ -7563,14 +7689,24 @@ impl Semantics {
 
 	fn lookup_method_info(&self, ty: TypeId, name: &str) -> Option<(TypeId, TypeId, bool)> {
 		match self.arena.get(ty) {
-			ResolvedType::Struct {
-				methods, extends, ..
-			} => {
-				if let Some(method) = methods.get(name) {
-					return Some((method.ty, ty, method.public));
-				}
-				if let Some(extends) = extends {
-					return self.lookup_method_info(*extends, name);
+			ResolvedType::Struct { .. } => {
+				let mut queue = vec![ty];
+				let mut visited = HashSet::new();
+				while let Some(current) = queue.pop() {
+					if !visited.insert(current) {
+						continue;
+					}
+					let ResolvedType::Struct {
+						methods,
+						extends,
+						..
+					} = self.arena.get(current) else {
+						continue;
+					};
+					if let Some(method) = methods.get(name) {
+						return Some((method.ty, current, method.public));
+					}
+					self.push_inheritance_bases(extends, &mut queue, &mut visited);
 				}
 				None
 			}
