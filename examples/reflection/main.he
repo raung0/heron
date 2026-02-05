@@ -9,11 +9,12 @@ use core.reflect as rf
 // }
 
 // NOTE: Doesn't handle reference fields!
+// rf.Output is a black box type
 impl_clone :: fn (ty: rf.TypeInfo) -> rf.Output {
 	builder := rf.Builder()
 	match &v in ty {
 		case rf.StructTypeInfo -> {
-			// <: <interface> :> returns a blackbox reference to an interface. Self can be used here if this is a static constexpr function in an interface.
+			// <: <interface> :> returns a black box reference to an interface. Self can be used here if this is a static constexpr function in an interface.
 			builder.add_implements(<: Clone :>)
 			builder.add_function_declaration("clone", fn {
 				// [: <type> :] returns a TypeInfo.
