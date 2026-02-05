@@ -1,0 +1,80 @@
+package main
+
+use core.reflect as rf
+
+// Commented because Clone is in the prelude, no need to define twice.
+//
+// Clone :: interface {
+// 	clone := fn(self: &Self) -> Self ..
+// }
+
+// NOTE: Doesn't handle reference fields!
+impl_clone :: fn (ty: rf.TypeInfo) -> rf.Output {
+	builder := rf.Builder()
+	match &v in ty {
+		case rf.StructTypeInfo -> {
+			// <: <interface> :> returns a blackbox reference to an interface. Self can be used here if this is a static constexpr function in an interface.
+			builder.add_implements(<: Clone :>)
+			builder.add_function_declaration("clone", fn {
+				// [: <type> :] returns a TypeInfo.
+				builder.add_function_argument("self", [: &Self :])
+				builder.add_function_return([: Self :])
+				builder.add_function_body(fn {
+					// Takes in an optional argument that is the type to instantiate
+					// Equivalent of SomeType .{ ... }
+					builder.add_initializer_list([: Self :], fn {
+						for &field in v.fields.iter() {
+							builder.add_named_field_to_initializer_list(&field.name)
+							// The value for the field
+							if field.type.copyable {
+								builder.add_binary_expression(rf.Operator.Dot)
+								builder.add_id("self")
+								builder.add_id(&field.name)
+							} else {
+								builder.add_binary_expression(rf.Operator.Dot) // Next is LHS and RHS of the binary expression
+								{ // The field
+									builder.add_binary_expression(rf.Operator.Dot)
+									builder.add_id("self")
+									builder.add_id(&field.name)
+								}
+								builder.add_function_call("clone", fn {
+									// Can add function call arguments with add_function_call_argument, but since there are none, we can just ignore this
+								})
+							}
+						}
+					})
+				})
+			})
+		}
+		case _ -> {
+			builder.error("Unimplemented case")
+		}
+	}
+
+	builder.build()
+}
+
+// There's a built-in for this, which can be accessed using Clone.derive().
+// derive() is a static function in the Clone interface that does pretty much
+// whatever impl_clone() does.
+#impl_clone
+Inventory :: struct {
+	// ...
+}
+
+#impl_clone
+Player :: struct {
+	hp: i32 = 8
+	inventory: Inventory = .{}
+}
+
+move_player := fn(player: Player) {
+	// ...
+}
+
+main := fn {
+	player := Player .{}
+	move_player(player.clone());
+	move_player(player);
+}
+
