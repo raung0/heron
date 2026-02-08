@@ -1,8 +1,8 @@
 # Heron
 
 Heron is a general-purpose systems programming language with a focus on
-simplicity, safety, and performance. It features a modern type system and
-compile-time code execution.
+safety, and performance. It features a modern type system and compile-time code
+execution.
 
 ## Quick Start
 
