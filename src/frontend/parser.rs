@@ -2558,16 +2558,21 @@ impl<'a> Parser<'a> {
 						}))
 					}
 					_ => {
-						// [<id>]T or [<id>.<id>...]T
 						let size =
-							match self.parse_array_size_idish() {
-								Ok(size) => size,
-								Err(err) => {
+							match self.parse_expression_with_stop(&[
+								TokenValue::RBracket,
+							]) {
+								Ok(size_expr) => {
+									size_expr.to_string()
+								}
+								Err(_) => {
 									let _ = self.recover_to(&[TokenValue::RBracket], false);
 									if self.cur.v == TokenValue::RBracket {
-                                    let _ = self.next();
-                                }
-									return Err(err);
+										let _ = self.next();
+									}
+									return Err(ParseError::InvalidArraySize(
+										self.cur.location.clone(),
+									));
 								}
 							};
 						if self.cur.v != TokenValue::RBracket {
@@ -2612,36 +2617,6 @@ impl<'a> Parser<'a> {
 				TokenValue::Id("type".to_string()),
 			)),
 		}
-	}
-
-	fn parse_array_size_idish(&mut self) -> Result<String, ParseError> {
-		let mut size = String::new();
-
-		let TokenValue::Id(name) = &self.cur.v else {
-			return Err(ParseError::InvalidArraySize(self.cur.location.clone()));
-		};
-		size.push_str(name);
-		self.next()?;
-
-		while matches!(
-			self.cur.v,
-			TokenValue::Op {
-				op: Operator::Dot,
-				has_equals: false
-			}
-		) {
-			self.next()?; // consume '.'
-			let TokenValue::Id(name) = &self.cur.v else {
-				return Err(ParseError::InvalidArraySize(
-					self.cur.location.clone(),
-				));
-			};
-			size.push('.');
-			size.push_str(name);
-			self.next()?;
-		}
-
-		Ok(size)
 	}
 
 	fn parse_fn_type(&mut self) -> Result<Box<Type>, ParseError> {
@@ -6020,17 +5995,32 @@ mod tests {
 	}
 
 	#[test]
-	fn array_size_must_be_idish() {
-		let err = parse_expr(Lexer::new(
-			"x: [Direction^]int".to_string(),
+	fn array_size_allows_arithmetic_expression() {
+		let ast = parse_expr(Lexer::new(
+			"x: [1 + 2 * 3]int".to_string(),
 			"<test>".to_string(),
 		))
-		.err()
-		.expect("expected error");
-		match err {
-			ParseError::InvalidArraySize(_) => {}
-			_ => panic!("expected InvalidArraySize"),
-		}
+		.expect("expected array type declaration");
+		let (_constexpr, _names, types, _values, _mutable) =
+			expect_declaration_multi(ast.as_ref());
+		let (size, underlying) = expect_type_array(types[0].as_ref());
+		assert!(size.contains("BinExp"));
+		assert!(size.contains("op: Add"));
+		assert!(size.contains("op: Mul"));
+		assert_eq!(*underlying, crate::frontend::Type::Id("int".to_string()));
+	}
+
+	#[test]
+	fn array_size_invalid_expression_reports_error() {
+		let mut lexer = Lexer::new("x: [1 + ]int".to_string(), "<test>".to_string());
+		let mut parser = Parser::new(&mut lexer).expect("parser init");
+		let _ = parser.parse();
+		let errors = parser.take_errors();
+		assert!(
+			errors.iter()
+				.any(|e| matches!(e, ParseError::InvalidArraySize(_))),
+			"expected InvalidArraySize parse error"
+		);
 	}
 
 	#[test]
