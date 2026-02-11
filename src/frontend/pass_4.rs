@@ -9030,6 +9030,14 @@ mod tests {
 	}
 
 	#[test]
+	fn keeps_type_generic_name_args_as_type_level_names() {
+		let (_typed, _resolved, errors, warnings) =
+			run_fixture("testdata/pass4_generic_type_name_param_ok", Vec::new());
+		assert!(errors.is_empty(), "errors: {errors:?}");
+		assert!(warnings.is_empty(), "warnings: {warnings:?}");
+	}
+
+	#[test]
 	fn const_expr_key_is_stable_for_nested_records_and_arrays() {
 		use std::collections::HashMap;
 
@@ -9068,6 +9076,16 @@ mod tests {
 		let first_key = Pass4State::const_value_key(&ConstValue::Record(first));
 		let second_key = Pass4State::const_value_key(&ConstValue::Record(second));
 		assert_eq!(first_key, second_key);
+	}
+
+	#[test]
+	#[should_panic(expected = "unsupported type-level expression shape")]
+	fn expr_key_panics_on_unsupported_type_level_shape() {
+		let expr = AST::from(
+			SourceLocation::new_from_file("<test>".to_string()),
+			ASTValue::Return(None),
+		);
+		let _ = Pass4State::expr_key_from_ast(expr.as_ref());
 	}
 
 	#[test]
