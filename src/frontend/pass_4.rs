@@ -3,13 +3,13 @@ use std::fs::read_to_string;
 
 use crate::frontend::{
 	AST, ASTValue, BuiltinType, ConstExprKey, ConstValue, CtfeEngine, CtfeLimits,
-	EnumVariantInfo, FieldInfo, FrontendError, GenericArg, GenericParam, InitializerItem,
-	MatchCase, MatchCasePattern, MethodInfo, ModuleExports, ModuleId, ModuleImports,
-	ResolvedGenericArg, ResolvedProgram, ResolvedType, SourceLocation, Type, TypeArena, TypeId,
-	TypeLevelExprKey, TypedAst, TypedEnsuresClause, TypedEnumVariant, TypedFnBody,
-	TypedFnParam, TypedGenericArg, TypedGenericParam, TypedInitializerItem, TypedMatchBinder,
-	TypedMatchCase, TypedMatchCasePattern, TypedModule, TypedPostClause, TypedProgram,
-	TypedValue,
+	EnumVariantInfo, ExprKey, FieldInfo, FrontendError, GenericArg, GenericExprArgKey,
+	GenericParam, InitializerItem, MatchCase, MatchCasePattern, MethodInfo, ModuleExports,
+	ModuleId, ModuleImports, ResolvedGenericArg, ResolvedProgram, ResolvedType, SourceLocation,
+	Type, TypeArena, TypeId, TypeLevelExprKey, TypedAst, TypedEnsuresClause, TypedEnumVariant,
+	TypedFnBody, TypedFnParam, TypedGenericArg, TypedGenericParam, TypedInitializerItem,
+	TypedMatchBinder, TypedMatchCase, TypedMatchCasePattern, TypedModule, TypedPostClause,
+	TypedProgram, TypedValue,
 };
 
 pub struct Pass4Result {
@@ -1999,6 +1999,10 @@ impl Pass4State {
 				| ASTValue::Union { .. } | ASTValue::RawUnion { .. }
 				| ASTValue::Newtype { .. } | ASTValue::Alias { .. }
 		)
+	}
+
+	fn is_ctfe_bindable_value(value: &AST) -> bool {
+		matches!(value.v, ASTValue::Fn { .. }) || Self::should_eval_constexpr_value(value)
 	}
 
 	#[allow(clippy::vec_box)]
@@ -6452,8 +6456,12 @@ impl Pass4State {
 					self_type,
 					location,
 				);
+				let generic_params = self.type_generic_params_for_type_id(base_ty);
 				let mut resolved_args = Vec::new();
-				for arg in args {
+				for (idx, arg) in args.iter().enumerate() {
+					let param = generic_params
+						.as_ref()
+						.and_then(|params| params.get(idx));
 					let resolved = match arg {
 						GenericArg::Type(ty) => {
 							ResolvedGenericArg::Type(self.resolve_type(
@@ -6471,7 +6479,25 @@ impl Pass4State {
 							),
 						),
 						GenericArg::Name(name) => {
-							ResolvedGenericArg::Name(name.clone())
+							if matches!(
+								param,
+								Some(GenericParam::Value { .. })
+							) {
+								let id_expr = AST::from(
+									location.clone(),
+									ASTValue::Id(name.clone()),
+								);
+								ResolvedGenericArg::Expr(
+									self.canonicalize_type_level_expr(
+										module_id,
+										id_expr.as_ref(),
+									),
+								)
+							} else {
+								ResolvedGenericArg::Name(
+									name.clone(),
+								)
+							}
 						}
 					};
 					resolved_args.push(resolved);
@@ -6699,13 +6725,137 @@ impl Pass4State {
 		module_id: &ModuleId,
 		expr: &AST,
 	) -> TypeLevelExprKey {
+		if !self.type_level_expr_is_ctfe_evaluable(module_id, expr) {
+			return TypeLevelExprKey::Expr(Self::expr_key_from_ast(expr));
+		}
 		let mut engine = self.build_module_ctfe_engine(module_id);
 		if let Ok(value) = engine.eval_expr(expr) {
 			if let Some(key) = Self::const_value_key(&value) {
 				return TypeLevelExprKey::Ctfe(key);
 			}
 		}
-		TypeLevelExprKey::Ast(Box::new(expr.clone()))
+		TypeLevelExprKey::Expr(Self::expr_key_from_ast(expr))
+	}
+
+	fn type_level_expr_is_ctfe_evaluable(&self, module_id: &ModuleId, expr: &AST) -> bool {
+		let Some(module) = self.modules.get(module_id) else {
+			return false;
+		};
+		let (ASTValue::ExprList { items, .. } | ASTValue::ExprListNoScope { items, .. }) =
+			&module.ast.v
+		else {
+			return false;
+		};
+
+		let mut constexpr_names = HashSet::new();
+		for item in items {
+			let node = Self::unwrap_pub(item.as_ref());
+			match &node.v {
+				ASTValue::DeclarationConstexpr(name, value) => {
+					if Self::is_ctfe_bindable_value(value.as_ref()) {
+						constexpr_names.insert(name.clone());
+					}
+				}
+				ASTValue::DeclarationMulti {
+					names,
+					values: Some(values),
+					constexpr: true,
+					..
+				} => {
+					for (idx, name) in names.iter().enumerate() {
+						let Some(value) =
+							values.get(idx).or_else(|| values.first())
+						else {
+							continue;
+						};
+						if Self::is_ctfe_bindable_value(value.as_ref()) {
+							constexpr_names.insert(name.clone());
+						}
+					}
+				}
+				_ => {}
+			}
+		}
+
+		let mut ids = VecDeque::new();
+		Self::collect_ids_in_ast(expr, &mut ids);
+		while let Some(name) = ids.pop_front() {
+			if name == "true" || name == "false" {
+				continue;
+			}
+			if !constexpr_names.contains(&name) {
+				return false;
+			}
+		}
+		true
+	}
+
+	fn expr_key_from_ast(expr: &AST) -> ExprKey {
+		match &expr.v {
+			ASTValue::Id(name) => ExprKey::Id(name.clone()),
+			ASTValue::DotId(name) => ExprKey::DotId(name.clone()),
+			ASTValue::Integer(value) => ExprKey::Integer(*value),
+			ASTValue::Float(value) => ExprKey::Float(value.to_bits()),
+			ASTValue::Char(value) => ExprKey::Char(*value),
+			ASTValue::String(value) => ExprKey::String(value.clone()),
+			ASTValue::UnaryPlus(inner) => {
+				ExprKey::UnaryPlus(Box::new(Self::expr_key_from_ast(inner)))
+			}
+			ASTValue::UnaryMinus(inner) => {
+				ExprKey::UnaryMinus(Box::new(Self::expr_key_from_ast(inner)))
+			}
+			ASTValue::Not(inner) => {
+				ExprKey::Not(Box::new(Self::expr_key_from_ast(inner)))
+			}
+			ASTValue::BinExpr {
+				op,
+				has_eq,
+				lhs,
+				rhs,
+			} => ExprKey::Bin {
+				op: op.clone(),
+				has_eq: *has_eq,
+				lhs: Box::new(Self::expr_key_from_ast(lhs)),
+				rhs: Box::new(Self::expr_key_from_ast(rhs)),
+			},
+			ASTValue::Call { callee, args } => ExprKey::Call {
+				callee: Box::new(Self::expr_key_from_ast(callee)),
+				args: args
+					.iter()
+					.map(|arg| Self::expr_key_from_ast(arg))
+					.collect(),
+			},
+			ASTValue::GenericApply { target, args } => ExprKey::GenericApply {
+				target: Box::new(Self::expr_key_from_ast(target)),
+				args: args
+					.iter()
+					.map(|arg| match arg {
+						GenericArg::Type(ty) => {
+							GenericExprArgKey::Type(ty.to_string())
+						}
+						GenericArg::Expr(expr) => GenericExprArgKey::Expr(
+							Self::expr_key_from_ast(expr),
+						),
+						GenericArg::Name(name) => {
+							GenericExprArgKey::Name(name.clone())
+						}
+					})
+					.collect(),
+			},
+			ASTValue::Index { target, indices } => ExprKey::Index {
+				target: Box::new(Self::expr_key_from_ast(target)),
+				indices: indices
+					.iter()
+					.map(|index| Self::expr_key_from_ast(index))
+					.collect(),
+			},
+			_ => {
+				panic!(
+					"internal compiler error: unsupported type-level expression shape in pass4 canonicalization: {}",
+					expr
+				)
+			}
+		}
 	}
 
 	fn refine_type_location(&self, location: &SourceLocation, name: &str) -> SourceLocation {
@@ -6748,6 +6898,80 @@ impl Pass4State {
 			out.range.end = (col + (name.len() as i32), line_no);
 		}
 		out
+	}
+
+	fn type_generic_params_for_type_id(&self, ty_id: TypeId) -> Option<Vec<GenericParam>> {
+		let mut base_id = ty_id;
+		if let ResolvedType::GenericInstance { base, .. } = self.arena.get(base_id) {
+			base_id = *base;
+		}
+		let (module_id, type_name) = match self.arena.get(base_id) {
+			ResolvedType::Struct { module, name, .. }
+			| ResolvedType::Union { module, name, .. }
+			| ResolvedType::RawUnion { module, name, .. }
+			| ResolvedType::Newtype { module, name, .. }
+			| ResolvedType::Alias { module, name, .. }
+			| ResolvedType::Enum { module, name, .. } => (module, name),
+			_ => return None,
+		};
+		self.type_generic_params_from_ast(module_id, type_name)
+	}
+
+	fn type_generic_params_from_ast(
+		&self,
+		module_id: &ModuleId,
+		type_name: &str,
+	) -> Option<Vec<GenericParam>> {
+		let module = self.modules.get(module_id)?;
+		let (ASTValue::ExprList { items, .. } | ASTValue::ExprListNoScope { items, .. }) =
+			&module.ast.v
+		else {
+			return None;
+		};
+		for item in items {
+			let node = Self::unwrap_pub(item.as_ref());
+			match &node.v {
+				ASTValue::DeclarationConstexpr(name, value)
+					if name == type_name =>
+				{
+					match &value.v {
+						ASTValue::Struct { generics, .. }
+						| ASTValue::Union { generics, .. }
+						| ASTValue::RawUnion { generics, .. } => {
+							return Some(generics.clone());
+						}
+						_ => return Some(Vec::new()),
+					}
+				}
+				ASTValue::DeclarationMulti {
+					names,
+					values: Some(values),
+					constexpr: true,
+					..
+				} => {
+					for (idx, name) in names.iter().enumerate() {
+						if name != type_name {
+							continue;
+						}
+						let Some(value) =
+							values.get(idx).or_else(|| values.first())
+						else {
+							continue;
+						};
+						match &value.v {
+							ASTValue::Struct { generics, .. }
+							| ASTValue::Union { generics, .. }
+							| ASTValue::RawUnion { generics, .. } => {
+								return Some(generics.clone());
+							}
+							_ => return Some(Vec::new()),
+						}
+					}
+				}
+				_ => {}
+			}
+		}
+		None
 	}
 
 	fn resolve_generic_params(
@@ -8795,6 +9019,55 @@ mod tests {
 			run_fixture("testdata/pass4_generic_value_ctfe_ok", Vec::new());
 		assert!(errors.is_empty(), "errors: {errors:?}");
 		assert!(warnings.is_empty(), "warnings: {warnings:?}");
+	}
+
+	#[test]
+	fn allows_value_generic_args_with_const_name_equivalence() {
+		let (_typed, _resolved, errors, warnings) =
+			run_fixture("testdata/pass4_generic_value_ctfe_name_equiv", Vec::new());
+		assert!(errors.is_empty(), "errors: {errors:?}");
+		assert!(warnings.is_empty(), "warnings: {warnings:?}");
+	}
+
+	#[test]
+	fn const_expr_key_is_stable_for_nested_records_and_arrays() {
+		use std::collections::HashMap;
+
+		let mut first = HashMap::new();
+		first.insert(
+			"meta".to_string(),
+			ConstValue::Record(HashMap::from([
+				("name".to_string(), ConstValue::String("x".to_string())),
+				(
+					"nums".to_string(),
+					ConstValue::Array(vec![
+						ConstValue::Integer(1),
+						ConstValue::Integer(2),
+					]),
+				),
+			])),
+		);
+		first.insert("flag".to_string(), ConstValue::Bool(true));
+
+		let mut second = HashMap::new();
+		second.insert("flag".to_string(), ConstValue::Bool(true));
+		second.insert(
+			"meta".to_string(),
+			ConstValue::Record(HashMap::from([
+				(
+					"nums".to_string(),
+					ConstValue::Array(vec![
+						ConstValue::Integer(1),
+						ConstValue::Integer(2),
+					]),
+				),
+				("name".to_string(), ConstValue::String("x".to_string())),
+			])),
+		);
+
+		let first_key = Pass4State::const_value_key(&ConstValue::Record(first));
+		let second_key = Pass4State::const_value_key(&ConstValue::Record(second));
+		assert_eq!(first_key, second_key);
 	}
 
 	#[test]

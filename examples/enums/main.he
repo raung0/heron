@@ -18,8 +18,8 @@ DIRECTIONS_VECTOR :: [Direction]core.math.Vector<f32, 2> .{
 	.Left  = .{ -1, 0 },
 	.Right = .{  1, 0 },
 	// heron-format on
-	.Left  = .{ -1, 0 },
-	.Right = .{ 1, 0 }
+	// .Left  = .{ -1, 0 },
+	// .Right = .{ 1, 0 }
 }
 
 pub main := fn {

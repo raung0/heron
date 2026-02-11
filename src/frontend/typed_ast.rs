@@ -1,9 +1,7 @@
 use std::collections::HashMap;
 use std::fmt;
 
-use crate::frontend::{
-	AST, ModuleExports, ModuleId, ModuleImports, Operator, SourceLocation, Trivia,
-};
+use crate::frontend::{ModuleExports, ModuleId, ModuleImports, Operator, SourceLocation, Trivia};
 
 pub type TypeId = usize;
 
@@ -102,7 +100,45 @@ pub enum ResolvedGenericArg {
 #[derive(Clone, Debug, PartialEq)]
 pub enum TypeLevelExprKey {
 	Ctfe(ConstExprKey),
-	Ast(Box<AST>),
+	Expr(ExprKey),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum ExprKey {
+	Id(String),
+	DotId(String),
+	Integer(u64),
+	Float(u64),
+	Char(char),
+	String(String),
+	UnaryPlus(Box<ExprKey>),
+	UnaryMinus(Box<ExprKey>),
+	Not(Box<ExprKey>),
+	Bin {
+		op: Operator,
+		has_eq: bool,
+		lhs: Box<ExprKey>,
+		rhs: Box<ExprKey>,
+	},
+	Call {
+		callee: Box<ExprKey>,
+		args: Vec<ExprKey>,
+	},
+	GenericApply {
+		target: Box<ExprKey>,
+		args: Vec<GenericExprArgKey>,
+	},
+	Index {
+		target: Box<ExprKey>,
+		indices: Vec<ExprKey>,
+	},
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum GenericExprArgKey {
+	Type(String),
+	Expr(ExprKey),
+	Name(String),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -165,7 +201,74 @@ impl fmt::Display for TypeLevelExprKey {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		match self {
 			TypeLevelExprKey::Ctfe(value) => write!(f, "ctfe:{value}"),
-			TypeLevelExprKey::Ast(expr) => write!(f, "{expr}"),
+			TypeLevelExprKey::Expr(expr) => write!(f, "{expr}"),
+		}
+	}
+}
+
+impl fmt::Display for GenericExprArgKey {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		match self {
+			GenericExprArgKey::Type(ty) => write!(f, "{ty}"),
+			GenericExprArgKey::Expr(expr) => write!(f, "{expr}"),
+			GenericExprArgKey::Name(name) => write!(f, "{name}"),
+		}
+	}
+}
+
+impl fmt::Display for ExprKey {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		match self {
+			ExprKey::Id(name) | ExprKey::DotId(name) => write!(f, "{name}"),
+			ExprKey::Integer(value) => write!(f, "{value}"),
+			ExprKey::Float(bits) => write!(f, "float:{bits}"),
+			ExprKey::Char(value) => write!(f, "'{value}'"),
+			ExprKey::String(value) => write!(f, "{value:?}"),
+			ExprKey::UnaryPlus(inner) => write!(f, "(+{inner})"),
+			ExprKey::UnaryMinus(inner) => write!(f, "(-{inner})"),
+			ExprKey::Not(inner) => write!(f, "(!{inner})"),
+			ExprKey::Bin {
+				op,
+				has_eq,
+				lhs,
+				rhs,
+			} => {
+				let mut op_text = format!("{op}");
+				if *has_eq {
+					op_text.push('=');
+				}
+				write!(f, "({lhs} {op_text} {rhs})")
+			}
+			ExprKey::Call { callee, args } => {
+				write!(f, "{callee}(")?;
+				for (idx, arg) in args.iter().enumerate() {
+					if idx > 0 {
+						write!(f, ", ")?;
+					}
+					write!(f, "{arg}")?;
+				}
+				write!(f, ")")
+			}
+			ExprKey::GenericApply { target, args } => {
+				write!(f, "{target}<")?;
+				for (idx, arg) in args.iter().enumerate() {
+					if idx > 0 {
+						write!(f, ", ")?;
+					}
+					write!(f, "{arg}")?;
+				}
+				write!(f, ">")
+			}
+			ExprKey::Index { target, indices } => {
+				write!(f, "{target}[")?;
+				for (idx, index) in indices.iter().enumerate() {
+					if idx > 0 {
+						write!(f, ", ")?;
+					}
+					write!(f, "{index}")?;
+				}
+				write!(f, "]")
+			}
 		}
 	}
 }

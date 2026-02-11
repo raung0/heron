@@ -1,0 +1,9 @@
+package main
+
+N :: 3
+
+Vec :: struct<M: usize> {}
+
+takes := fn (value: Vec<N>) -> int do 0
+
+main := fn (value: Vec<N + 0>) -> int do takes(value)
