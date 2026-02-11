@@ -7,6 +7,7 @@ mod pass_1;
 mod pass_2;
 mod pass_3;
 mod pass_4;
+mod pass_5;
 mod passes;
 mod typed_ast;
 

@@ -101,10 +101,10 @@ impl Pass4State {
 			return TypeLevelExprKey::Expr(Self::expr_key_from_ast(expr));
 		}
 		let mut engine = self.build_module_ctfe_engine(module_id);
-		if let Ok(value) = engine.eval_expr(expr) {
-			if let Some(key) = Self::const_value_key(&value) {
-				return TypeLevelExprKey::Ctfe(key);
-			}
+		if let Ok(value) = engine.eval_expr(expr)
+			&& let Some(key) = Self::const_value_key(&value)
+		{
+			return TypeLevelExprKey::Ctfe(key);
 		}
 		TypeLevelExprKey::Expr(Self::expr_key_from_ast(expr))
 	}
