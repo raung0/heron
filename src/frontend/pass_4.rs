@@ -4434,26 +4434,18 @@ impl Pass4State {
 								method_name,
 								&node.location,
 							);
-						if let Some((
-							is_constexpr,
-							is_runtimeable,
-							decl_location,
-						)) = self.fn_flags_from_ast(
-							&module_id,
+						self.maybe_require_runtimeable_for_call(
+							ctx,
+							&node.location,
 							method_name,
-							"runtimeable",
-						) && !ctx.in_constexpr && is_constexpr && self
-							.call_has_runtime_dependent_args(
-								&normalized_args,
-								ctx,
-							) && !is_runtimeable
-						{
-							self.errors.push(FrontendError::ConstexprCallNeedsRuntimeable {
-								location: node.location.clone(),
-								callee: method_name.clone(),
-								declaration_location: decl_location,
-							});
-						}
+							self.fn_flags_from_ast(
+								&module_id,
+								method_name,
+								"runtimeable",
+							),
+							&normalized_args,
+							None,
+						);
 						let mut return_ty = self.builtins.unknown_id;
 						let typed_args =
 							if let ResolvedType::Fn {
@@ -4569,27 +4561,18 @@ impl Pass4State {
 								method_name,
 								&node.location,
 							);
-						if let Some((
-							is_constexpr,
-							is_runtimeable,
-							decl_location,
-						)) = self.method_flags_from_ast(
-							lhs_ty,
+						self.maybe_require_runtimeable_for_call(
+							ctx,
+							&node.location,
 							method_name,
-							"runtimeable",
-						) && !ctx.in_constexpr && is_constexpr && (self
-							.expr_uses_runtime_value(lhs.as_ref(), ctx)
-							|| self.call_has_runtime_dependent_args(
-								&normalized_args,
-								ctx,
-							)) && !is_runtimeable
-						{
-							self.errors.push(FrontendError::ConstexprCallNeedsRuntimeable {
-								location: node.location.clone(),
-								callee: method_name.clone(),
-								declaration_location: decl_location,
-							});
-						}
+							self.method_flags_from_ast(
+								lhs_ty,
+								method_name,
+								"runtimeable",
+							),
+							&normalized_args,
+							Some(lhs.as_ref()),
+						);
 						if let Some(param_defs) = param_defs.as_deref() {
 							let (required, total) = self
 								.param_count_range(param_defs, 1);
@@ -4914,19 +4897,15 @@ impl Pass4State {
 				&callee_display,
 				&node.location,
 			);
-			if let Some(name) = callee_name.as_ref()
-				&& let Some((is_constexpr, is_runtimeable, decl_location)) =
-					self.fn_flags_from_ast(ctx.module_id, name, "runtimeable")
-				&& !ctx.in_constexpr && is_constexpr
-				&& self.call_has_runtime_dependent_args(&normalized_args, ctx)
-				&& !is_runtimeable
-			{
-				self.errors
-					.push(FrontendError::ConstexprCallNeedsRuntimeable {
-						location: node.location.clone(),
-						callee: name.clone(),
-						declaration_location: decl_location,
-					});
+			if let Some(name) = callee_name.as_ref() {
+				self.maybe_require_runtimeable_for_call(
+					ctx,
+					&node.location,
+					name,
+					self.fn_flags_from_ast(ctx.module_id, name, "runtimeable"),
+					&normalized_args,
+					None,
+				);
 			}
 			if let Some(name) = callee_name.as_ref() {
 				if let Some(ast_params) =
@@ -7109,6 +7088,45 @@ impl Pass4State {
 	fn call_has_runtime_dependent_args(&self, args: &[Box<AST>], ctx: &TypeContext) -> bool {
 		args.iter()
 			.any(|arg| self.expr_uses_runtime_value(arg.as_ref(), ctx))
+	}
+
+	fn call_depends_on_runtime_values(
+		&self,
+		args: &[Box<AST>],
+		receiver: Option<&AST>,
+		ctx: &TypeContext,
+	) -> bool {
+		receiver.map(|node| self.expr_uses_runtime_value(node, ctx))
+			.unwrap_or(false) || self.call_has_runtime_dependent_args(args, ctx)
+	}
+
+	fn maybe_require_runtimeable_for_call(
+		&mut self,
+		ctx: &TypeContext,
+		call_location: &SourceLocation,
+		callee: &str,
+		flags: Option<(bool, bool, SourceLocation)>,
+		args: &[Box<AST>],
+		receiver: Option<&AST>,
+	) {
+		if ctx.in_constexpr {
+			return;
+		}
+		let Some((is_constexpr, is_runtimeable, declaration_location)) = flags else {
+			return;
+		};
+		if !is_constexpr || is_runtimeable {
+			return;
+		}
+		if !self.call_depends_on_runtime_values(args, receiver, ctx) {
+			return;
+		}
+		self.errors
+			.push(FrontendError::ConstexprCallNeedsRuntimeable {
+				location: call_location.clone(),
+				callee: callee.to_string(),
+				declaration_location,
+			});
 	}
 
 	fn expr_uses_runtime_value(&self, node: &AST, ctx: &TypeContext) -> bool {
