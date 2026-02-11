@@ -35,7 +35,7 @@ pub struct ModuleImports {
 #[derive(Clone)]
 pub struct ModuleExports {
 	pub types: HashMap<String, ExportStub>,
-	pub constexprs: HashMap<String, ExportStub>,
+	pub comptimes: HashMap<String, ExportStub>,
 }
 
 #[derive(Clone)]
@@ -422,9 +422,9 @@ fn parse_module(file_path: &str) -> ModuleParseResult {
 
 fn collect_exports(ast: &AST, errors: &mut Vec<FrontendError>) -> ModuleExports {
 	let mut types = HashMap::new();
-	let mut constexprs = HashMap::new();
+	let mut comptimes = HashMap::new();
 	let ASTValue::ExprList { items, .. } = &ast.v else {
-		return ModuleExports { types, constexprs };
+		return ModuleExports { types, comptimes };
 	};
 
 	for item in items {
@@ -432,7 +432,7 @@ fn collect_exports(ast: &AST, errors: &mut Vec<FrontendError>) -> ModuleExports 
 			continue;
 		};
 		match &inner.v {
-			ASTValue::DeclarationConstexpr(name, value) => {
+			ASTValue::DeclarationComptime(name, value) => {
 				if is_type_value(value.as_ref()) {
 					insert_export_value(
 						&mut types,
@@ -443,7 +443,7 @@ fn collect_exports(ast: &AST, errors: &mut Vec<FrontendError>) -> ModuleExports 
 					);
 				} else {
 					insert_export_value(
-						&mut constexprs,
+						&mut comptimes,
 						name.clone(),
 						value.clone(),
 						inner.location.clone(),
@@ -454,7 +454,7 @@ fn collect_exports(ast: &AST, errors: &mut Vec<FrontendError>) -> ModuleExports 
 			ASTValue::DeclarationMulti {
 				names,
 				values: Some(values),
-				constexpr: true,
+				comptime: true,
 				..
 			} => {
 				for (idx, name) in names.iter().enumerate() {
@@ -462,7 +462,7 @@ fn collect_exports(ast: &AST, errors: &mut Vec<FrontendError>) -> ModuleExports 
 						let target = if is_type_value(value.as_ref()) {
 							&mut types
 						} else {
-							&mut constexprs
+							&mut comptimes
 						};
 						insert_export_value(
 							target,
@@ -478,7 +478,7 @@ fn collect_exports(ast: &AST, errors: &mut Vec<FrontendError>) -> ModuleExports 
 		}
 	}
 
-	ModuleExports { types, constexprs }
+	ModuleExports { types, comptimes }
 }
 
 fn is_type_value(node: &AST) -> bool {

@@ -847,10 +847,10 @@ impl Formatter {
 				names,
 				types,
 				values,
-				constexpr,
+				comptime,
 				mutable,
 			} => {
-				if *constexpr
+				if *comptime
 					&& types.is_empty() && names.len() == 1
 					&& values.as_ref().is_some_and(|v| v.len() == 1)
 					&& values
@@ -860,7 +860,7 @@ impl Formatter {
 							matches!(
 								value.v,
 								ASTValue::DeclarationMulti {
-									constexpr: true,
+									comptime: true,
 									..
 								}
 							)
@@ -877,7 +877,7 @@ impl Formatter {
 				{
 					self.out.push_str(&names.join(", "));
 					if types.is_empty() {
-						self.out.push_str(if *constexpr {
+						self.out.push_str(if *comptime {
 							" :: "
 						} else {
 							" := "
@@ -890,7 +890,7 @@ impl Formatter {
 								.collect::<Vec<_>>()
 								.join(", "),
 						);
-						self.out.push_str(if *constexpr {
+						self.out.push_str(if *comptime {
 							" : "
 						} else {
 							" = "
@@ -928,7 +928,7 @@ impl Formatter {
 						names,
 						types,
 						values.as_deref(),
-						*constexpr,
+						*comptime,
 						*mutable,
 					);
 				}
@@ -975,7 +975,7 @@ impl Formatter {
 					self.out.push_str(&self.format_expr(value, 0));
 				}
 			}
-			ASTValue::DeclarationConstexpr(name, value) => {
+			ASTValue::DeclarationComptime(name, value) => {
 				self.out.push_str(name);
 				self.out.push_str(" :: ");
 				if self.is_stmt_value(value) {
@@ -1221,7 +1221,7 @@ impl Formatter {
 		names: &[String],
 		types: &[Box<Type>],
 		values: Option<&[Box<AST>]>,
-		constexpr: bool,
+		comptime: bool,
 		mutable: bool,
 	) {
 		if mutable {
@@ -1243,7 +1243,7 @@ impl Formatter {
 
 		let values_s = values.map(|v| self.format_expr_list_inline(v, ", "));
 
-		match (constexpr, types.is_empty(), values_s) {
+		match (comptime, types.is_empty(), values_s) {
 			(false, true, Some(values_s)) => {
 				self.out.push_str(" := ");
 				self.out.push_str(&values_s);
@@ -1851,10 +1851,10 @@ impl Formatter {
 				names,
 				types,
 				values,
-				constexpr,
+				comptime,
 				mutable: _,
 			} => {
-				if *constexpr
+				if *comptime
 					&& types.is_empty() && names.len() == 1
 					&& values.as_ref().is_some_and(|v| v.len() == 1)
 				{
@@ -1881,7 +1881,7 @@ impl Formatter {
 			| ASTValue::Package { .. }
 			| ASTValue::Use { .. }
 			| ASTValue::Declaration { .. }
-			| ASTValue::DeclarationConstexpr(..)
+			| ASTValue::DeclarationComptime(..)
 			| ASTValue::Set(..)
 			| ASTValue::SetMulti { .. }
 			| ASTValue::Return(..)
@@ -2211,7 +2211,7 @@ impl Formatter {
 		args.iter()
 			.map(|arg| match arg {
 				GenericArg::Type(t) => self.format_type(t),
-				GenericArg::Expr(e) => e.to_string(),
+				GenericArg::Expr(e) => self.format_expr(e, 0),
 				GenericArg::Name(n) => n.clone(),
 			})
 			.collect::<Vec<_>>()
@@ -2219,7 +2219,68 @@ impl Formatter {
 	}
 
 	fn format_type(&self, ty: &Type) -> String {
-		ty.to_string()
+		match ty {
+			Type::Id(name) => name.clone(),
+			Type::Generic { base, args } => {
+				format!("{}<{}>", base, self.format_generic_args(args))
+			}
+			Type::Fn {
+				params,
+				return_type,
+			} => {
+				let params = params
+					.iter()
+					.map(|p| self.format_type(p))
+					.collect::<Vec<_>>()
+					.join(", ");
+				let mut out = format!("fn({params})");
+				if let Some(rt) = return_type {
+					out.push_str(" -> ");
+					out.push_str(&self.format_type(rt));
+				}
+				out
+			}
+			Type::Integer { bit_size, signed } => {
+				format!("{}{}", if *signed { "i" } else { "u" }, bit_size)
+			}
+			Type::Float { bit_size } => format!("f{bit_size}"),
+			Type::Bool => "bool".to_string(),
+			Type::Rune => "rune".to_string(),
+			Type::Pointer { underlying } => {
+				format!("^{}", self.format_type(underlying))
+			}
+			Type::Slice { underlying } => {
+				format!("[]{}", self.format_type(underlying))
+			}
+			Type::Array { size, underlying } => {
+				format!(
+					"[{}]{}",
+					self.format_expr(size, 0),
+					self.format_type(underlying)
+				)
+			}
+			Type::CArray { underlying } => {
+				format!("[^]{}", self.format_type(underlying))
+			}
+			Type::Reference {
+				mutable,
+				lifetime,
+				underlying,
+			} => {
+				let mut out = String::from("&");
+				if let Some(lifetime) = lifetime {
+					out.push('\'');
+					out.push(*lifetime);
+					out.push(' ');
+				}
+				if *mutable {
+					out.push_str("mut ");
+				}
+				out.push_str(&self.format_type(underlying));
+				out
+			}
+			Type::Void => "void".to_string(),
+		}
 	}
 
 	fn bin_op(&self, op: &Operator, has_eq: bool) -> String {
@@ -2298,7 +2359,7 @@ impl Formatter {
 		match &ast.v {
 			ASTValue::Pub(inner) => self.statement_end_line(inner),
 			ASTValue::Declaration { value, .. } => self.statement_end_line(value),
-			ASTValue::DeclarationConstexpr(_, value) => self.statement_end_line(value),
+			ASTValue::DeclarationComptime(_, value) => self.statement_end_line(value),
 
 			ASTValue::DeclarationMulti { values, .. } => values
 				.as_ref()
@@ -2728,9 +2789,9 @@ impl Formatter {
 			names,
 			types,
 			values,
-			constexpr,
+			comptime,
 			mutable: _,
-		} = &value.v && *constexpr
+		} = &value.v && *comptime
 			&& types.is_empty() && names.len() == 1
 			&& values.as_ref().is_some_and(|v| v.len() == 1)
 		{

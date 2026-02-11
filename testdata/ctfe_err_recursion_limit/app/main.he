@@ -1,6 +1,6 @@
 package main
 
-loop :: fn(n: int) -> int {
+loop :: fn (n: int) -> int {
 	loop(n + 1)
 }
 

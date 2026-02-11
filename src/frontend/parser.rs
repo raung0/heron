@@ -3125,7 +3125,7 @@ impl<'a> Parser<'a> {
 					}
 				}
 
-				let (constexpr, values) = match &self.cur.v {
+				let (comptime, values) = match &self.cur.v {
 					TokenValue::Op {
 						op: Operator::Set,
 						has_equals: false,
@@ -3191,7 +3191,7 @@ impl<'a> Parser<'a> {
 						names,
 						types,
 						values,
-						constexpr,
+						comptime,
 						mutable,
 					},
 				)
@@ -4249,13 +4249,13 @@ mod tests {
 	fn expect_declaration_multi(ast: &AST) -> DeclMultiView<'_> {
 		match &ast.v {
 			ASTValue::DeclarationMulti {
-				constexpr,
+				comptime,
 				names,
 				types,
 				values,
 				mutable,
 			} => (
-				*constexpr,
+				*comptime,
 				names.as_slice(),
 				types.as_slice(),
 				values.as_ref().map(|v| v.as_slice()),
@@ -4440,9 +4440,9 @@ mod tests {
 		let ast = parse_expr(Lexer::new("a, b: T, U".to_string(), "<test>".to_string()))
 			.expect("ok");
 
-		let (constexpr, names, types, values, _mutable) =
+		let (comptime, names, types, values, _mutable) =
 			expect_declaration_multi(ast.as_ref());
-		assert!(!constexpr);
+		assert!(!comptime);
 		assert_eq!(names, ["a".to_string(), "b".to_string()]);
 		assert_eq!(types.len(), 2);
 		assert_eq!(
@@ -4461,9 +4461,9 @@ mod tests {
 		let ast = parse_expr(Lexer::new("a, b := 1, 2".to_string(), "<test>".to_string()))
 			.expect("ok");
 
-		let (constexpr, names, types, values, _mutable) =
+		let (comptime, names, types, values, _mutable) =
 			expect_declaration_multi(ast.as_ref());
-		assert!(!constexpr);
+		assert!(!comptime);
 		assert_eq!(names, ["a".to_string(), "b".to_string()]);
 		assert!(types.is_empty());
 		let values = values.expect("expected initializer list");
@@ -4477,9 +4477,9 @@ mod tests {
 		let ast = parse_expr(Lexer::new("mut x := 1".to_string(), "<test>".to_string()))
 			.expect("ok");
 
-		let (constexpr, names, types, values, mutable) =
+		let (comptime, names, types, values, mutable) =
 			expect_declaration_multi(ast.as_ref());
-		assert!(!constexpr);
+		assert!(!comptime);
 		assert!(mutable);
 		assert_eq!(names, ["x".to_string()]);
 		assert!(types.is_empty());
@@ -4496,9 +4496,9 @@ mod tests {
 		))
 		.expect("ok");
 
-		let (constexpr, names, types, values, mutable) =
+		let (comptime, names, types, values, mutable) =
 			expect_declaration_multi(ast.as_ref());
-		assert!(!constexpr);
+		assert!(!comptime);
 		assert!(mutable);
 		assert_eq!(names, ["x".to_string(), "y".to_string()]);
 		assert_eq!(types.len(), 2);
@@ -4509,16 +4509,16 @@ mod tests {
 	}
 
 	#[test]
-	fn decl_constexpr_without_type() {
+	fn decl_comptime_without_type() {
 		let ast = parse_expr(Lexer::new("x :: 1".to_string(), "<test>".to_string()))
 			.expect("ok");
 
-		let (constexpr, names, types, values, _mutable) =
+		let (comptime, names, types, values, _mutable) =
 			expect_declaration_multi(ast.as_ref());
-		assert!(constexpr);
+		assert!(comptime);
 		assert_eq!(names, ["x".to_string()]);
 		assert!(types.is_empty());
-		let values = values.expect("expected constexpr value list");
+		let values = values.expect("expected comptime value list");
 		assert_eq!(values.len(), 1);
 		expect_integer(values[0].as_ref(), 1);
 	}
@@ -4531,7 +4531,7 @@ mod tests {
 		))
 		.expect("ok");
 
-		let (_constexpr, names, types, values, _mutable) =
+		let (_comptime, names, types, values, _mutable) =
 			expect_declaration_multi(ast.as_ref());
 		assert_eq!(names, ["x".to_string()]);
 		assert!(values.is_none());
@@ -4563,7 +4563,7 @@ mod tests {
 		))
 		.expect("ok");
 
-		let (_constexpr, _names, types, _values, _mutable) =
+		let (_comptime, _names, types, _values, _mutable) =
 			expect_declaration_multi(ast.as_ref());
 		assert_eq!(types.len(), 2);
 		match types[0].as_ref() {
@@ -4600,7 +4600,7 @@ mod tests {
 		))
 		.expect("ok");
 
-		let (_constexpr, _names, types, _values, _mutable) =
+		let (_comptime, _names, types, _values, _mutable) =
 			expect_declaration_multi(ast.as_ref());
 		assert_eq!(types.len(), 1);
 		match types[0].as_ref() {
@@ -4712,8 +4712,8 @@ mod tests {
 		.expect("ok");
 
 		let inner = expect_pub(ast.as_ref());
-		let (constexpr, names, types, values, _mutable) = expect_declaration_multi(inner);
-		assert!(!constexpr);
+		let (comptime, names, types, values, _mutable) = expect_declaration_multi(inner);
+		assert!(!comptime);
 		assert_eq!(names, &["main".to_string()]);
 		assert!(types.is_empty());
 		let values = values.expect("values");
@@ -4899,7 +4899,7 @@ mod tests {
 		))
 		.expect("ok");
 
-		let (_constexpr, _names, types, _values, _mutable) =
+		let (_comptime, _names, types, _values, _mutable) =
 			expect_declaration_multi(ast.as_ref());
 		assert_eq!(types.len(), 1);
 		match types[0].as_ref() {
@@ -5786,7 +5786,7 @@ mod tests {
 			"<test>".to_string(),
 		))
 		.expect("ok");
-		let (_constexpr, names, _types, _values, _mutable) =
+		let (_comptime, names, _types, _values, _mutable) =
 			expect_declaration_multi(ast.as_ref());
 		assert_eq!(names, &["operator+".to_string()]);
 	}
@@ -5978,7 +5978,7 @@ mod tests {
 			"<test>".to_string(),
 		))
 		.expect("expected array type declaration");
-		let (_constexpr, _names, types, _values, _mutable) =
+		let (_comptime, _names, types, _values, _mutable) =
 			expect_declaration_multi(ast.as_ref());
 		let (size, underlying) = expect_type_array(types[0].as_ref());
 		assert_eq!(
@@ -6009,7 +6009,7 @@ mod tests {
 		))
 		.expect("ok");
 
-		let (_constexpr, names, types, values, _mutable) =
+		let (_comptime, names, types, values, _mutable) =
 			expect_declaration_multi(ast.as_ref());
 		assert_eq!(names, ["f".to_string()]);
 		assert!(values.is_none());

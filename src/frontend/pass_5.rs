@@ -201,7 +201,7 @@ fn collect_no_reorder_types(program: &TypedProgram) -> HashSet<TypeId> {
 fn collect_no_reorder_from_item(node: &TypedAst, module: &TypedModule, out: &mut HashSet<TypeId>) {
 	let node = unwrap_pub(node);
 	match &node.v {
-		TypedValue::DeclarationConstexpr(name, value)
+		TypedValue::DeclarationComptime(name, value)
 		| TypedValue::Declaration { name, value, .. } => {
 			mark_no_reorder(name, value.as_ref(), module, out);
 		}

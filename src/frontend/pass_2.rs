@@ -228,7 +228,7 @@ fn check_duplicate_declarations(
 				names.extend(decls.iter());
 			}
 			ASTValue::Declaration { name, .. }
-			| ASTValue::DeclarationConstexpr(name, _) => {
+			| ASTValue::DeclarationComptime(name, _) => {
 				names.push(name);
 			}
 			_ => continue,
@@ -260,7 +260,7 @@ fn check_struct_members(items: &[Box<AST>], errors: &mut Vec<FrontendError>) {
 		match &node.v {
 			ASTValue::DeclarationMulti { .. }
 			| ASTValue::Declaration { .. }
-			| ASTValue::DeclarationConstexpr(..) => {}
+			| ASTValue::DeclarationComptime(..) => {}
 			_ => {
 				errors.push(FrontendError::InvalidStructMember {
 					location: node.location.clone(),
@@ -428,10 +428,8 @@ fn is_inside_comptime_declaration(parent: Option<&AST>) -> bool {
 
 	matches!(
 		parent.v,
-		ASTValue::DeclarationMulti {
-			constexpr: true,
-			..
-		} | ASTValue::DeclarationConstexpr(..)
+		ASTValue::DeclarationMulti { comptime: true, .. }
+			| ASTValue::DeclarationComptime(..)
 	)
 }
 

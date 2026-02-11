@@ -441,7 +441,7 @@ pub enum ASTValue {
 		value: Box<AST>,
 		mutable: bool,
 	},
-	DeclarationConstexpr(String, Box<AST>),
+	DeclarationComptime(String, Box<AST>),
 	SetMulti {
 		names: Vec<String>,
 		values: Vec<Box<AST>>,
@@ -450,7 +450,7 @@ pub enum ASTValue {
 		names: Vec<String>,
 		types: Vec<Box<Type>>,
 		values: Option<Vec<Box<AST>>>,
-		constexpr: bool,
+		comptime: bool,
 		mutable: bool,
 	},
 	Type(Box<Type>),
@@ -1050,8 +1050,8 @@ impl fmt::Display for AST {
 			} => {
 				write!(f, "(Declaration mut={} {:?} {})", mutable, name, value)
 			}
-			DeclarationConstexpr(name, value) => {
-				write!(f, "(DeclarationConstexpr {:?} {})", name, value)
+			DeclarationComptime(name, value) => {
+				write!(f, "(DeclarationComptime {:?} {})", name, value)
 			}
 			SetMulti { names, values } => {
 				write!(f, "(SetMulti {:?} [", names)?;
@@ -1067,7 +1067,7 @@ impl fmt::Display for AST {
 				names,
 				types,
 				values,
-				constexpr,
+				comptime,
 				mutable,
 			} => {
 				let types_s = types
@@ -1085,8 +1085,8 @@ impl fmt::Display for AST {
 				};
 				write!(
 					f,
-					"(DeclarationMulti constexpr={} mut={} {:?} [{}] {})",
-					constexpr, mutable, names, types_s, values_s
+					"(DeclarationMulti comptime={} mut={} {:?} [{}] {})",
+					comptime, mutable, names, types_s, values_s
 				)
 			}
 			Type(t) => {
@@ -1357,7 +1357,7 @@ where
 
 		ASTValue::Set(_, v)
 		| ASTValue::Declaration { value: v, .. }
-		| ASTValue::DeclarationConstexpr(_, v) => {
+		| ASTValue::DeclarationComptime(_, v) => {
 			walk_ast(v, Some(node), predicate);
 		}
 
@@ -1565,7 +1565,7 @@ where
 
 		ASTValue::Set(_, v)
 		| ASTValue::Declaration { value: v, .. }
-		| ASTValue::DeclarationConstexpr(_, v) => {
+		| ASTValue::DeclarationComptime(_, v) => {
 			walk_ast_mut(v, predicate);
 		}
 

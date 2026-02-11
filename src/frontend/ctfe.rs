@@ -136,10 +136,8 @@ impl CtfeEngine {
 			for item in items {
 				let target = Self::unwrap_pub(item.as_ref());
 				match &target.v {
-					ASTValue::DeclarationConstexpr(_, _)
-					| ASTValue::DeclarationMulti {
-						constexpr: true, ..
-					} => {
+					ASTValue::DeclarationComptime(_, _)
+					| ASTValue::DeclarationMulti { comptime: true, .. } => {
 						let flow = self.eval_node(target)?;
 						Self::assert_no_module_scope_return(flow);
 					}
@@ -159,13 +157,13 @@ impl CtfeEngine {
 	pub fn register_function_decls(&mut self, node: &AST) {
 		let target = Self::unwrap_pub(node);
 		match &target.v {
-			ASTValue::DeclarationConstexpr(name, value) => {
+			ASTValue::DeclarationComptime(name, value) => {
 				self.register_function_value(name, value.as_ref());
 			}
 			ASTValue::DeclarationMulti {
 				names,
 				values: Some(values),
-				constexpr: true,
+				comptime: true,
 				..
 			} => {
 				for (idx, name) in names.iter().enumerate() {
@@ -338,7 +336,7 @@ impl CtfeEngine {
 				self.declare_from_value(name, value.as_ref(), *mutable)?;
 				Ok(EvalFlow::Continue(ConstValue::Void))
 			}
-			ASTValue::DeclarationConstexpr(name, value) => {
+			ASTValue::DeclarationComptime(name, value) => {
 				self.declare_from_value(name, value.as_ref(), false)?;
 				Ok(EvalFlow::Continue(ConstValue::Void))
 			}

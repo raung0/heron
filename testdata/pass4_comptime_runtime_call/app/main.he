@@ -1,0 +1,11 @@
+package main
+
+non_comptime := fn -> int do 32
+
+comptime :: fn -> int {
+	non_comptime()
+}
+
+main :: fn {
+	_ = comptime()
+}

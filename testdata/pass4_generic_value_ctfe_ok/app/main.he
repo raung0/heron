@@ -1,6 +1,7 @@
 package main
 
-Vec :: struct<N: usize> {}
+Vec :: struct<N: usize> {
+}
 
 takes := fn (value: Vec<3>) -> int do 0
 

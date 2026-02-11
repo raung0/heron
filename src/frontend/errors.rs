@@ -195,7 +195,7 @@ pub enum FrontendError {
 		location: SourceLocation,
 		name: String,
 	},
-	PointerInConstexpr {
+	PointerInComptime {
 		location: SourceLocation,
 	},
 	PointerRequiresUnsafe {
@@ -243,11 +243,11 @@ pub enum FrontendError {
 		type_name: String,
 		member: String,
 	},
-	RuntimeCallInConstexpr {
+	RuntimeCallInComptime {
 		location: SourceLocation,
 		callee: String,
 	},
-	ConstexprCallNeedsRuntimeable {
+	ComptimeCallNeedsRuntimeable {
 		location: SourceLocation,
 		callee: String,
 		declaration_location: SourceLocation,
@@ -317,7 +317,7 @@ impl FrontendError {
 			| FrontendError::BorrowMutWhileShared { location, .. }
 			| FrontendError::MutBorrowOfImmutable { location, .. }
 			| FrontendError::NonStaticModuleMut { location, .. }
-			| FrontendError::PointerInConstexpr { location }
+			| FrontendError::PointerInComptime { location }
 			| FrontendError::PointerRequiresUnsafe { location }
 			| FrontendError::MissingOperatorSelf { location, .. }
 			| FrontendError::MissingField { location, .. }
@@ -328,8 +328,8 @@ impl FrontendError {
 			| FrontendError::DuplicateUnionVariantType { location, .. }
 			| FrontendError::UnusedValue { location, .. }
 			| FrontendError::InaccessibleMember { location, .. }
-			| FrontendError::RuntimeCallInConstexpr { location, .. }
-			| FrontendError::ConstexprCallNeedsRuntimeable { location, .. }
+			| FrontendError::RuntimeCallInComptime { location, .. }
+			| FrontendError::ComptimeCallNeedsRuntimeable { location, .. }
 			| FrontendError::CtfeError(CtfeError { location, .. }) => Some(location),
 		}
 	}

@@ -1,9 +1,9 @@
 package main
 
-fib :: fn(n: int) -> int {
+fib :: fn [[runtimeable]] (n: int) -> int {
 	if n <= 1 {
 		n
-	} else {
+	} else  {
 		fib(n - 1) + fib(n - 2)
 	}
 }

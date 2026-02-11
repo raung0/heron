@@ -18,8 +18,8 @@ impl Pass4State {
 		for item in items {
 			let node = Self::unwrap_pub(item.as_ref());
 			match &node.v {
-				ASTValue::DeclarationConstexpr(name, value) => {
-					if !Self::should_eval_constexpr_value(value.as_ref()) {
+				ASTValue::DeclarationComptime(name, value) => {
+					if !Self::should_eval_comptime_value(value.as_ref()) {
 						continue;
 					}
 					if let Ok(evaluated) = engine.eval_expr(value.as_ref()) {
@@ -29,7 +29,7 @@ impl Pass4State {
 				ASTValue::DeclarationMulti {
 					names,
 					values: Some(values),
-					constexpr: true,
+					comptime: true,
 					..
 				} => {
 					for (idx, name) in names.iter().enumerate() {
@@ -38,9 +38,8 @@ impl Pass4State {
 						else {
 							continue;
 						};
-						if !Self::should_eval_constexpr_value(
-							value.as_ref(),
-						) {
+						if !Self::should_eval_comptime_value(value.as_ref())
+						{
 							continue;
 						}
 						if let Ok(evaluated) =
@@ -123,19 +122,19 @@ impl Pass4State {
 			return false;
 		};
 
-		let mut constexpr_names = HashSet::new();
+		let mut comptime_names = HashSet::new();
 		for item in items {
 			let node = Self::unwrap_pub(item.as_ref());
 			match &node.v {
-				ASTValue::DeclarationConstexpr(name, value) => {
+				ASTValue::DeclarationComptime(name, value) => {
 					if Self::is_ctfe_bindable_value(value.as_ref()) {
-						constexpr_names.insert(name.clone());
+						comptime_names.insert(name.clone());
 					}
 				}
 				ASTValue::DeclarationMulti {
 					names,
 					values: Some(values),
-					constexpr: true,
+					comptime: true,
 					..
 				} => {
 					for (idx, name) in names.iter().enumerate() {
@@ -145,7 +144,7 @@ impl Pass4State {
 							continue;
 						};
 						if Self::is_ctfe_bindable_value(value.as_ref()) {
-							constexpr_names.insert(name.clone());
+							comptime_names.insert(name.clone());
 						}
 					}
 				}
@@ -159,7 +158,7 @@ impl Pass4State {
 			if name == "true" || name == "false" {
 				continue;
 			}
-			if !constexpr_names.contains(&name) {
+			if !comptime_names.contains(&name) {
 				return false;
 			}
 		}

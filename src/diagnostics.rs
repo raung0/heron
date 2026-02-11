@@ -390,10 +390,11 @@ fn emit_error_message(
 		}
 		FrontendError::StructOrUnionNotInComptimeDeclaration(source_location) => {
 			labels.push(Some(
-				"structs and unions must be in comptime declarations".to_string()
+				"structs and unions must be in compile time declarations"
+					.to_string(),
 			));
 			locations.push(source_location);
-			message("structs and unions must be in comptime declarations")
+			message("structs and unions must be in compile time declarations")
 		}
 		FrontendError::InvalidDeclarationArity(source_location) => {
 			labels.push(Some("invalid multi declaration arity".to_string()));
@@ -450,11 +451,11 @@ fn emit_error_message(
 			locations.push(location);
 			message(format!("unknown value `{name}`"))
 		}
-		FrontendError::RuntimeCallInConstexpr { location, callee } => {
-			labels.push(Some("runtime call in constexpr".to_string()));
+		FrontendError::RuntimeCallInComptime { location, callee } => {
+			labels.push(Some("runtime call in compile time".to_string()));
 			locations.push(location);
 			message(format!(
-				"attempt to call runtime function `{callee}` in constexpr context"
+				"attempt to call runtime function `{callee}` in compile time context"
 			))
 		}
 		FrontendError::TypeMismatch {
@@ -658,10 +659,10 @@ fn emit_error_message(
 				"module-level mutable value {name} must have type &'s mut T"
 			))
 		}
-		FrontendError::PointerInConstexpr { location } => {
-			labels.push(Some("pointer in constexpr".to_string()));
+		FrontendError::PointerInComptime { location } => {
+			labels.push(Some("pointer in compile time".to_string()));
 			locations.push(location);
-			message("pointers are not allowed in constexpr functions".to_string())
+			message("pointers are not allowed in compile time functions".to_string())
 		}
 		FrontendError::PointerRequiresUnsafe { location } => {
 			labels.push(Some("pointer requires unsafe".to_string()));
@@ -749,7 +750,7 @@ fn emit_error_message(
 				Some("mark it as `pub` to expose it".to_string()),
 			)
 		}
-		FrontendError::ConstexprCallNeedsRuntimeable {
+		FrontendError::ComptimeCallNeedsRuntimeable {
 			location,
 			callee,
 			declaration_location,
@@ -766,7 +767,7 @@ fn emit_error_message(
 			});
 			(
 				format!(
-					"constexpr call `{callee}` uses runtime-dependent arguments"
+					"compile time call `{callee}` uses runtime-dependent arguments"
 				),
 				Some("add `[[runtimeable]]` to the function declaration"
 					.to_string()),

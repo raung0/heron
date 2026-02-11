@@ -1,6 +1,7 @@
 package main
 
-Box :: struct<T> {}
+Box :: struct<T> {
+}
 
 takes := fn<T> (value: Box<T>) -> int do 0
 

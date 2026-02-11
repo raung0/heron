@@ -30,7 +30,7 @@ fn main() {
 			.action(ArgAction::SetTrue))
 		.arg(Arg::new("dump_ctfe_results")
 			.long("dump-ctfe-results")
-			.help("Dump evaluated top-level constexpr results")
+			.help("Dump evaluated top-level comptime results")
 			.action(ArgAction::SetTrue))
 		.get_matches();
 
@@ -124,37 +124,33 @@ fn dump_ctfe_results_for_ast(ast: &frontend::AST) {
 	if let frontend::ASTValue::ExprList { items, .. }
 	| frontend::ASTValue::ExprListNoScope { items, .. } = &ast.v
 	{
-		let required_constexprs = collect_required_constexpr_names(items);
+		let required_comptimes = collect_required_comptime_names(items);
 		for item in items {
 			engine.register_function_decls(unwrap_pub(item.as_ref()));
 		}
 		for item in items {
 			let target = unwrap_pub(item.as_ref());
 			match &target.v {
-				frontend::ASTValue::DeclarationConstexpr(name, value) => {
-					if !required_constexprs.contains(name) {
+				frontend::ASTValue::DeclarationComptime(name, value) => {
+					if !required_comptimes.contains(name) {
 						continue;
 					}
-					dump_one_constexpr_result(
-						&mut engine,
-						name,
-						value.as_ref(),
-					);
+					dump_one_comptime_result(&mut engine, name, value.as_ref());
 				}
 				frontend::ASTValue::DeclarationMulti {
 					names,
 					values: Some(values),
-					constexpr: true,
+					comptime: true,
 					..
 				} => {
 					for (idx, name) in names.iter().enumerate() {
-						if !required_constexprs.contains(name) {
+						if !required_comptimes.contains(name) {
 							continue;
 						}
 						if let Some(value) =
 							values.get(idx).or_else(|| values.first())
 						{
-							dump_one_constexpr_result(
+							dump_one_comptime_result(
 								&mut engine,
 								name,
 								value.as_ref(),
@@ -172,28 +168,27 @@ fn dump_ctfe_results_for_ast(ast: &frontend::AST) {
 	}
 }
 
-fn collect_required_constexpr_names(items: &[Box<frontend::AST>]) -> HashSet<String> {
-	let mut constexpr_values: HashMap<String, Box<frontend::AST>> = HashMap::new();
+fn collect_required_comptime_names(items: &[Box<frontend::AST>]) -> HashSet<String> {
+	let mut comptime_values: HashMap<String, Box<frontend::AST>> = HashMap::new();
 	let mut queue: VecDeque<String> = VecDeque::new();
 
 	for item in items {
 		let node = unwrap_pub(item.as_ref());
 		match &node.v {
-			frontend::ASTValue::DeclarationConstexpr(name, value) => {
-				constexpr_values.insert(name.clone(), value.clone());
+			frontend::ASTValue::DeclarationComptime(name, value) => {
+				comptime_values.insert(name.clone(), value.clone());
 			}
 			frontend::ASTValue::DeclarationMulti {
 				names,
 				values: Some(values),
-				constexpr: true,
+				comptime: true,
 				..
 			} => {
 				for (idx, name) in names.iter().enumerate() {
 					if let Some(value) =
 						values.get(idx).or_else(|| values.first())
 					{
-						constexpr_values
-							.insert(name.clone(), value.clone());
+						comptime_values.insert(name.clone(), value.clone());
 					}
 				}
 			}
@@ -202,7 +197,7 @@ fn collect_required_constexpr_names(items: &[Box<frontend::AST>]) -> HashSet<Str
 			}
 			frontend::ASTValue::DeclarationMulti {
 				values: Some(values),
-				constexpr: false,
+				comptime: false,
 				..
 			} => {
 				for value in values {
@@ -218,7 +213,7 @@ fn collect_required_constexpr_names(items: &[Box<frontend::AST>]) -> HashSet<Str
 		if !required.insert(name.clone()) {
 			continue;
 		}
-		if let Some(value) = constexpr_values.get(&name) {
+		if let Some(value) = comptime_values.get(&name) {
 			collect_ids_in_ast(value.as_ref(), &mut queue);
 		}
 	}
@@ -237,7 +232,7 @@ fn collect_ids_in_ast(node: &frontend::AST, out: &mut VecDeque<String>) {
 		| frontend::ASTValue::PtrOf(inner)
 		| frontend::ASTValue::Defer(inner) => collect_ids_in_ast(inner.as_ref(), out),
 		frontend::ASTValue::Ref { v, .. }
-		| frontend::ASTValue::DeclarationConstexpr(_, v)
+		| frontend::ASTValue::DeclarationComptime(_, v)
 		| frontend::ASTValue::Set(_, v) => collect_ids_in_ast(v.as_ref(), out),
 		frontend::ASTValue::Cast { value, .. }
 		| frontend::ASTValue::Transmute { value, .. } => collect_ids_in_ast(value.as_ref(), out),
@@ -372,8 +367,8 @@ fn collect_ids_in_ast(node: &frontend::AST, out: &mut VecDeque<String>) {
 	}
 }
 
-fn dump_one_constexpr_result(engine: &mut frontend::CtfeEngine, name: &str, value: &frontend::AST) {
-	if !should_eval_constexpr_value(value) {
+fn dump_one_comptime_result(engine: &mut frontend::CtfeEngine, name: &str, value: &frontend::AST) {
+	if !should_eval_comptime_value(value) {
 		return;
 	}
 	match engine.eval_expr(value) {
@@ -387,7 +382,7 @@ fn dump_one_constexpr_result(engine: &mut frontend::CtfeEngine, name: &str, valu
 	}
 }
 
-fn should_eval_constexpr_value(value: &frontend::AST) -> bool {
+fn should_eval_comptime_value(value: &frontend::AST) -> bool {
 	!matches!(
 		value.v,
 		frontend::ASTValue::Fn { .. }
@@ -436,7 +431,7 @@ fn dump_runtime_ctfe_candidates(engine: &mut frontend::CtfeEngine, node: &fronte
 		frontend::ASTValue::DeclarationMulti {
 			names,
 			values: Some(values),
-			constexpr: false,
+			comptime: false,
 			..
 		} => {
 			let runtime_scopes = vec![HashSet::new()];
@@ -516,7 +511,7 @@ fn dump_ast_ctfe_candidates(
 		frontend::ASTValue::DeclarationMulti {
 			names,
 			values: Some(values),
-			constexpr: false,
+			comptime: false,
 			..
 		} => {
 			for (idx, name) in names.iter().enumerate() {
@@ -535,7 +530,7 @@ fn dump_ast_ctfe_candidates(
 		}
 		frontend::ASTValue::DeclarationMulti {
 			names,
-			constexpr: false,
+			comptime: false,
 			..
 		} => {
 			if let Some(scope) = runtime_scopes.last_mut() {
@@ -614,7 +609,7 @@ fn expr_contains_call(node: &frontend::AST) -> bool {
 		| frontend::ASTValue::PtrOf(inner)
 		| frontend::ASTValue::Defer(inner)
 		| frontend::ASTValue::Ref { v: inner, .. }
-		| frontend::ASTValue::DeclarationConstexpr(_, inner)
+		| frontend::ASTValue::DeclarationComptime(_, inner)
 		| frontend::ASTValue::Set(_, inner)
 		| frontend::ASTValue::Cast { value: inner, .. }
 		| frontend::ASTValue::Transmute { value: inner, .. }

@@ -44,7 +44,7 @@ fn normalize_list(exprs: &mut Vec<Box<AST>>) {
 				names,
 				types,
 				values,
-				constexpr,
+				comptime,
 				mutable,
 			} => {
 				let types_len = types.len();
@@ -63,7 +63,7 @@ fn normalize_list(exprs: &mut Vec<Box<AST>>) {
 						names_owned,
 						types_owned,
 						values_owned,
-						*constexpr,
+						*comptime,
 						*mutable,
 						false,
 					);
@@ -75,7 +75,7 @@ fn normalize_list(exprs: &mut Vec<Box<AST>>) {
 					names,
 					types,
 					values,
-					constexpr,
+					comptime,
 					mutable,
 				} = &mut inner.v
 				{
@@ -95,7 +95,7 @@ fn normalize_list(exprs: &mut Vec<Box<AST>>) {
 							names_owned,
 							types_owned,
 							values_owned,
-							*constexpr,
+							*comptime,
 							*mutable,
 							true,
 						);
@@ -120,7 +120,7 @@ fn expand_declaration_multi(
 	names: Vec<String>,
 	types: Vec<Box<crate::frontend::Type>>,
 	values: Option<Vec<Box<AST>>>,
-	constexpr: bool,
+	comptime: bool,
 	mutable: bool,
 	wrap_pub: bool,
 ) -> Vec<Box<AST>> {
@@ -157,10 +157,10 @@ fn expand_declaration_multi(
 
 		let mut decl = if type_for.is_none() {
 			let value = value_for.expect("declaration requires value");
-			if constexpr {
+			if comptime {
 				AST::from(
 					location.clone(),
-					ASTValue::DeclarationConstexpr(name.clone(), value),
+					ASTValue::DeclarationComptime(name.clone(), value),
 				)
 			} else {
 				AST::from(
@@ -179,7 +179,7 @@ fn expand_declaration_multi(
 					names: vec![name.clone()],
 					types: vec![type_for.expect("type required")],
 					values: value_for.map(|v| vec![v]),
-					constexpr,
+					comptime,
 					mutable,
 				},
 			)
@@ -214,10 +214,8 @@ fn declaration_bucket(node: &AST) -> usize {
 		| ASTValue::RawUnion { .. }
 		| ASTValue::Newtype { .. }
 		| ASTValue::Alias { .. } => 2,
-		ASTValue::DeclarationMulti {
-			constexpr: true, ..
-		}
-		| ASTValue::DeclarationConstexpr(..) => 3,
+		ASTValue::DeclarationMulti { comptime: true, .. }
+		| ASTValue::DeclarationComptime(..) => 3,
 		_ => 4,
 	}
 }
@@ -257,12 +255,10 @@ mod tests {
 				ASTValue::Package { .. } => "package",
 				ASTValue::Use { .. } => "use",
 				ASTValue::Struct { .. } => "struct",
+				ASTValue::DeclarationMulti { comptime: true, .. }
+				| ASTValue::DeclarationComptime(..) => "const",
 				ASTValue::DeclarationMulti {
-					constexpr: true, ..
-				}
-				| ASTValue::DeclarationConstexpr(..) => "const",
-				ASTValue::DeclarationMulti {
-					constexpr: false, ..
+					comptime: false, ..
 				} => "decl",
 				ASTValue::Pub(inner) => match &inner.v {
 					ASTValue::Use { .. } => "use",

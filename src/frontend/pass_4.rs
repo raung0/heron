@@ -52,7 +52,7 @@ pub struct BuiltinIds {
 pub struct ValueInfo {
 	pub ty: TypeId,
 	#[allow(dead_code)]
-	pub constexpr: bool,
+	pub comptime: bool,
 	pub mutable: bool,
 	pub moved: bool,
 	pub moved_at: Option<SourceLocation>,
@@ -99,7 +99,7 @@ struct TypeContext<'a> {
 	generic_types: HashMap<String, TypeId>,
 	self_type: Option<TypeId>,
 	return_type: Option<TypeId>,
-	in_constexpr: bool,
+	in_comptime: bool,
 	unsafe_depth: usize,
 	suppress_move: bool,
 	suppress_borrow_check: bool,
@@ -139,7 +139,7 @@ pub(crate) fn pass_4(program: ResolvedProgram) -> Pass4Result {
 	state.check_cyclic_type_decls();
 	state.collect_value_decls();
 	let typed_program = state.type_program();
-	state.validate_constexpr_decls();
+	state.validate_comptime_decls();
 	let errors = std::mem::take(&mut state.errors);
 	let semantics = state.into_semantics();
 	Pass4Result {
@@ -224,7 +224,7 @@ impl Pass4State {
 					},
 					exports: ModuleExports {
 						types: module.exports.types.clone(),
-						constexprs: module.exports.constexprs.clone(),
+						comptimes: module.exports.comptimes.clone(),
 					},
 					types: HashMap::new(),
 					values: HashMap::new(),
@@ -278,7 +278,7 @@ impl Pass4State {
 			for item in items {
 				let node = Self::unwrap_pub(item.as_ref());
 				match &node.v {
-					ASTValue::DeclarationConstexpr(name, value) => {
+					ASTValue::DeclarationComptime(name, value) => {
 						self.register_type_decl(
 							&module_id,
 							name,
@@ -288,7 +288,7 @@ impl Pass4State {
 					ASTValue::DeclarationMulti {
 						names,
 						values: Some(values),
-						constexpr: true,
+						comptime: true,
 						..
 					} => {
 						for (idx, name) in names.iter().enumerate() {
@@ -382,13 +382,13 @@ impl Pass4State {
 			for item in items {
 				let node = Self::unwrap_pub(item.as_ref());
 				match &node.v {
-					ASTValue::DeclarationConstexpr(name, value) => {
+					ASTValue::DeclarationComptime(name, value) => {
 						self.define_type_decl(&module_id, name, value);
 					}
 					ASTValue::DeclarationMulti {
 						names,
 						values: Some(values),
-						constexpr: true,
+						comptime: true,
 						..
 					} => {
 						for (idx, name) in names.iter().enumerate() {
@@ -1015,7 +1015,7 @@ impl Pass4State {
 					}
 				}
 			}
-			ASTValue::DeclarationConstexpr(field_name, value) => {
+			ASTValue::DeclarationComptime(field_name, value) => {
 				if let Some(fn_ty) = self.method_type_from_value(
 					module_id,
 					field_name,
@@ -1536,7 +1536,7 @@ impl Pass4State {
 		module_id: &ModuleId,
 		name: &str,
 		ty: TypeId,
-		constexpr: bool,
+		comptime: bool,
 		mutable: bool,
 	) {
 		if let Some(module) = self.modules.get_mut(module_id) {
@@ -1544,7 +1544,7 @@ impl Pass4State {
 				name.to_string(),
 				ValueInfo {
 					ty,
-					constexpr,
+					comptime,
 					mutable,
 					moved: false,
 					moved_at: None,
@@ -1561,7 +1561,7 @@ impl Pass4State {
 				let node = Self::unwrap_pub(item.as_ref());
 				let empty_generic_map = HashMap::new();
 				match &node.v {
-					ASTValue::DeclarationConstexpr(name, value) => {
+					ASTValue::DeclarationComptime(name, value) => {
 						if let Some(fn_ty) = self.fn_type_from_value(
 							&module_id,
 							value,
@@ -1597,7 +1597,7 @@ impl Pass4State {
 						names,
 						types,
 						values: Some(values),
-						constexpr,
+						comptime,
 						mutable,
 					} => {
 						for (idx, name) in names.iter().enumerate() {
@@ -1612,7 +1612,7 @@ impl Pass4State {
 									) {
 								self.insert_value_decl(
 									&module_id, name, fn_ty,
-									*constexpr, *mutable,
+									*comptime, *mutable,
 								);
 								continue;
 							}
@@ -1629,7 +1629,7 @@ impl Pass4State {
 								);
 								self.insert_value_decl(
 									&module_id, name, resolved,
-									*constexpr, *mutable,
+									*comptime, *mutable,
 								);
 							}
 						}
@@ -1658,7 +1658,7 @@ impl Pass4State {
 				generic_types: HashMap::new(),
 				self_type: None,
 				return_type: None,
-				in_constexpr: false,
+				in_comptime: false,
 				unsafe_depth: 0,
 				suppress_move: false,
 				suppress_borrow_check: false,
@@ -1687,7 +1687,7 @@ impl Pass4State {
 		}
 	}
 
-	fn validate_constexpr_decls(&mut self) {
+	fn validate_comptime_decls(&mut self) {
 		let module_ids: Vec<ModuleId> = self.modules.keys().cloned().collect();
 		for module_id in module_ids {
 			let Some(module) = self.modules.get(&module_id) else {
@@ -1699,19 +1699,19 @@ impl Pass4State {
 			else {
 				continue;
 			};
-			let required_constexprs = Self::collect_required_constexpr_names(items);
+			let required_comptimes = Self::collect_required_comptime_names(items);
 			for item in items {
 				let node = Self::unwrap_pub(item.as_ref());
 				engine.register_function_decls(node);
 				match &node.v {
-					ASTValue::DeclarationConstexpr(name, value) => {
-						if !required_constexprs.contains(name) {
+					ASTValue::DeclarationComptime(name, value) => {
+						if !required_comptimes.contains(name) {
 							continue;
 						}
 						if self.has_non_ctfe_error_in(&node.location) {
 							continue;
 						}
-						if Self::should_eval_constexpr_value(value.as_ref())
+						if Self::should_eval_comptime_value(value.as_ref())
 						{
 							match engine.eval_expr(value.as_ref()) {
 								Ok(evaluated) => engine.bind_const(
@@ -1726,11 +1726,11 @@ impl Pass4State {
 					ASTValue::DeclarationMulti {
 						names,
 						values: Some(values),
-						constexpr: true,
+						comptime: true,
 						..
 					} => {
 						for (idx, name) in names.iter().enumerate() {
-							if !required_constexprs.contains(name) {
+							if !required_comptimes.contains(name) {
 								continue;
 							}
 							let Some(value) = values
@@ -1744,7 +1744,7 @@ impl Pass4State {
 							) {
 								continue;
 							}
-							if !Self::should_eval_constexpr_value(
+							if !Self::should_eval_comptime_value(
 								value.as_ref(),
 							) {
 								continue;
@@ -1766,27 +1766,27 @@ impl Pass4State {
 	}
 
 	#[allow(clippy::vec_box)]
-	fn collect_required_constexpr_names(items: &[Box<AST>]) -> HashSet<String> {
-		let mut constexpr_values: HashMap<String, Box<AST>> = HashMap::new();
+	fn collect_required_comptime_names(items: &[Box<AST>]) -> HashSet<String> {
+		let mut comptime_values: HashMap<String, Box<AST>> = HashMap::new();
 		let mut queue: VecDeque<String> = VecDeque::new();
 
 		for item in items {
 			let node = Self::unwrap_pub(item.as_ref());
 			match &node.v {
-				ASTValue::DeclarationConstexpr(name, value) => {
-					constexpr_values.insert(name.clone(), value.clone());
+				ASTValue::DeclarationComptime(name, value) => {
+					comptime_values.insert(name.clone(), value.clone());
 				}
 				ASTValue::DeclarationMulti {
 					names,
 					values: Some(values),
-					constexpr: true,
+					comptime: true,
 					..
 				} => {
 					for (idx, name) in names.iter().enumerate() {
 						if let Some(value) =
 							values.get(idx).or_else(|| values.first())
 						{
-							constexpr_values.insert(
+							comptime_values.insert(
 								name.clone(),
 								value.clone(),
 							);
@@ -1798,7 +1798,7 @@ impl Pass4State {
 				}
 				ASTValue::DeclarationMulti {
 					values: Some(values),
-					constexpr: false,
+					comptime: false,
 					..
 				} => {
 					for value in values {
@@ -1817,7 +1817,7 @@ impl Pass4State {
 			if !required.insert(name.clone()) {
 				continue;
 			}
-			if let Some(value) = constexpr_values.get(&name) {
+			if let Some(value) = comptime_values.get(&name) {
 				Self::collect_ids_in_ast(value.as_ref(), &mut queue);
 			}
 		}
@@ -1837,7 +1837,7 @@ impl Pass4State {
 			| ASTValue::PtrOf(inner)
 			| ASTValue::Defer(inner) => Self::collect_ids_in_ast(inner.as_ref(), out),
 			ASTValue::Ref { v, .. }
-			| ASTValue::DeclarationConstexpr(_, v)
+			| ASTValue::DeclarationComptime(_, v)
 			| ASTValue::Set(_, v) => Self::collect_ids_in_ast(v.as_ref(), out),
 			ASTValue::Cast { value, .. } | ASTValue::Transmute { value, .. } => {
 				Self::collect_ids_in_ast(value.as_ref(), out)
@@ -1994,7 +1994,7 @@ impl Pass4State {
 		})
 	}
 
-	fn should_eval_constexpr_value(value: &AST) -> bool {
+	fn should_eval_comptime_value(value: &AST) -> bool {
 		!matches!(
 			value.v,
 			ASTValue::Fn { .. }
@@ -2005,7 +2005,7 @@ impl Pass4State {
 	}
 
 	fn is_ctfe_bindable_value(value: &AST) -> bool {
-		matches!(value.v, ASTValue::Fn { .. }) || Self::should_eval_constexpr_value(value)
+		matches!(value.v, ASTValue::Fn { .. }) || Self::should_eval_comptime_value(value)
 	}
 
 	#[allow(clippy::vec_box)]
@@ -2352,8 +2352,8 @@ impl Pass4State {
 				)
 			}
 			ASTValue::PtrOf(inner) => {
-				if ctx.in_constexpr {
-					self.errors.push(FrontendError::PointerInConstexpr {
+				if ctx.in_comptime {
+					self.errors.push(FrontendError::PointerInComptime {
 						location: node.location.clone(),
 					});
 				}
@@ -2907,7 +2907,7 @@ impl Pass4State {
 				value,
 				mutable,
 			} => self.type_declaration(node, ctx, name, value, *mutable, false),
-			ASTValue::DeclarationConstexpr(name, value) => {
+			ASTValue::DeclarationComptime(name, value) => {
 				self.type_declaration(node, ctx, name, value, false, true)
 			}
 			ASTValue::SetMulti { names, values } => {
@@ -3033,10 +3033,10 @@ impl Pass4State {
 				names,
 				types,
 				values,
-				constexpr,
+				comptime,
 				mutable,
 			} => self.type_multi_declaration(
-				node, ctx, names, types, values, *constexpr, *mutable,
+				node, ctx, names, types, values, *comptime, *mutable,
 			),
 			ASTValue::Type(ty) => {
 				let resolved = self.resolve_type(
@@ -3053,8 +3053,8 @@ impl Pass4State {
 						location: node.location.clone(),
 					});
 				}
-				if ctx.in_constexpr && self.type_contains_pointer(resolved) {
-					self.errors.push(FrontendError::PointerInConstexpr {
+				if ctx.in_comptime && self.type_contains_pointer(resolved) {
+					self.errors.push(FrontendError::PointerInComptime {
 						location: node.location.clone(),
 					});
 				}
@@ -3338,7 +3338,7 @@ impl Pass4State {
 			}
 		}
 		let ty = typed.ty.unwrap_or(self.builtins.unknown_id);
-		if expected.is_none() && !ctx.in_constexpr {
+		if expected.is_none() && !ctx.in_comptime {
 			if ty == self.builtins.untyped_int_id {
 				typed.ty = Some(self.builtins.int_id);
 			} else if ty == self.builtins.untyped_float_id {
@@ -4376,9 +4376,9 @@ impl Pass4State {
 		expected: Option<TypeId>,
 	) -> Box<TypedAst> {
 		if let Some((callee_name, callee_ty)) =
-			self.runtime_function_call_in_constexpr(ctx, callee.as_ref())
+			self.runtime_function_call_in_comptime(ctx, callee.as_ref())
 		{
-			self.errors.push(FrontendError::RuntimeCallInConstexpr {
+			self.errors.push(FrontendError::RuntimeCallInComptime {
 				location: node.location.clone(),
 				callee: callee_name.clone(),
 			});
@@ -5490,7 +5490,7 @@ impl Pass4State {
 					b.name.clone(),
 					ValueInfo {
 						ty: binder_ty,
-						constexpr: ctx.in_constexpr,
+						comptime: ctx.in_comptime,
 						mutable: b.mutable,
 						moved: false,
 						moved_at: None,
@@ -5748,7 +5748,7 @@ impl Pass4State {
 					name.clone(),
 					ValueInfo {
 						ty: iter_ty,
-						constexpr: false,
+						comptime: false,
 						mutable: false,
 						moved: false,
 						moved_at: None,
@@ -5902,12 +5902,12 @@ impl Pass4State {
 		name: &str,
 		value: &Box<AST>,
 		mutable: bool,
-		constexpr: bool,
+		comptime: bool,
 	) -> Box<TypedAst> {
-		let prev_constexpr = ctx.in_constexpr;
+		let prev_comptime = ctx.in_comptime;
 		let prev_self_type = ctx.self_type;
-		ctx.in_constexpr = constexpr;
-		if constexpr {
+		ctx.in_comptime = comptime;
+		if comptime {
 			if let Some(module) = self.modules.get(ctx.module_id) {
 				if let Some(&ty_id) = module.types.get(name) {
 					ctx.self_type = Some(ty_id);
@@ -5915,17 +5915,17 @@ impl Pass4State {
 			}
 		}
 		let typed_value = self.type_node(value, ctx, None);
-		ctx.in_constexpr = prev_constexpr;
+		ctx.in_comptime = prev_comptime;
 		ctx.self_type = prev_self_type;
 		let mut value_ty = typed_value.ty.unwrap_or(self.builtins.unknown_id);
-		if !constexpr && !ctx.in_constexpr {
+		if !comptime && !ctx.in_comptime {
 			if value_ty == self.builtins.untyped_int_id {
 				value_ty = self.builtins.int_id;
 			} else if value_ty == self.builtins.untyped_float_id {
 				value_ty = self.builtins.f64_id;
 			}
 		}
-		if mutable && !constexpr && self.is_module_scope(ctx) {
+		if mutable && !comptime && self.is_module_scope(ctx) {
 			if !self.is_static_mut_ref(value_ty) {
 				self.errors.push(FrontendError::NonStaticModuleMut {
 					location: node.location.clone(),
@@ -5938,8 +5938,8 @@ impl Pass4State {
 				location: node.location.clone(),
 			});
 		}
-		if ctx.in_constexpr && self.type_contains_pointer(value_ty) {
-			self.errors.push(FrontendError::PointerInConstexpr {
+		if ctx.in_comptime && self.type_contains_pointer(value_ty) {
+			self.errors.push(FrontendError::PointerInComptime {
 				location: node.location.clone(),
 			});
 		}
@@ -5947,7 +5947,7 @@ impl Pass4State {
 			name.to_string(),
 			ValueInfo {
 				ty: value_ty,
-				constexpr,
+				comptime,
 				mutable,
 				moved: false,
 				moved_at: None,
@@ -5977,8 +5977,8 @@ impl Pass4State {
 		}
 		let mut out = TypedAst::from(
 			node.location.clone(),
-			if constexpr {
-				TypedValue::DeclarationConstexpr(name.to_string(), typed_value)
+			if comptime {
+				TypedValue::DeclarationComptime(name.to_string(), typed_value)
 			} else {
 				TypedValue::Declaration {
 					name: name.to_string(),
@@ -6000,7 +6000,7 @@ impl Pass4State {
 		names: &[String],
 		types: &[Box<Type>],
 		values: &Option<Vec<Box<AST>>>,
-		constexpr: bool,
+		comptime: bool,
 		mutable: bool,
 	) -> Box<TypedAst> {
 		let mut typed_types = Vec::new();
@@ -6068,7 +6068,7 @@ impl Pass4State {
 							value.ty = Some(coerced);
 						}
 					}
-				} else if !constexpr {
+				} else if !comptime {
 					if value_ty == self.builtins.untyped_int_id {
 						final_ty = self.builtins.int_id;
 					} else if value_ty == self.builtins.untyped_float_id {
@@ -6076,7 +6076,7 @@ impl Pass4State {
 					}
 				}
 			}
-			if mutable && !constexpr && self.is_module_scope(ctx) {
+			if mutable && !comptime && self.is_module_scope(ctx) {
 				if !self.is_static_mut_ref(final_ty) {
 					self.errors.push(FrontendError::NonStaticModuleMut {
 						location: node.location.clone(),
@@ -6089,8 +6089,8 @@ impl Pass4State {
 					location: node.location.clone(),
 				});
 			}
-			if ctx.in_constexpr && self.type_contains_pointer(final_ty) {
-				self.errors.push(FrontendError::PointerInConstexpr {
+			if ctx.in_comptime && self.type_contains_pointer(final_ty) {
+				self.errors.push(FrontendError::PointerInComptime {
 					location: node.location.clone(),
 				});
 			}
@@ -6098,7 +6098,7 @@ impl Pass4State {
 				name.clone(),
 				ValueInfo {
 					ty: final_ty,
-					constexpr,
+					comptime,
 					mutable,
 					moved: false,
 					moved_at: None,
@@ -6149,7 +6149,7 @@ impl Pass4State {
 				names: names.to_vec(),
 				types: typed_types,
 				values: typed_values,
-				constexpr,
+				comptime,
 				mutable,
 			},
 		);
@@ -6215,8 +6215,8 @@ impl Pass4State {
 				typed_default = Some(self.type_node(default, ctx, resolved_ty));
 			}
 			if let Some(ty) = resolved_ty {
-				if ctx.in_constexpr && self.type_contains_pointer(ty) {
-					self.errors.push(FrontendError::PointerInConstexpr {
+				if ctx.in_comptime && self.type_contains_pointer(ty) {
+					self.errors.push(FrontendError::PointerInComptime {
 						location: node.location.clone(),
 					});
 				}
@@ -6247,8 +6247,8 @@ impl Pass4State {
 				)
 			})
 			.unwrap_or(self.builtins.void_id);
-		if ctx.in_constexpr && self.type_contains_pointer(resolved_return) {
-			self.errors.push(FrontendError::PointerInConstexpr {
+		if ctx.in_comptime && self.type_contains_pointer(resolved_return) {
+			self.errors.push(FrontendError::PointerInComptime {
 				location: node.location.clone(),
 			});
 		}
@@ -6263,9 +6263,9 @@ impl Pass4State {
 		});
 
 		let prev_return = ctx.return_type;
-		let prev_constexpr = ctx.in_constexpr;
+		let prev_comptime = ctx.in_comptime;
 		ctx.return_type = Some(resolved_return);
-		ctx.in_constexpr = prev_constexpr;
+		ctx.in_comptime = prev_comptime;
 		self.push_scope(ctx);
 		for (idx, param) in params.iter().enumerate() {
 			let ty = param_types
@@ -6277,7 +6277,7 @@ impl Pass4State {
 					name.clone(),
 					ValueInfo {
 						ty,
-						constexpr: false,
+						comptime: false,
 						mutable: false,
 						moved: false,
 						moved_at: None,
@@ -6366,7 +6366,7 @@ impl Pass4State {
 		}
 		self.pop_scope(ctx);
 		ctx.return_type = prev_return;
-		ctx.in_constexpr = prev_constexpr;
+		ctx.in_comptime = prev_comptime;
 		ctx.unsafe_depth = prev_unsafe_depth;
 
 		let mut out = TypedAst::from(
@@ -6705,9 +6705,7 @@ impl Pass4State {
 		for item in items {
 			let node = Self::unwrap_pub(item.as_ref());
 			match &node.v {
-				ASTValue::DeclarationConstexpr(name, value)
-					if name == type_name =>
-				{
+				ASTValue::DeclarationComptime(name, value) if name == type_name => {
 					match &value.v {
 						ASTValue::Struct { generics, .. }
 						| ASTValue::Union { generics, .. }
@@ -6720,7 +6718,7 @@ impl Pass4State {
 				ASTValue::DeclarationMulti {
 					names,
 					values: Some(values),
-					constexpr: true,
+					comptime: true,
 					..
 				} => {
 					for (idx, name) in names.iter().enumerate() {
@@ -7134,7 +7132,7 @@ impl Pass4State {
 		for item in items {
 			let node = Self::unwrap_pub(item.as_ref());
 			match &node.v {
-				ASTValue::DeclarationConstexpr(decl_name, value)
+				ASTValue::DeclarationComptime(decl_name, value)
 				| ASTValue::Declaration {
 					name: decl_name,
 					value,
@@ -7178,7 +7176,7 @@ impl Pass4State {
 			let item_location = item.location.clone();
 			let node = Self::unwrap_pub(item.as_ref());
 			match &node.v {
-				ASTValue::DeclarationConstexpr(decl_name, value)
+				ASTValue::DeclarationComptime(decl_name, value)
 					if decl_name == name =>
 				{
 					if let ASTValue::Fn { attributes, .. } = &value.v {
@@ -7209,7 +7207,7 @@ impl Pass4State {
 				ASTValue::DeclarationMulti {
 					names,
 					values,
-					constexpr,
+					comptime,
 					..
 				} => {
 					let Some(values) = values else {
@@ -7224,7 +7222,7 @@ impl Pass4State {
 								&value.v
 						{
 							return Some((
-								*constexpr,
+								*comptime,
 								attributes
 									.iter()
 									.any(|a| a == attr),
@@ -7259,12 +7257,12 @@ impl Pass4State {
 			.unwrap_or(false) || self.call_has_runtime_dependent_args(args, ctx)
 	}
 
-	fn runtime_function_call_in_constexpr(
+	fn runtime_function_call_in_comptime(
 		&self,
 		ctx: &TypeContext,
 		callee: &AST,
 	) -> Option<(String, TypeId)> {
-		if !ctx.in_constexpr {
+		if !ctx.in_comptime {
 			return None;
 		}
 		let name = match &callee.v {
@@ -7279,7 +7277,7 @@ impl Pass4State {
 			_ => None,
 		}?;
 		let info = self.lookup_value_info(ctx, name)?;
-		if info.constexpr || !matches!(self.arena.get(info.ty), ResolvedType::Fn { .. }) {
+		if info.comptime || !matches!(self.arena.get(info.ty), ResolvedType::Fn { .. }) {
 			return None;
 		}
 		Some((name.to_string(), info.ty))
@@ -7294,20 +7292,20 @@ impl Pass4State {
 		args: &[Box<AST>],
 		receiver: Option<&AST>,
 	) {
-		if ctx.in_constexpr {
+		if ctx.in_comptime {
 			return;
 		}
-		let Some((is_constexpr, is_runtimeable, declaration_location)) = flags else {
+		let Some((is_comptime, is_runtimeable, declaration_location)) = flags else {
 			return;
 		};
-		if !is_constexpr || is_runtimeable {
+		if !is_comptime || is_runtimeable {
 			return;
 		}
 		if !self.call_depends_on_runtime_values(args, receiver, ctx) {
 			return;
 		}
 		self.errors
-			.push(FrontendError::ConstexprCallNeedsRuntimeable {
+			.push(FrontendError::ComptimeCallNeedsRuntimeable {
 				location: call_location.clone(),
 				callee: callee.to_string(),
 				declaration_location,
@@ -7320,13 +7318,13 @@ impl Pass4State {
 		while let Some(name) = ids.pop_front() {
 			if let Some(info) = ctx.value_scopes.iter().rev().find_map(|s| s.get(&name))
 			{
-				if !info.constexpr {
+				if !info.comptime {
 					return true;
 				}
 				continue;
 			}
 			if let Some(info) = ctx.module.values.get(&name)
-				&& !info.constexpr
+				&& !info.comptime
 			{
 				return true;
 			}
@@ -7353,11 +7351,11 @@ impl Pass4State {
 		for item in items {
 			let node = Self::unwrap_pub(item.as_ref());
 			let (decl_name, value) = match &node.v {
-				ASTValue::DeclarationConstexpr(name, value) => (name, value),
+				ASTValue::DeclarationComptime(name, value) => (name, value),
 				ASTValue::DeclarationMulti {
 					names,
 					values: Some(values),
-					constexpr: true,
+					comptime: true,
 					..
 				} => {
 					let mut found = None;
@@ -7426,11 +7424,11 @@ impl Pass4State {
 		for item in items {
 			let node = Self::unwrap_pub(item.as_ref());
 			let (decl_name, value) = match &node.v {
-				ASTValue::DeclarationConstexpr(name, value) => (name, value),
+				ASTValue::DeclarationComptime(name, value) => (name, value),
 				ASTValue::DeclarationMulti {
 					names,
 					values: Some(values),
-					constexpr: true,
+					comptime: true,
 					..
 				} => {
 					let mut found = None;
@@ -7491,7 +7489,7 @@ impl Pass4State {
 			let item_location = item.location.clone();
 			let node = Self::unwrap_pub(item.as_ref());
 			match &node.v {
-				ASTValue::DeclarationConstexpr(name, value)
+				ASTValue::DeclarationComptime(name, value)
 					if name == method_name =>
 				{
 					if let ASTValue::Fn { attributes, .. } = &value.v {
@@ -7505,7 +7503,7 @@ impl Pass4State {
 				ASTValue::DeclarationMulti {
 					names,
 					values: Some(values),
-					constexpr,
+					comptime,
 					..
 				} => {
 					for (idx, name) in names.iter().enumerate() {
@@ -7517,7 +7515,7 @@ impl Pass4State {
 								&value.v
 						{
 							return Some((
-								*constexpr,
+								*comptime,
 								attributes
 									.iter()
 									.any(|a| a == attr),
@@ -7572,7 +7570,7 @@ impl Pass4State {
 		for item in items {
 			let node = Self::unwrap_pub(item.as_ref());
 			match &node.v {
-				ASTValue::DeclarationConstexpr(name, value)
+				ASTValue::DeclarationComptime(name, value)
 					if name == method_name =>
 				{
 					if let ASTValue::Fn { params, .. } = &value.v {
@@ -7606,7 +7604,7 @@ impl Pass4State {
 		for item in items {
 			let node = Self::unwrap_pub(item.as_ref());
 			match &node.v {
-				ASTValue::DeclarationConstexpr(decl_name, value)
+				ASTValue::DeclarationComptime(decl_name, value)
 				| ASTValue::Declaration {
 					name: decl_name,
 					value,
@@ -7655,7 +7653,7 @@ impl Pass4State {
 		for item in items {
 			let node = Self::unwrap_pub(item.as_ref());
 			match &node.v {
-				ASTValue::DeclarationConstexpr(decl_name, value)
+				ASTValue::DeclarationComptime(decl_name, value)
 				| ASTValue::Declaration {
 					name: decl_name,
 					value,
@@ -7735,7 +7733,7 @@ impl Pass4State {
 		for item in items {
 			let node = Self::unwrap_pub(item.as_ref());
 			match &node.v {
-				ASTValue::DeclarationConstexpr(decl_name, value)
+				ASTValue::DeclarationComptime(decl_name, value)
 				| ASTValue::Declaration {
 					name: decl_name,
 					value,
@@ -9011,38 +9009,38 @@ mod tests {
 	}
 
 	#[test]
-	fn reports_pointer_in_constexpr() {
-		assert_fixture_error("testdata/pass4_pointer_in_constexpr", Vec::new(), |err| {
-			matches!(err, FrontendError::PointerInConstexpr { .. })
+	fn reports_pointer_in_comptime() {
+		assert_fixture_error("testdata/pass4_pointer_in_comptime", Vec::new(), |err| {
+			matches!(err, FrontendError::PointerInComptime { .. })
 		});
 	}
 
 	#[test]
-	fn reports_constexpr_call_needing_runtimeable() {
+	fn reports_comptime_call_needing_runtimeable() {
 		assert_fixture_error(
-			"testdata/pass4_constexpr_runtimeable_required",
+			"testdata/pass4_comptime_runtimeable_required",
 			Vec::new(),
-			|err| matches!(err, FrontendError::ConstexprCallNeedsRuntimeable { .. }),
+			|err| matches!(err, FrontendError::ComptimeCallNeedsRuntimeable { .. }),
 		);
 	}
 
 	#[test]
-	fn allows_constexpr_call_with_runtimeable() {
+	fn allows_comptime_call_with_runtimeable() {
 		let (_typed, _resolved, errors, warnings) =
-			run_fixture("testdata/pass4_constexpr_runtimeable_ok", Vec::new());
+			run_fixture("testdata/pass4_comptime_runtimeable_ok", Vec::new());
 		assert!(errors.is_empty(), "errors: {errors:?}");
 		assert!(warnings.is_empty(), "warnings: {warnings:?}");
 	}
 
 	#[test]
-	fn reports_runtime_call_in_constexpr_without_cascade_mismatch() {
+	fn reports_runtime_call_in_comptime_without_cascade_mismatch() {
 		let (_typed, _resolved, errors, warnings) =
-			run_fixture("testdata/pass4_constexpr_runtime_call", Vec::new());
+			run_fixture("testdata/pass4_comptime_runtime_call", Vec::new());
 		assert!(warnings.is_empty(), "warnings: {warnings:?}");
 		assert_eq!(errors.len(), 1, "errors: {errors:?}");
 		assert!(matches!(
 			errors[0],
-			FrontendError::RuntimeCallInConstexpr { .. }
+			FrontendError::RuntimeCallInComptime { .. }
 		));
 	}
 

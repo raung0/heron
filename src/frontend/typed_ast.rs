@@ -508,7 +508,7 @@ pub enum TypedValue {
 		value: Box<TypedAst>,
 		mutable: bool,
 	},
-	DeclarationConstexpr(String, Box<TypedAst>),
+	DeclarationComptime(String, Box<TypedAst>),
 	SetMulti {
 		names: Vec<String>,
 		values: Vec<Box<TypedAst>>,
@@ -517,7 +517,7 @@ pub enum TypedValue {
 		names: Vec<String>,
 		types: Vec<TypeId>,
 		values: Option<Vec<Box<TypedAst>>>,
-		constexpr: bool,
+		comptime: bool,
 		mutable: bool,
 	},
 	Type(TypeId),
