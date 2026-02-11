@@ -8,7 +8,7 @@ use heron::frontend::{self, FrontendError, dot_module_graph, run_passes_with_mod
 use termcolor::{ColorChoice, StandardStream};
 
 fn main() {
-	let matches = Command::new("heron")
+	let matches = Command::new("heronc")
 		.about("Heron compiler")
 		.arg(Arg::new("file")
 			.help("Path to the Heron source file to parse")
