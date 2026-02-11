@@ -1,14 +1,14 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::read_to_string;
 
 use crate::frontend::{
-	AST, ASTValue, BuiltinType, EnumVariantInfo, FieldInfo, FrontendError, GenericArg,
-	GenericParam, InitializerItem, MatchCase, MatchCasePattern, MethodInfo, ModuleExports,
-	ModuleId, ModuleImports, ResolvedGenericArg, ResolvedProgram, ResolvedType, SourceLocation,
-	Type, TypeArena, TypeId, TypedAst, TypedEnsuresClause, TypedEnumVariant, TypedFnBody,
-	TypedFnParam, TypedGenericArg, TypedGenericParam, TypedInitializerItem, TypedMatchBinder,
-	TypedMatchCase, TypedMatchCasePattern, TypedModule, TypedPostClause, TypedProgram,
-	TypedValue,
+	AST, ASTValue, BuiltinType, CtfeEngine, CtfeLimits, EnumVariantInfo, FieldInfo,
+	FrontendError, GenericArg, GenericParam, InitializerItem, MatchCase, MatchCasePattern,
+	MethodInfo, ModuleExports, ModuleId, ModuleImports, ResolvedGenericArg, ResolvedProgram,
+	ResolvedType, SourceLocation, Type, TypeArena, TypeId, TypedAst, TypedEnsuresClause,
+	TypedEnumVariant, TypedFnBody, TypedFnParam, TypedGenericArg, TypedGenericParam,
+	TypedInitializerItem, TypedMatchBinder, TypedMatchCase, TypedMatchCasePattern, TypedModule,
+	TypedPostClause, TypedProgram, TypedValue,
 };
 
 pub struct Pass4Result {
@@ -135,6 +135,7 @@ pub(crate) fn pass_4(program: ResolvedProgram) -> Pass4Result {
 	state.check_cyclic_type_decls();
 	state.collect_value_decls();
 	let typed_program = state.type_program();
+	state.validate_constexpr_decls();
 	let errors = std::mem::take(&mut state.errors);
 	let semantics = state.into_semantics();
 	Pass4Result {
@@ -1662,6 +1663,323 @@ impl Pass4State {
 			entry: self.program.entry.clone(),
 			modules: typed_modules,
 		}
+	}
+
+	fn validate_constexpr_decls(&mut self) {
+		let module_ids: Vec<ModuleId> = self.modules.keys().cloned().collect();
+		for module_id in module_ids {
+			let Some(module) = self.modules.get(&module_id) else {
+				continue;
+			};
+			let mut engine = CtfeEngine::new(CtfeLimits::default());
+			let (ASTValue::ExprList { items, .. }
+			| ASTValue::ExprListNoScope { items, .. }) = &module.ast.v
+			else {
+				continue;
+			};
+			let required_constexprs = Self::collect_required_constexpr_names(items);
+			for item in items {
+				let node = Self::unwrap_pub(item.as_ref());
+				engine.register_function_decls(node);
+				match &node.v {
+					ASTValue::DeclarationConstexpr(name, value) => {
+						if !required_constexprs.contains(name) {
+							continue;
+						}
+						if self.has_non_ctfe_error_in(&node.location) {
+							continue;
+						}
+						if Self::should_eval_constexpr_value(value.as_ref())
+						{
+							match engine.eval_expr(value.as_ref()) {
+								Ok(evaluated) => engine.bind_const(
+									name, evaluated,
+								),
+								Err(err) => {
+									self.errors.push(FrontendError::CtfeError(err));
+								}
+							}
+						}
+					}
+					ASTValue::DeclarationMulti {
+						names,
+						values: Some(values),
+						constexpr: true,
+						..
+					} => {
+						for (idx, name) in names.iter().enumerate() {
+							if !required_constexprs.contains(name) {
+								continue;
+							}
+							let Some(value) = values
+								.get(idx)
+								.or_else(|| values.first())
+							else {
+								continue;
+							};
+							if self.has_non_ctfe_error_in(
+								&node.location,
+							) {
+								continue;
+							}
+							if !Self::should_eval_constexpr_value(
+								value.as_ref(),
+							) {
+								continue;
+							}
+							match engine.eval_expr(value.as_ref()) {
+								Ok(evaluated) => engine.bind_const(
+									name, evaluated,
+								),
+								Err(err) => {
+									self.errors.push(FrontendError::CtfeError(err));
+								}
+							}
+						}
+					}
+					_ => {}
+				}
+			}
+		}
+	}
+
+	#[allow(clippy::vec_box)]
+	fn collect_required_constexpr_names(items: &[Box<AST>]) -> HashSet<String> {
+		let mut constexpr_values: HashMap<String, Box<AST>> = HashMap::new();
+		let mut queue: VecDeque<String> = VecDeque::new();
+
+		for item in items {
+			let node = Self::unwrap_pub(item.as_ref());
+			match &node.v {
+				ASTValue::DeclarationConstexpr(name, value) => {
+					constexpr_values.insert(name.clone(), value.clone());
+				}
+				ASTValue::DeclarationMulti {
+					names,
+					values: Some(values),
+					constexpr: true,
+					..
+				} => {
+					for (idx, name) in names.iter().enumerate() {
+						if let Some(value) =
+							values.get(idx).or_else(|| values.first())
+						{
+							constexpr_values.insert(
+								name.clone(),
+								value.clone(),
+							);
+						}
+					}
+				}
+				ASTValue::Declaration { value, .. } => {
+					Self::collect_ids_in_ast(value.as_ref(), &mut queue);
+				}
+				ASTValue::DeclarationMulti {
+					values: Some(values),
+					constexpr: false,
+					..
+				} => {
+					for value in values {
+						Self::collect_ids_in_ast(
+							value.as_ref(),
+							&mut queue,
+						);
+					}
+				}
+				_ => {}
+			}
+		}
+
+		let mut required = HashSet::new();
+		while let Some(name) = queue.pop_front() {
+			if !required.insert(name.clone()) {
+				continue;
+			}
+			if let Some(value) = constexpr_values.get(&name) {
+				Self::collect_ids_in_ast(value.as_ref(), &mut queue);
+			}
+		}
+
+		required
+	}
+
+	fn collect_ids_in_ast(node: &AST, out: &mut VecDeque<String>) {
+		match &node.v {
+			ASTValue::Id(name) => out.push_back(name.clone()),
+			ASTValue::Pub(inner)
+			| ASTValue::UnaryPlus(inner)
+			| ASTValue::UnaryMinus(inner)
+			| ASTValue::Not(inner)
+			| ASTValue::Deref(inner)
+			| ASTValue::Mut(inner)
+			| ASTValue::PtrOf(inner)
+			| ASTValue::Defer(inner) => Self::collect_ids_in_ast(inner.as_ref(), out),
+			ASTValue::Ref { v, .. }
+			| ASTValue::DeclarationConstexpr(_, v)
+			| ASTValue::Set(_, v) => Self::collect_ids_in_ast(v.as_ref(), out),
+			ASTValue::Cast { value, .. } | ASTValue::Transmute { value, .. } => {
+				Self::collect_ids_in_ast(value.as_ref(), out)
+			}
+			ASTValue::BinExpr { lhs, rhs, .. } => {
+				Self::collect_ids_in_ast(lhs.as_ref(), out);
+				Self::collect_ids_in_ast(rhs.as_ref(), out);
+			}
+			ASTValue::Declaration { value, .. } => {
+				Self::collect_ids_in_ast(value.as_ref(), out)
+			}
+			ASTValue::DeclarationMulti {
+				values: Some(values),
+				..
+			}
+			| ASTValue::ExprList { items: values, .. }
+			| ASTValue::ExprListNoScope { items: values, .. } => {
+				for value in values {
+					Self::collect_ids_in_ast(value.as_ref(), out);
+				}
+			}
+			ASTValue::SetMulti { values, .. } => {
+				for value in values {
+					Self::collect_ids_in_ast(value.as_ref(), out);
+				}
+			}
+			ASTValue::Call { callee, args } => {
+				Self::collect_ids_in_ast(callee.as_ref(), out);
+				for arg in args {
+					Self::collect_ids_in_ast(arg.as_ref(), out);
+				}
+			}
+			ASTValue::NamedArg { value, .. } | ASTValue::Return(Some(value)) => {
+				Self::collect_ids_in_ast(value.as_ref(), out)
+			}
+			ASTValue::GenericApply { target, args } => {
+				Self::collect_ids_in_ast(target.as_ref(), out);
+				let _ = args;
+			}
+			ASTValue::If {
+				cond,
+				decl,
+				body,
+				else_,
+			} => {
+				Self::collect_ids_in_ast(cond.as_ref(), out);
+				if let Some(decl) = decl {
+					Self::collect_ids_in_ast(decl.as_ref(), out);
+				}
+				Self::collect_ids_in_ast(body.as_ref(), out);
+				if let Some(else_) = else_ {
+					Self::collect_ids_in_ast(else_.as_ref(), out);
+				}
+			}
+			ASTValue::While { cond, decl, body } => {
+				Self::collect_ids_in_ast(cond.as_ref(), out);
+				if let Some(decl) = decl {
+					Self::collect_ids_in_ast(decl.as_ref(), out);
+				}
+				Self::collect_ids_in_ast(body.as_ref(), out);
+			}
+			ASTValue::ForLoop {
+				init,
+				cond,
+				step,
+				body,
+			} => {
+				if let Some(init) = init {
+					Self::collect_ids_in_ast(init.as_ref(), out);
+				}
+				if let Some(cond) = cond {
+					Self::collect_ids_in_ast(cond.as_ref(), out);
+				}
+				if let Some(step) = step {
+					Self::collect_ids_in_ast(step.as_ref(), out);
+				}
+				Self::collect_ids_in_ast(body.as_ref(), out);
+			}
+			ASTValue::For { iter, body, .. } => {
+				Self::collect_ids_in_ast(iter.as_ref(), out);
+				Self::collect_ids_in_ast(body.as_ref(), out);
+			}
+			ASTValue::InitializerList(items)
+			| ASTValue::TypedInitializerList { items, .. } => {
+				for item in items {
+					match item {
+						InitializerItem::Positional(value)
+						| InitializerItem::Named { value, .. } => Self::collect_ids_in_ast(value.as_ref(), out),
+					}
+				}
+			}
+			ASTValue::Index { target, indices } => {
+				Self::collect_ids_in_ast(target.as_ref(), out);
+				for idx in indices {
+					Self::collect_ids_in_ast(idx.as_ref(), out);
+				}
+			}
+			ASTValue::Match {
+				binder,
+				scrutinee,
+				cases,
+			} => {
+				let _ = binder;
+				Self::collect_ids_in_ast(scrutinee.as_ref(), out);
+				for case in cases {
+					if let MatchCasePattern::Exprs(exprs) = &case.pattern {
+						for expr in exprs {
+							Self::collect_ids_in_ast(
+								expr.as_ref(),
+								out,
+							);
+						}
+					}
+					if let Some(guard) = &case.guard {
+						Self::collect_ids_in_ast(guard.as_ref(), out);
+					}
+					Self::collect_ids_in_ast(case.body.as_ref(), out);
+				}
+			}
+			ASTValue::Fn {
+				pre,
+				where_clause,
+				ensures,
+				body,
+				..
+			} => {
+				for pre in pre {
+					Self::collect_ids_in_ast(pre.as_ref(), out);
+				}
+				if let Some(where_clause) = where_clause {
+					Self::collect_ids_in_ast(where_clause.as_ref(), out);
+				}
+				for ensure in ensures {
+					Self::collect_ids_in_ast(ensure.condition.as_ref(), out);
+				}
+				match body {
+					crate::frontend::FnBody::Expr(expr)
+					| crate::frontend::FnBody::Block(expr) => Self::collect_ids_in_ast(expr.as_ref(), out),
+					crate::frontend::FnBody::Uninitialized => {}
+				}
+			}
+			_ => {}
+		}
+	}
+
+	fn has_non_ctfe_error_in(&self, location: &SourceLocation) -> bool {
+		self.errors.iter().any(|err| match err {
+			FrontendError::CtfeError(_) => false,
+			_ => err.get_location().is_some_and(|err_loc| {
+				err_loc.file == location.file
+					&& err_loc.range.begin >= location.range.begin
+					&& err_loc.range.end <= location.range.end
+			}),
+		})
+	}
+
+	fn should_eval_constexpr_value(value: &AST) -> bool {
+		!matches!(
+			value.v,
+			ASTValue::Fn { .. }
+				| ASTValue::Struct { .. } | ASTValue::Enum { .. }
+				| ASTValue::Union { .. } | ASTValue::RawUnion { .. }
+				| ASTValue::Newtype { .. } | ASTValue::Alias { .. }
+		)
 	}
 
 	#[allow(clippy::vec_box)]
@@ -4116,6 +4434,26 @@ impl Pass4State {
 								method_name,
 								&node.location,
 							);
+						if let Some((
+							is_constexpr,
+							is_runtimeable,
+							decl_location,
+						)) = self.fn_flags_from_ast(
+							&module_id,
+							method_name,
+							"runtimeable",
+						) && !ctx.in_constexpr && is_constexpr && self
+							.call_has_runtime_dependent_args(
+								&normalized_args,
+								ctx,
+							) && !is_runtimeable
+						{
+							self.errors.push(FrontendError::ConstexprCallNeedsRuntimeable {
+								location: node.location.clone(),
+								callee: method_name.clone(),
+								declaration_location: decl_location,
+							});
+						}
 						let mut return_ty = self.builtins.unknown_id;
 						let typed_args =
 							if let ResolvedType::Fn {
@@ -4231,6 +4569,27 @@ impl Pass4State {
 								method_name,
 								&node.location,
 							);
+						if let Some((
+							is_constexpr,
+							is_runtimeable,
+							decl_location,
+						)) = self.method_flags_from_ast(
+							lhs_ty,
+							method_name,
+							"runtimeable",
+						) && !ctx.in_constexpr && is_constexpr && (self
+							.expr_uses_runtime_value(lhs.as_ref(), ctx)
+							|| self.call_has_runtime_dependent_args(
+								&normalized_args,
+								ctx,
+							)) && !is_runtimeable
+						{
+							self.errors.push(FrontendError::ConstexprCallNeedsRuntimeable {
+								location: node.location.clone(),
+								callee: method_name.clone(),
+								declaration_location: decl_location,
+							});
+						}
 						if let Some(param_defs) = param_defs.as_deref() {
 							let (required, total) = self
 								.param_count_range(param_defs, 1);
@@ -4555,6 +4914,20 @@ impl Pass4State {
 				&callee_display,
 				&node.location,
 			);
+			if let Some(name) = callee_name.as_ref()
+				&& let Some((is_constexpr, is_runtimeable, decl_location)) =
+					self.fn_flags_from_ast(ctx.module_id, name, "runtimeable")
+				&& !ctx.in_constexpr && is_constexpr
+				&& self.call_has_runtime_dependent_args(&normalized_args, ctx)
+				&& !is_runtimeable
+			{
+				self.errors
+					.push(FrontendError::ConstexprCallNeedsRuntimeable {
+						location: node.location.clone(),
+						callee: name.clone(),
+						declaration_location: decl_location,
+					});
+			}
 			if let Some(name) = callee_name.as_ref() {
 				if let Some(ast_params) =
 					self.fn_param_types_from_ast(ctx.module_id, name)
@@ -6655,6 +7028,109 @@ impl Pass4State {
 		None
 	}
 
+	fn fn_flags_from_ast(
+		&self,
+		module_id: &ModuleId,
+		name: &str,
+		attr: &str,
+	) -> Option<(bool, bool, SourceLocation)> {
+		let declaration_location = self.fn_keyword_location_from_source(module_id, name);
+		let items = self.module_items(module_id);
+		for item in items {
+			let item_location = item.location.clone();
+			let node = Self::unwrap_pub(item.as_ref());
+			match &node.v {
+				ASTValue::DeclarationConstexpr(decl_name, value)
+					if decl_name == name =>
+				{
+					if let ASTValue::Fn { attributes, .. } = &value.v {
+						return Some((
+							true,
+							attributes.iter().any(|a| a == attr),
+							declaration_location
+								.clone()
+								.unwrap_or(item_location.clone()),
+						));
+					}
+				}
+				ASTValue::Declaration {
+					name: decl_name,
+					value,
+					..
+				} if decl_name == name => {
+					if let ASTValue::Fn { attributes, .. } = &value.v {
+						return Some((
+							false,
+							attributes.iter().any(|a| a == attr),
+							declaration_location
+								.clone()
+								.unwrap_or(item_location.clone()),
+						));
+					}
+				}
+				ASTValue::DeclarationMulti {
+					names,
+					values,
+					constexpr,
+					..
+				} => {
+					let Some(values) = values else {
+						continue;
+					};
+					for (idx, decl_name) in names.iter().enumerate() {
+						if decl_name != name {
+							continue;
+						}
+						if let Some(value) = values.get(idx)
+							&& let ASTValue::Fn { attributes, .. } =
+								&value.v
+						{
+							return Some((
+								*constexpr,
+								attributes
+									.iter()
+									.any(|a| a == attr),
+								declaration_location
+									.clone()
+									.unwrap_or(
+										item_location
+											.clone(),
+									),
+							));
+						}
+					}
+				}
+				_ => {}
+			}
+		}
+		None
+	}
+
+	fn call_has_runtime_dependent_args(&self, args: &[Box<AST>], ctx: &TypeContext) -> bool {
+		args.iter()
+			.any(|arg| self.expr_uses_runtime_value(arg.as_ref(), ctx))
+	}
+
+	fn expr_uses_runtime_value(&self, node: &AST, ctx: &TypeContext) -> bool {
+		let mut ids = VecDeque::new();
+		Self::collect_ids_in_ast(node, &mut ids);
+		while let Some(name) = ids.pop_front() {
+			if let Some(info) = ctx.value_scopes.iter().rev().find_map(|s| s.get(&name))
+			{
+				if !info.constexpr {
+					return true;
+				}
+				continue;
+			}
+			if let Some(info) = ctx.module.values.get(&name)
+				&& !info.constexpr
+			{
+				return true;
+			}
+		}
+		false
+	}
+
 	fn method_param_defs_from_ast(
 		&self,
 		ty_id: TypeId,
@@ -6725,6 +7201,163 @@ impl Pass4State {
 			}
 		}
 		let _ = module;
+		None
+	}
+
+	fn method_flags_from_ast(
+		&self,
+		ty_id: TypeId,
+		method_name: &str,
+		attr: &str,
+	) -> Option<(bool, bool, SourceLocation)> {
+		let base_ty = match self.arena.get(ty_id) {
+			ResolvedType::GenericInstance { base, .. } => *base,
+			_ => ty_id,
+		};
+		let (module_id, type_name) = match self.arena.get(base_ty) {
+			ResolvedType::Struct { module, name, .. }
+			| ResolvedType::Union { module, name, .. } => (module.clone(), name.clone()),
+			_ => return None,
+		};
+		let items = self.module_items(&module_id);
+		for item in items {
+			let node = Self::unwrap_pub(item.as_ref());
+			let (decl_name, value) = match &node.v {
+				ASTValue::DeclarationConstexpr(name, value) => (name, value),
+				ASTValue::DeclarationMulti {
+					names,
+					values: Some(values),
+					constexpr: true,
+					..
+				} => {
+					let mut found = None;
+					for (idx, name) in names.iter().enumerate() {
+						if name == &type_name {
+							found = values
+								.get(idx)
+								.map(|value| (name, value));
+							break;
+						}
+					}
+					let Some((decl, value)) = found else {
+						continue;
+					};
+					(decl, value)
+				}
+				_ => continue,
+			};
+			if decl_name != &type_name {
+				continue;
+			}
+			match &value.v {
+				ASTValue::Struct { body, .. } => {
+					if let ASTValue::ExprList { items, .. }
+					| ASTValue::ExprListNoScope { items, .. } = &body.v
+					{
+						if let Some(flags) = self.method_flags_from_items(
+							items,
+							method_name,
+							attr,
+						) {
+							return Some(flags);
+						}
+					}
+				}
+				ASTValue::Union { methods, .. } => {
+					if let Some(flags) = self.method_flags_from_items(
+						methods,
+						method_name,
+						attr,
+					) {
+						return Some(flags);
+					}
+				}
+				_ => {}
+			}
+		}
+		None
+	}
+
+	fn method_flags_from_items(
+		&self,
+		items: &[Box<AST>],
+		method_name: &str,
+		attr: &str,
+	) -> Option<(bool, bool, SourceLocation)> {
+		for item in items {
+			let item_location = item.location.clone();
+			let node = Self::unwrap_pub(item.as_ref());
+			match &node.v {
+				ASTValue::DeclarationConstexpr(name, value)
+					if name == method_name =>
+				{
+					if let ASTValue::Fn { attributes, .. } = &value.v {
+						return Some((
+							true,
+							attributes.iter().any(|a| a == attr),
+							item_location.clone(),
+						));
+					}
+				}
+				ASTValue::DeclarationMulti {
+					names,
+					values: Some(values),
+					constexpr,
+					..
+				} => {
+					for (idx, name) in names.iter().enumerate() {
+						if name != method_name {
+							continue;
+						}
+						if let Some(value) = values.get(idx)
+							&& let ASTValue::Fn { attributes, .. } =
+								&value.v
+						{
+							return Some((
+								*constexpr,
+								attributes
+									.iter()
+									.any(|a| a == attr),
+								item_location.clone(),
+							));
+						}
+					}
+				}
+				_ => {}
+			}
+		}
+		None
+	}
+
+	fn fn_keyword_location_from_source(
+		&self,
+		module_id: &ModuleId,
+		name: &str,
+	) -> Option<SourceLocation> {
+		let module = self.modules.get(module_id)?;
+		let src = read_to_string(&module.file_path).ok()?;
+		for (line_idx, line) in src.lines().enumerate() {
+			let Some(name_pos) = line.find(name) else {
+				continue;
+			};
+			let after_name = &line[name_pos + name.len()..];
+			let Some(fn_rel) = after_name.find("fn") else {
+				continue;
+			};
+			let before_fn = &after_name[..fn_rel];
+			if !(before_fn.contains("::") || before_fn.contains(":=")) {
+				continue;
+			}
+			let fn_col = (name_pos + name.len() + fn_rel + 1) as i32;
+			let line_no = (line_idx + 1) as i32;
+			return Some(SourceLocation {
+				file: module.file_path.clone(),
+				range: crate::frontend::LocationRange {
+					begin: (fn_col, line_no),
+					end: (fn_col, line_no),
+				},
+			});
+		}
 		None
 	}
 
@@ -8096,6 +8729,23 @@ mod tests {
 		assert_fixture_error("testdata/pass4_pointer_in_constexpr", Vec::new(), |err| {
 			matches!(err, FrontendError::PointerInConstexpr { .. })
 		});
+	}
+
+	#[test]
+	fn reports_constexpr_call_needing_runtimeable() {
+		assert_fixture_error(
+			"testdata/pass4_constexpr_runtimeable_required",
+			Vec::new(),
+			|err| matches!(err, FrontendError::ConstexprCallNeedsRuntimeable { .. }),
+		);
+	}
+
+	#[test]
+	fn allows_constexpr_call_with_runtimeable() {
+		let (_typed, _resolved, errors, warnings) =
+			run_fixture("testdata/pass4_constexpr_runtimeable_ok", Vec::new());
+		assert!(errors.is_empty(), "errors: {errors:?}");
+		assert!(warnings.is_empty(), "warnings: {warnings:?}");
 	}
 
 	#[test]

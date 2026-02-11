@@ -1,4 +1,4 @@
-use crate::frontend::{LexerError, SourceLocation, Token, TokenValue};
+use crate::frontend::{CtfeError, LexerError, SourceLocation, Token, TokenValue};
 
 #[derive(Debug, Clone)]
 pub struct SourceLocationBlock {
@@ -243,6 +243,12 @@ pub enum FrontendError {
 		type_name: String,
 		member: String,
 	},
+	ConstexprCallNeedsRuntimeable {
+		location: SourceLocation,
+		callee: String,
+		declaration_location: SourceLocation,
+	},
+	CtfeError(CtfeError),
 }
 
 #[derive(Debug, Clone)]
@@ -253,4 +259,73 @@ pub enum FrontendWarning {
 		chosen_path: String,
 		ignored_paths: Vec<String>,
 	},
+}
+
+impl FrontendError {
+	pub fn get_location(&self) -> Option<&SourceLocation> {
+		match self {
+			FrontendError::ParseError(_) => None,
+			FrontendError::InvalidEnumeratedArrayEnum(location)
+			| FrontendError::StructOrUnionNotInComptimeDeclaration(location)
+			| FrontendError::InvalidDeclarationArity(location)
+			| FrontendError::MissingPackage(location) => Some(location),
+			FrontendError::InitializerListHasDuplicateFields {
+				conflicting_definition,
+				..
+			}
+			| FrontendError::DuplicateValueDeclaration {
+				conflicting_definition,
+				..
+			}
+			| FrontendError::DuplicateFieldDeclaration {
+				conflicting_definition,
+				..
+			} => Some(conflicting_definition),
+			FrontendError::HideOutsideScope { location, .. }
+			| FrontendError::InvalidStructMember { location }
+			| FrontendError::InvalidInterfaceMember { location }
+			| FrontendError::InterfaceFunctionMustBeUninitialized { location }
+			| FrontendError::InlineStructTypeNotAllowed { location }
+			| FrontendError::GenericOperatorConstraint { location, .. }
+			| FrontendError::GenericMemberConstraint { location, .. }
+			| FrontendError::PackageMismatch { location, .. }
+			| FrontendError::ModuleNotFound { location, .. }
+			| FrontendError::DuplicateModuleAlias { location, .. }
+			| FrontendError::DuplicateModuleImport { location, .. }
+			| FrontendError::DuplicateExport { location, .. }
+			| FrontendError::UnknownType { location, .. }
+			| FrontendError::UnknownValue { location, .. }
+			| FrontendError::TypeMismatch { location, .. }
+			| FrontendError::InvalidOperator { location, .. }
+			| FrontendError::InvalidCall { location, .. }
+			| FrontendError::PositionalAfterNamedArgument { location, .. }
+			| FrontendError::UnknownNamedArgument { location, .. }
+			| FrontendError::DuplicateNamedArgument { location, .. }
+			| FrontendError::DuplicateArgument { location, .. }
+			| FrontendError::MissingNamedArgument { location, .. }
+			| FrontendError::DefaultParamOrder { location, .. }
+			| FrontendError::AssignToImmutable { location, .. }
+			| FrontendError::AssignWhileBorrowed { location, .. }
+			| FrontendError::UseAfterMove { location, .. }
+			| FrontendError::MoveWhileBorrowed { location, .. }
+			| FrontendError::AccessWhileMutBorrowed { location, .. }
+			| FrontendError::BorrowSharedWhileMut { location, .. }
+			| FrontendError::BorrowMutWhileShared { location, .. }
+			| FrontendError::MutBorrowOfImmutable { location, .. }
+			| FrontendError::NonStaticModuleMut { location, .. }
+			| FrontendError::PointerInConstexpr { location }
+			| FrontendError::PointerRequiresUnsafe { location }
+			| FrontendError::MissingOperatorSelf { location, .. }
+			| FrontendError::MissingField { location, .. }
+			| FrontendError::CyclicTypeDefinition { location, .. }
+			| FrontendError::InvalidIndex { location, .. }
+			| FrontendError::NonBoolCondition { location, .. }
+			| FrontendError::UntypedLiteralNeedsContext { location, .. }
+			| FrontendError::DuplicateUnionVariantType { location, .. }
+			| FrontendError::UnusedValue { location, .. }
+			| FrontendError::InaccessibleMember { location, .. }
+			| FrontendError::ConstexprCallNeedsRuntimeable { location, .. }
+			| FrontendError::CtfeError(CtfeError { location, .. }) => Some(location),
+		}
+	}
 }

@@ -1,0 +1,21 @@
+// NOTE: This is supposed to be used with --dump-ctfe-results!
+package main
+
+fib :: fn[[runtimeable]](n: int) -> int {
+	if n <= 1 {
+		n
+	} else {
+		fib(n - 1) + fib(n - 2)
+	}
+}
+
+result :: fib(10)
+
+main := fn {
+	runtime_value := 5;
+	res3 := fib(runtime_value);
+	res2 := fib(5);
+	_ = result;
+	_ = res2;
+	_ = res3;
+}

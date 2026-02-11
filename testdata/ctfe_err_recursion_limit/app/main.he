@@ -1,0 +1,7 @@
+package main
+
+loop :: fn(n: int) -> int {
+	loop(n + 1)
+}
+
+bad :: loop(0)

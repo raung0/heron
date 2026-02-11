@@ -1,0 +1,9 @@
+package main
+
+spin :: fn -> int {
+	while true {
+	}
+	0
+}
+
+bad :: spin()

@@ -14,9 +14,7 @@ pub main := fn {
 	// `defer` defers an expression to the end of the scope.
 	defer rl.raw.close_window()
 
-	// Calls the vector's constructor, which returns a mutable self, hence `mut`
-	// keyword is allowed here.
-	player_pos := mut core.math.Vector<f32, 2>()
+	player_pos := mut core.math.Vector<f32, 2>.zero()
 
 	for !rl.raw.window_should_close() {
 		// `do ...` is just syntactic sugar for `{ ... }`

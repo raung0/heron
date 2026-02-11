@@ -1,0 +1,15 @@
+package main
+
+fib :: fn(n: int) -> int {
+	if n <= 1 {
+		n
+	} else {
+		fib(n - 1) + fib(n - 2)
+	}
+}
+
+main := fn {
+	runtime_value := 5
+	res := fib(runtime_value)
+	_ = res
+}

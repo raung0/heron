@@ -1,4 +1,5 @@
 mod ast;
+mod ctfe;
 mod errors;
 mod lexer;
 mod parser;
@@ -10,6 +11,7 @@ mod passes;
 mod typed_ast;
 
 pub use ast::*;
+pub use ctfe::*;
 pub use errors::*;
 pub use lexer::*;
 pub use parser::*;
