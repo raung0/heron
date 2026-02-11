@@ -544,10 +544,11 @@ mod tests {
 		let _ = pass_2(&mut ast);
 		let mut found = false;
 		walk_ast(&ast, None, &mut |node, _| {
-			if let ASTValue::BinExpr { op, has_eq, .. } = &node.v {
-				if matches!(op, Operator::Set) && !*has_eq {
-					found = true;
-				}
+			if let ASTValue::BinExpr { op, has_eq, .. } = &node.v
+				&& matches!(op, Operator::Set)
+				&& !*has_eq
+			{
+				found = true;
 			}
 		});
 		assert!(found, "expected member assignment to stay BinExpr");

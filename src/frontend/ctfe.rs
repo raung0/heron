@@ -1150,8 +1150,7 @@ mod tests {
 		});
 		let err = engine
 			.eval_module_const(ast.as_ref(), "result")
-			.err()
-			.expect("expected recursion limit error");
+			.expect_err("expected recursion limit error");
 		assert!(matches!(err.kind, CtfeErrorKind::RecursionLimitExceeded));
 	}
 
@@ -1165,8 +1164,7 @@ mod tests {
 		});
 		let err = engine
 			.eval_module_const(ast.as_ref(), "result")
-			.err()
-			.expect("expected fuel error");
+			.expect_err("expected fuel error");
 		assert!(matches!(err.kind, CtfeErrorKind::FuelExceeded));
 	}
 

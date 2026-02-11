@@ -3803,6 +3803,13 @@ impl<'a> Parser<'a> {
 #[cfg(test)]
 mod tests {
 	use super::*;
+	type DeclMultiView<'a> = (
+		bool,
+		&'a [String],
+		&'a [Box<crate::frontend::Type>],
+		Option<&'a [Box<AST>]>,
+		bool,
+	);
 
 	fn parse_one(mut lx: Lexer) -> ParseResult {
 		let mut p = Parser::new(&mut lx).expect("parser init");
@@ -3870,6 +3877,7 @@ mod tests {
 		}
 	}
 
+	#[allow(clippy::vec_box)]
 	fn parse_all(mut lx: Lexer) -> Result<Vec<Box<AST>>, ParseError> {
 		let mut p = Parser::new(&mut lx).expect("parser init");
 		let ast = p.parse()?;
@@ -3882,11 +3890,7 @@ mod tests {
 		}
 	}
 
-	fn expect_binary<'a>(
-		ast: &'a AST,
-		expected_op: Operator,
-		expected_has_eq: bool,
-	) -> (&'a AST, &'a AST) {
+	fn expect_binary(ast: &AST, expected_op: Operator, expected_has_eq: bool) -> (&AST, &AST) {
 		match &ast.v {
 			ASTValue::BinExpr {
 				op,
@@ -3904,7 +3908,7 @@ mod tests {
 					"expected has_eq={} but found {}",
 					expected_has_eq, has_eq
 				);
-				(&*lhs, &*rhs)
+				(lhs.as_ref(), rhs.as_ref())
 			}
 			_ => panic!("expected BinaryExpression"),
 		}
@@ -3930,21 +3934,21 @@ mod tests {
 		}
 	}
 
-	fn expect_call<'a>(ast: &'a AST) -> (&'a AST, &'a [Box<AST>]) {
+	fn expect_call(ast: &AST) -> (&AST, &[Box<AST>]) {
 		match &ast.v {
 			ASTValue::Call { callee, args } => (callee.as_ref(), args.as_slice()),
 			_ => panic!("expected Call, got {}", ast),
 		}
 	}
 
-	fn expect_named_arg<'a>(ast: &'a AST) -> (&'a str, &'a AST) {
+	fn expect_named_arg(ast: &AST) -> (&str, &AST) {
 		match &ast.v {
 			ASTValue::NamedArg { name, value } => (name.as_str(), value.as_ref()),
 			_ => panic!("expected NamedArg, got {}", ast),
 		}
 	}
 
-	fn expect_generic_apply<'a>(ast: &'a AST) -> (&'a AST, &'a [GenericArg]) {
+	fn expect_generic_apply(ast: &AST) -> (&AST, &[GenericArg]) {
 		match &ast.v {
 			ASTValue::GenericApply { target, args } => {
 				(target.as_ref(), args.as_slice())
@@ -3953,26 +3957,23 @@ mod tests {
 		}
 	}
 
-	fn expect_pub<'a>(ast: &'a AST) -> &'a AST {
+	fn expect_pub(ast: &AST) -> &AST {
 		match &ast.v {
 			ASTValue::Pub(inner) => inner.as_ref(),
 			_ => panic!("expected Pub, got {}", ast),
 		}
 	}
 
-	fn expect_initializer_list<'a>(ast: &'a AST) -> &'a [crate::frontend::InitializerItem] {
+	fn expect_initializer_list(ast: &AST) -> &[crate::frontend::InitializerItem] {
 		match &ast.v {
 			ASTValue::InitializerList(items) => items.as_slice(),
 			_ => panic!("expected InitializerList, got {}", ast),
 		}
 	}
 
-	fn expect_typed_initializer_list<'a>(
-		ast: &'a AST,
-	) -> (
-		&'a crate::frontend::Type,
-		&'a [crate::frontend::InitializerItem],
-	) {
+	fn expect_typed_initializer_list(
+		ast: &AST,
+	) -> (&crate::frontend::Type, &[crate::frontend::InitializerItem]) {
 		match &ast.v {
 			ASTValue::TypedInitializerList { ty, items } => {
 				(ty.as_ref(), items.as_slice())
@@ -4236,7 +4237,7 @@ mod tests {
 		}
 	}
 
-	fn expect_set_multi<'a>(ast: &'a AST) -> (&'a [String], &'a [Box<AST>]) {
+	fn expect_set_multi(ast: &AST) -> (&[String], &[Box<AST>]) {
 		match &ast.v {
 			ASTValue::SetMulti { names, values } => {
 				(names.as_slice(), values.as_slice())
@@ -4245,15 +4246,7 @@ mod tests {
 		}
 	}
 
-	fn expect_declaration_multi<'a>(
-		ast: &'a AST,
-	) -> (
-		bool,
-		&'a [String],
-		&'a [Box<crate::frontend::Type>],
-		Option<&'a [Box<AST>]>,
-		bool,
-	) {
+	fn expect_declaration_multi(ast: &AST) -> DeclMultiView<'_> {
 		match &ast.v {
 			ASTValue::DeclarationMulti {
 				constexpr,
@@ -4285,9 +4278,7 @@ mod tests {
 		}
 	}
 
-	fn expect_type_array<'a>(
-		t: &'a crate::frontend::Type,
-	) -> (&'a AST, &'a crate::frontend::Type) {
+	fn expect_type_array(t: &crate::frontend::Type) -> (&AST, &crate::frontend::Type) {
 		match t {
 			crate::frontend::Type::Array { size, underlying } => {
 				(size.as_ref(), underlying.as_ref())
@@ -4296,7 +4287,7 @@ mod tests {
 		}
 	}
 
-	fn expect_if<'a>(ast: &'a AST) -> (Option<&'a AST>, &'a AST, &'a AST, Option<&'a AST>) {
+	fn expect_if(ast: &AST) -> (Option<&AST>, &AST, &AST, Option<&AST>) {
 		match &ast.v {
 			ASTValue::If {
 				decl,
@@ -4313,7 +4304,7 @@ mod tests {
 		}
 	}
 
-	fn expect_while<'a>(ast: &'a AST) -> (Option<&'a AST>, &'a AST, &'a AST) {
+	fn expect_while(ast: &AST) -> (Option<&AST>, &AST, &AST) {
 		match &ast.v {
 			ASTValue::While { decl, cond, body } => {
 				(decl.as_deref(), cond.as_ref(), body.as_ref())
@@ -4322,7 +4313,7 @@ mod tests {
 		}
 	}
 
-	fn expect_for<'a>(ast: &'a AST) -> (&'a [Box<AST>], &'a AST, &'a AST) {
+	fn expect_for(ast: &AST) -> (&[Box<AST>], &AST, &AST) {
 		match &ast.v {
 			ASTValue::For {
 				bindings,
@@ -4334,9 +4325,7 @@ mod tests {
 		}
 	}
 
-	fn expect_for_loop<'a>(
-		ast: &'a AST,
-	) -> (Option<&'a AST>, Option<&'a AST>, Option<&'a AST>, &'a AST) {
+	fn expect_for_loop(ast: &AST) -> (Option<&AST>, Option<&AST>, Option<&AST>, &AST) {
 		match &ast.v {
 			ASTValue::ForLoop {
 				init,
@@ -4357,11 +4346,9 @@ mod tests {
 	fn factor_id() {
 		let lx = Lexer::new("foo".to_string(), "<test>".to_string());
 		let ast = parse_one(lx).expect("ok");
-		match *ast {
-			AST { ref v, .. } => match v {
-				ASTValue::Id(s) => assert_eq!(s, "foo"),
-				_ => panic!("expected Id"),
-			},
+		match &ast.v {
+			ASTValue::Id(s) => assert_eq!(s, "foo"),
+			_ => panic!("expected Id"),
 		}
 	}
 
@@ -4369,11 +4356,9 @@ mod tests {
 	fn factor_integer() {
 		let lx = Lexer::new("123".to_string(), "<test>".to_string());
 		let ast = parse_one(lx).expect("ok");
-		match *ast {
-			AST { ref v, .. } => match v {
-				ASTValue::Integer(n) => assert_eq!(*n, 123),
-				_ => panic!("expected Integer"),
-			},
+		match &ast.v {
+			ASTValue::Integer(n) => assert_eq!(*n, 123),
+			_ => panic!("expected Integer"),
 		}
 	}
 
@@ -4381,11 +4366,9 @@ mod tests {
 	fn factor_float() {
 		let lx = Lexer::new("3.5".to_string(), "<test>".to_string());
 		let ast = parse_one(lx).expect("ok");
-		match *ast {
-			AST { ref v, .. } => match v {
-				ASTValue::Float(f) => assert!((*f - 3.5).abs() < 1e-9),
-				_ => panic!("expected Float"),
-			},
+		match &ast.v {
+			ASTValue::Float(f) => assert!((*f - 3.5).abs() < 1e-9),
+			_ => panic!("expected Float"),
 		}
 	}
 
@@ -4393,11 +4376,9 @@ mod tests {
 	fn factor_string() {
 		let lx = Lexer::new(r#""hi""#.to_string(), "<test>".to_string());
 		let ast = parse_one(lx).expect("ok");
-		match *ast {
-			AST { ref v, .. } => match v {
-				ASTValue::String(s) => assert_eq!(s, "hi"),
-				_ => panic!("expected String"),
-			},
+		match &ast.v {
+			ASTValue::String(s) => assert_eq!(s, "hi"),
+			_ => panic!("expected String"),
 		}
 	}
 
@@ -4405,14 +4386,12 @@ mod tests {
 	fn unary_plus_noop() {
 		let lx = Lexer::new("+42".to_string(), "<test>".to_string());
 		let ast = parse_one(lx).expect("ok");
-		match *ast {
-			AST { ref v, .. } => match v {
-				ASTValue::UnaryPlus(inner) => match inner.v {
-					ASTValue::Integer(n) => assert_eq!(n, 42),
-					_ => panic!("expected Integer after unary +"),
-				},
-				_ => panic!("expected UnaryPlus after unary +"),
+		match &ast.v {
+			ASTValue::UnaryPlus(inner) => match &inner.v {
+				ASTValue::Integer(n) => assert_eq!(*n, 42),
+				_ => panic!("expected Integer after unary +"),
 			},
+			_ => panic!("expected UnaryPlus after unary +"),
 		}
 	}
 
@@ -4420,14 +4399,12 @@ mod tests {
 	fn unary_minus_is_unary_op() {
 		let lx = Lexer::new("-7".to_string(), "<test>".to_string());
 		let ast = parse_one(lx).expect("ok");
-		match *ast {
-			AST { ref v, .. } => match v {
-				ASTValue::UnaryMinus(inner) => match inner.v {
-					ASTValue::Integer(n) => assert_eq!(n, 7),
-					_ => panic!("expected Integer after unary -"),
-				},
-				_ => panic!("expected UnaryMinus after unary -"),
+		match &ast.v {
+			ASTValue::UnaryMinus(inner) => match &inner.v {
+				ASTValue::Integer(n) => assert_eq!(*n, 7),
+				_ => panic!("expected Integer after unary -"),
 			},
+			_ => panic!("expected UnaryMinus after unary -"),
 		}
 	}
 
@@ -4840,8 +4817,7 @@ mod tests {
 			".{ 1, .x = 2 }".to_string(),
 			"<test>".to_string(),
 		))
-		.err()
-		.expect("should be Err");
+		.expect_err("should be Err");
 		match err {
 			ParseError::MixedInitializerListStyles(_) => {}
 			other => panic!("expected MixedInitializerListStyles, got {:?}", other),
@@ -4851,8 +4827,7 @@ mod tests {
 			".{ .x = 1, 2 }".to_string(),
 			"<test>".to_string(),
 		))
-		.err()
-		.expect("should be Err");
+		.expect_err("should be Err");
 		match err {
 			ParseError::MixedInitializerListStyles(_) => {}
 			other => panic!("expected MixedInitializerListStyles, got {:?}", other),
@@ -4954,19 +4929,15 @@ mod tests {
 	fn reference_plain() {
 		let lx = Lexer::new("&x".to_string(), "<test>".to_string());
 		let ast = parse_one(lx).expect("ok");
-		match *ast {
-			AST { ref v, .. } => match v {
-				ASTValue::Ref { mutable, v } => {
-					assert_eq!(*mutable, false);
-					match **v {
-						AST { ref v, .. } => match v {
-							ASTValue::Id(s) => assert_eq!(s, "x"),
-							_ => panic!("& should wrap Id"),
-						},
-					}
+		match &ast.v {
+			ASTValue::Ref { mutable, v } => {
+				assert!(!*mutable);
+				match &v.v {
+					ASTValue::Id(s) => assert_eq!(s, "x"),
+					_ => panic!("& should wrap Id"),
 				}
-				_ => panic!("expected Reference"),
-			},
+			}
+			_ => panic!("expected Reference"),
 		}
 	}
 
@@ -4974,7 +4945,7 @@ mod tests {
 	fn invalid_unary_operator() {
 		// '/' as a leading token should be invalid as a unary operator here
 		let lx = Lexer::new("/x".to_string(), "<test>".to_string());
-		let err = parse_one(lx).err().expect("should be Err");
+		let err = parse_one(lx).expect_err("should be Err");
 		match err {
 			ParseError::InvalidUnaryOperator(tok) => match tok.v {
 				TokenValue::Op {

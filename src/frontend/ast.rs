@@ -732,20 +732,6 @@ impl fmt::Debug for AST {
 	}
 }
 
-#[cfg(test)]
-mod tests {
-	use super::*;
-
-	#[test]
-	fn pretty_format_does_not_split_quoted_atoms() {
-		let formatted = AST::pretty_format(r#"(Type "123 456")"#);
-		assert!(
-			formatted.contains(r#""123 456""#),
-			"expected quoted atom to remain intact, got:\n{formatted}"
-		);
-	}
-}
-
 impl fmt::Display for AST {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		use ASTValue::*;
@@ -1676,5 +1662,19 @@ where
 		| ASTValue::Enum { .. }
 		| ASTValue::Newtype { .. }
 		| ASTValue::Alias { .. } => {}
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn pretty_format_does_not_split_quoted_atoms() {
+		let formatted = AST::pretty_format(r#"(Type "123 456")"#);
+		assert!(
+			formatted.contains(r#""123 456""#),
+			"expected quoted atom to remain intact, got:\n{formatted}"
+		);
 	}
 }
