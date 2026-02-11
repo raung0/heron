@@ -5,7 +5,7 @@ use crate::frontend::{Operator, SourceLocation, Trivia};
 #[derive(Clone, Debug, PartialEq)]
 pub enum GenericArg {
 	Type(Box<Type>),
-	Expr(String),
+	Expr(Box<AST>),
 	Name(String),
 }
 
@@ -101,26 +101,26 @@ fn write_param_list(f: &mut fmt::Formatter<'_>, params: &[FnParam]) -> fmt::Resu
 	write!(f, ")")
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub struct FnParam {
 	pub names: Vec<String>,
 	pub ty: Option<Box<Type>>,
 	pub default: Option<Box<AST>>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub struct EnsuresClause {
 	pub binders: Vec<String>,
 	pub condition: Box<AST>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub struct PostClause {
 	pub return_id: Option<String>,
 	pub conditions: Vec<Box<AST>>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub struct MatchBinder {
 	pub by_ref: bool,
 	pub mutable: bool,
@@ -128,34 +128,34 @@ pub struct MatchBinder {
 	pub name: String,
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub enum MatchCasePattern {
 	Default,
 	Exprs(Vec<Box<AST>>),
 	Type(Box<Type>),
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub struct MatchCase {
 	pub pattern: MatchCasePattern,
 	pub guard: Option<Box<AST>>,
 	pub body: Box<AST>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub enum FnBody {
 	Block(Box<AST>),
 	Expr(Box<AST>),
 	Uninitialized,
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub enum InitializerItem {
 	Positional(Box<AST>),
 	Named { name: String, value: Box<AST> },
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub struct EnumVariant {
 	pub name: String,
 	pub value: Option<Box<AST>>,
@@ -191,7 +191,7 @@ pub enum Type {
 	},
 	// [int]#type#
 	Array {
-		size: String,
+		size: Box<AST>,
 		underlying: Box<Type>,
 	},
 	// [^]#type#
@@ -313,7 +313,9 @@ impl fmt::Display for Type {
 			Type::Rune => write!(f, "rune"),
 			Type::Pointer { underlying } => write!(f, "^{}", underlying),
 			Type::Slice { underlying } => write!(f, "[]{}", underlying),
-			Type::Array { size, underlying } => write!(f, "[{}]{}", size, underlying),
+			Type::Array { size, underlying } => {
+				write!(f, "[{}]{}", size, underlying)
+			}
 			Type::CArray { underlying } => write!(f, "[^]{}", underlying),
 			Type::Reference {
 				mutable,
@@ -334,7 +336,7 @@ impl fmt::Display for Type {
 	}
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub enum ASTValue {
 	Package {
 		path: Vec<String>,
@@ -504,6 +506,12 @@ pub struct AST {
 	pub location: SourceLocation,
 	pub trivia: Vec<Trivia>,
 	pub v: ASTValue,
+}
+
+impl PartialEq for AST {
+	fn eq(&self, other: &Self) -> bool {
+		self.v == other.v
+	}
 }
 
 impl AST {
@@ -718,6 +726,12 @@ impl AST {
 	}
 }
 
+impl fmt::Debug for AST {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		write!(f, "{}", self)
+	}
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
@@ -757,7 +771,9 @@ impl fmt::Display for AST {
 				crate::frontend::GenericArg::Type(t) => {
 					write!(f, "(Type \"{}\")", t)
 				}
-				crate::frontend::GenericArg::Expr(e) => write!(f, "(Expr {})", e),
+				crate::frontend::GenericArg::Expr(e) => {
+					write!(f, "(Expr {})", e)
+				}
 				crate::frontend::GenericArg::Name(n) => write!(f, "(Name {:?})", n),
 			}
 		}
@@ -1385,8 +1401,11 @@ where
 			if let Some(w) = where_clause {
 				walk_ast(w, Some(node), predicate);
 			}
-			if let FnBody::Block(b) = body {
-				walk_ast(b, Some(node), predicate);
+			match body {
+				FnBody::Block(b) | FnBody::Expr(b) => {
+					walk_ast(b, Some(node), predicate)
+				}
+				FnBody::Uninitialized => {}
 			}
 		}
 
@@ -1406,8 +1425,46 @@ where
 		} => {
 			walk_ast(scrutinee, Some(node), predicate);
 			for c in cases {
+				if let MatchCasePattern::Exprs(patterns) = &c.pattern {
+					for pat in patterns {
+						walk_ast(pat, Some(node), predicate);
+					}
+				}
+				if let Some(guard) = &c.guard {
+					walk_ast(guard, Some(node), predicate);
+				}
 				walk_ast(&c.body, Some(node), predicate);
 			}
+		}
+
+		ASTValue::InitializerList(items) | ASTValue::TypedInitializerList { items, .. } => {
+			for item in items {
+				match item {
+					InitializerItem::Positional(v) => {
+						walk_ast(v, Some(node), predicate)
+					}
+					InitializerItem::Named { value, .. } => {
+						walk_ast(value, Some(node), predicate)
+					}
+				}
+			}
+		}
+
+		ASTValue::NamedArg { value, .. } => {
+			walk_ast(value, Some(node), predicate);
+		}
+
+		ASTValue::GenericApply { target, args } => {
+			walk_ast(target, Some(node), predicate);
+			for arg in args {
+				if let GenericArg::Expr(expr) = arg {
+					walk_ast(expr, Some(node), predicate);
+				}
+			}
+		}
+
+		ASTValue::Cast { value, .. } | ASTValue::Transmute { value, .. } => {
+			walk_ast(value, Some(node), predicate);
 		}
 
 		_ => {}

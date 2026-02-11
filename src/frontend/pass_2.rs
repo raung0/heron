@@ -60,7 +60,7 @@ pub(crate) fn pass_2(ast: &mut Box<AST>) -> Vec<FrontendError> {
 			check_keyed_initializer_duplicates(items, &mut errors);
 			check_inline_struct_type(ty, &node.location, &mut errors);
 			if let Type::Array { size, .. } = ty.as_ref()
-				&& !is_id_or_dot_id_path(size)
+				&& !is_id_or_dot_id_path(size.as_ref())
 			{
 				errors.push(FrontendError::InvalidEnumeratedArrayEnum(
 					node.location.clone(),
@@ -171,13 +171,17 @@ fn normalize_assignment_binexpr(ast: &mut Box<AST>) {
 	});
 }
 
-fn is_id_or_dot_id_path(size: &str) -> bool {
-	let mut parts = size.split('.');
-	let first = parts.next().unwrap_or("");
-	if first.is_empty() {
-		return false;
+fn is_id_or_dot_id_path(size: &AST) -> bool {
+	match &size.v {
+		ASTValue::Id(_) => true,
+		ASTValue::BinExpr {
+			op: crate::frontend::Operator::Dot,
+			lhs,
+			rhs,
+			has_eq: false,
+		} => is_id_or_dot_id_path(lhs.as_ref()) && matches!(rhs.v, ASTValue::Id(_)),
+		_ => false,
 	}
-	parts.all(|part| !part.is_empty())
 }
 
 fn check_keyed_initializer_duplicates(items: &[InitializerItem], errors: &mut Vec<FrontendError>) {
@@ -343,7 +347,7 @@ fn type_contains_inline_struct(ty: &Type) -> bool {
 	match ty {
 		Type::Generic { args, .. } => args.iter().any(|arg| match arg {
 			crate::frontend::GenericArg::Expr(expr) => {
-				expr.contains("Struct") && expr.contains("ExprList")
+				ast_contains_inline_struct(expr.as_ref())
 			}
 			crate::frontend::GenericArg::Type(inner) => {
 				type_contains_inline_struct(inner)
@@ -367,6 +371,34 @@ fn type_contains_inline_struct(ty: &Type) -> bool {
 		| Type::Reference { underlying, .. } => type_contains_inline_struct(underlying),
 		_ => false,
 	}
+}
+
+fn ast_contains_inline_struct(node: &AST) -> bool {
+	let mut found = false;
+	walk_ast(node, None, &mut |current, _| {
+		if found {
+			return;
+		}
+		match &current.v {
+			ASTValue::Struct { .. } => {
+				found = true;
+			}
+			ASTValue::Type(ty) => {
+				if type_contains_inline_struct(ty) {
+					found = true;
+				}
+			}
+			ASTValue::GenericApply { args, .. } => {
+				if args.iter().any(
+					|arg| matches!(arg, crate::frontend::GenericArg::Type(ty) if type_contains_inline_struct(ty)),
+				) {
+					found = true;
+				}
+			}
+			_ => {}
+		}
+	});
+	found
 }
 
 fn unwrap_pub(node: &AST) -> &AST {

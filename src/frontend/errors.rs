@@ -243,6 +243,10 @@ pub enum FrontendError {
 		type_name: String,
 		member: String,
 	},
+	RuntimeCallInConstexpr {
+		location: SourceLocation,
+		callee: String,
+	},
 	ConstexprCallNeedsRuntimeable {
 		location: SourceLocation,
 		callee: String,
@@ -324,6 +328,7 @@ impl FrontendError {
 			| FrontendError::DuplicateUnionVariantType { location, .. }
 			| FrontendError::UnusedValue { location, .. }
 			| FrontendError::InaccessibleMember { location, .. }
+			| FrontendError::RuntimeCallInConstexpr { location, .. }
 			| FrontendError::ConstexprCallNeedsRuntimeable { location, .. }
 			| FrontendError::CtfeError(CtfeError { location, .. }) => Some(location),
 		}

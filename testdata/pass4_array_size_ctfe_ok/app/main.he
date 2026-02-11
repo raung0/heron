@@ -1,0 +1,7 @@
+package main
+
+N :: 1 + 2
+
+takes := fn (value: [3]int) -> int do value[0]
+
+main := fn (value: [N + 0]int) -> int do takes(value)

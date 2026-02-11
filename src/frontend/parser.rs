@@ -2558,23 +2558,25 @@ impl<'a> Parser<'a> {
 						}))
 					}
 					_ => {
-						let size =
-							match self.parse_expression_with_stop(&[
-								TokenValue::RBracket,
-							]) {
-								Ok(size_expr) => {
-									size_expr.to_string()
+						let size = match self.parse_expression_with_stop(&[
+							TokenValue::RBracket,
+						]) {
+							Ok(size_expr) => size_expr,
+							Err(_) => {
+								let _ = self.recover_to(
+									&[TokenValue::RBracket],
+									false,
+								);
+								if self.cur.v
+									== TokenValue::RBracket
+								{
+									let _ = self.next();
 								}
-								Err(_) => {
-									let _ = self.recover_to(&[TokenValue::RBracket], false);
-									if self.cur.v == TokenValue::RBracket {
-										let _ = self.next();
-									}
-									return Err(ParseError::InvalidArraySize(
+								return Err(ParseError::InvalidArraySize(
 										self.cur.location.clone(),
 									));
-								}
-							};
+							}
+						};
 						if self.cur.v != TokenValue::RBracket {
 							let err = ParseError::InvalidArraySize(
 								self.cur.location.clone(),
@@ -2995,7 +2997,7 @@ impl<'a> Parser<'a> {
 				TokenValue::Comma,
 			));
 		}
-		Ok(GenericArg::Expr(expr.to_string()))
+		Ok(GenericArg::Expr(expr))
 	}
 
 	fn parse_multi_id(&mut self) -> ParseResult {
@@ -4285,10 +4287,10 @@ mod tests {
 
 	fn expect_type_array<'a>(
 		t: &'a crate::frontend::Type,
-	) -> (&'a str, &'a crate::frontend::Type) {
+	) -> (&'a AST, &'a crate::frontend::Type) {
 		match t {
 			crate::frontend::Type::Array { size, underlying } => {
-				(size.as_str(), underlying.as_ref())
+				(size.as_ref(), underlying.as_ref())
 			}
 			_ => panic!("expected Array type"),
 		}
@@ -4562,7 +4564,7 @@ mod tests {
 		assert!(is_mut);
 		assert_eq!(lt, Some('a'));
 		let (size, inner) = expect_type_array(inner);
-		assert_eq!(size, "M");
+		expect_id(size, "M");
 		assert_eq!(*inner, crate::frontend::Type::Rune);
 
 		match types[1].as_ref() {
@@ -4936,7 +4938,11 @@ mod tests {
 				assert_eq!(
 					args[1],
 					crate::frontend::GenericArg::Expr(
-						"(BinExp [op: Add, has_eq: false] N 1)".to_string()
+						parse_expr(Lexer::new(
+							"N + 1".to_string(),
+							"<test>".to_string(),
+						))
+						.expect("expr")
 					)
 				);
 			}
@@ -5982,7 +5988,7 @@ mod tests {
 		match &ast.v {
 			ASTValue::Alias { underlying } => match underlying.as_ref() {
 				crate::frontend::Type::Array { size, underlying } => {
-					assert_eq!(size, "Idx");
+					expect_id(size.as_ref(), "Idx");
 					assert_eq!(
 						*underlying.as_ref(),
 						crate::frontend::Type::Id("Entity".to_string())
@@ -6004,9 +6010,10 @@ mod tests {
 		let (_constexpr, _names, types, _values, _mutable) =
 			expect_declaration_multi(ast.as_ref());
 		let (size, underlying) = expect_type_array(types[0].as_ref());
-		assert!(size.contains("BinExp"));
-		assert!(size.contains("op: Add"));
-		assert!(size.contains("op: Mul"));
+		assert_eq!(
+			size.to_string(),
+			"(BinExp [op: Add, has_eq: false] 1 (BinExp [op: Mul, has_eq: false] 2 3))"
+		);
 		assert_eq!(*underlying, crate::frontend::Type::Id("int".to_string()));
 	}
 

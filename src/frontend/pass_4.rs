@@ -2,13 +2,14 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::read_to_string;
 
 use crate::frontend::{
-	AST, ASTValue, BuiltinType, CtfeEngine, CtfeLimits, EnumVariantInfo, FieldInfo,
-	FrontendError, GenericArg, GenericParam, InitializerItem, MatchCase, MatchCasePattern,
-	MethodInfo, ModuleExports, ModuleId, ModuleImports, ResolvedGenericArg, ResolvedProgram,
-	ResolvedType, SourceLocation, Type, TypeArena, TypeId, TypedAst, TypedEnsuresClause,
-	TypedEnumVariant, TypedFnBody, TypedFnParam, TypedGenericArg, TypedGenericParam,
-	TypedInitializerItem, TypedMatchBinder, TypedMatchCase, TypedMatchCasePattern, TypedModule,
-	TypedPostClause, TypedProgram, TypedValue,
+	AST, ASTValue, BuiltinType, ConstExprKey, ConstValue, CtfeEngine, CtfeLimits,
+	EnumVariantInfo, FieldInfo, FrontendError, GenericArg, GenericParam, InitializerItem,
+	MatchCase, MatchCasePattern, MethodInfo, ModuleExports, ModuleId, ModuleImports,
+	ResolvedGenericArg, ResolvedProgram, ResolvedType, SourceLocation, Type, TypeArena, TypeId,
+	TypeLevelExprKey, TypedAst, TypedEnsuresClause, TypedEnumVariant, TypedFnBody,
+	TypedFnParam, TypedGenericArg, TypedGenericParam, TypedInitializerItem, TypedMatchBinder,
+	TypedMatchCase, TypedMatchCasePattern, TypedModule, TypedPostClause, TypedProgram,
+	TypedValue,
 };
 
 pub struct Pass4Result {
@@ -1571,6 +1572,24 @@ impl Pass4State {
 							);
 						}
 					}
+					ASTValue::Declaration {
+						name,
+						value,
+						mutable,
+					} => {
+						if let Some(fn_ty) = self.fn_type_from_value(
+							&module_id,
+							value,
+							&empty_generic_map,
+							None,
+							&node.location,
+						) {
+							self.insert_value_decl(
+								&module_id, name, fn_ty, false,
+								*mutable,
+							);
+						}
+					}
 					ASTValue::DeclarationMulti {
 						names,
 						types,
@@ -2389,7 +2408,7 @@ impl Pass4State {
 							))
 						}
 						GenericArg::Expr(expr) => {
-							TypedGenericArg::Expr(expr.clone())
+							TypedGenericArg::Expr(expr.to_string())
 						}
 						GenericArg::Name(name) => {
 							TypedGenericArg::Name(name.clone())
@@ -2788,7 +2807,9 @@ impl Pass4State {
 						let found = typed_value
 							.ty
 							.unwrap_or(self.builtins.unknown_id);
-						if !self.type_matches(found, expected) {
+						if found != self.builtins.unknown_id
+							&& !self.type_matches(found, expected)
+						{
 							self.errors.push(
 								FrontendError::TypeMismatch {
 									location: node
@@ -4347,6 +4368,36 @@ impl Pass4State {
 		args: &[Box<AST>],
 		expected: Option<TypeId>,
 	) -> Box<TypedAst> {
+		if let Some((callee_name, callee_ty)) =
+			self.runtime_function_call_in_constexpr(ctx, callee.as_ref())
+		{
+			self.errors.push(FrontendError::RuntimeCallInConstexpr {
+				location: node.location.clone(),
+				callee: callee_name.clone(),
+			});
+			let explicit_types = HashMap::new();
+			let normalized_args = self.strip_named_args(args);
+			let typed_args = self.type_args_with_expected(
+				ctx,
+				&normalized_args,
+				&[],
+				0,
+				&explicit_types,
+				false,
+			);
+			let typed_callee = self.build_typed_id(
+				callee.location.clone(),
+				callee_name,
+				callee_ty,
+			);
+			return self.build_call(
+				node.location.clone(),
+				typed_callee,
+				typed_args,
+				self.builtins.unknown_id,
+			);
+		}
+
 		if let ASTValue::GenericApply { target, .. } = &callee.v {
 			if let ASTValue::Id(name) = &target.v {
 				let param_defs = self.fn_param_defs_from_ast(ctx.module_id, name);
@@ -4970,9 +5021,7 @@ impl Pass4State {
 							ctx.self_type,
 							&callee.location,
 						)),
-						GenericArg::Expr(expr) => {
-							ctx.module.types.get(expr).copied()
-						}
+						GenericArg::Expr(_) => None,
 						GenericArg::Name(_) => None,
 					};
 					if let Some(typed_arg) = typed_arg {
@@ -6263,7 +6312,8 @@ impl Pass4State {
 				TypedFnBody::Uninitialized => (None, &node.location),
 			};
 			if let Some(mut body_ty) = body_ty {
-				if !self.type_matches(body_ty, resolved_return)
+				if body_ty != self.builtins.unknown_id
+					&& !self.type_matches(body_ty, resolved_return)
 					&& !self.coerce_untyped(&mut body_ty, resolved_return)
 				{
 					self.errors.push(FrontendError::TypeMismatch {
@@ -6414,9 +6464,12 @@ impl Pass4State {
 								location,
 							))
 						}
-						GenericArg::Expr(expr) => {
-							ResolvedGenericArg::Expr(expr.clone())
-						}
+						GenericArg::Expr(expr) => ResolvedGenericArg::Expr(
+							self.canonicalize_type_level_expr(
+								module_id,
+								expr.as_ref(),
+							),
+						),
 						GenericArg::Name(name) => {
 							ResolvedGenericArg::Name(name.clone())
 						}
@@ -6502,7 +6555,10 @@ impl Pass4State {
 					location,
 				);
 				self.arena.add(ResolvedType::Array {
-					size: size.clone(),
+					size: self.canonicalize_type_level_expr(
+						module_id,
+						size.as_ref(),
+					),
 					underlying: resolved,
 				})
 			}
@@ -6545,6 +6601,111 @@ impl Pass4State {
 			return SourceLocation::new_from_file(module.file_path.clone());
 		}
 		SourceLocation::new_from_file(module_id.clone())
+	}
+
+	fn build_module_ctfe_engine(&self, module_id: &ModuleId) -> CtfeEngine {
+		let mut engine = CtfeEngine::new(CtfeLimits::default());
+		let Some(module) = self.modules.get(module_id) else {
+			return engine;
+		};
+		let (ASTValue::ExprList { items, .. } | ASTValue::ExprListNoScope { items, .. }) =
+			&module.ast.v
+		else {
+			return engine;
+		};
+		for item in items {
+			let node = Self::unwrap_pub(item.as_ref());
+			engine.register_function_decls(node);
+		}
+		for item in items {
+			let node = Self::unwrap_pub(item.as_ref());
+			match &node.v {
+				ASTValue::DeclarationConstexpr(name, value) => {
+					if !Self::should_eval_constexpr_value(value.as_ref()) {
+						continue;
+					}
+					if let Ok(evaluated) = engine.eval_expr(value.as_ref()) {
+						engine.bind_const(name, evaluated);
+					}
+				}
+				ASTValue::DeclarationMulti {
+					names,
+					values: Some(values),
+					constexpr: true,
+					..
+				} => {
+					for (idx, name) in names.iter().enumerate() {
+						let Some(value) =
+							values.get(idx).or_else(|| values.first())
+						else {
+							continue;
+						};
+						if !Self::should_eval_constexpr_value(
+							value.as_ref(),
+						) {
+							continue;
+						}
+						if let Ok(evaluated) =
+							engine.eval_expr(value.as_ref())
+						{
+							engine.bind_const(name, evaluated);
+						}
+					}
+				}
+				_ => {}
+			}
+		}
+		engine
+	}
+
+	fn const_value_key(value: &ConstValue) -> Option<ConstExprKey> {
+		match value {
+			ConstValue::Void => Some(ConstExprKey::Void),
+			ConstValue::Bool(v) => Some(ConstExprKey::Bool(*v)),
+			ConstValue::Integer(v) => Some(ConstExprKey::Integer(*v)),
+			ConstValue::Float(v) => Some(ConstExprKey::Float(v.to_bits())),
+			ConstValue::Char(v) => Some(ConstExprKey::Char(*v)),
+			ConstValue::String(v) => Some(ConstExprKey::String(v.clone())),
+			ConstValue::Array(values) => {
+				let mut out = Vec::with_capacity(values.len());
+				for value in values {
+					out.push(Self::const_value_key(value)?);
+				}
+				Some(ConstExprKey::Array(out))
+			}
+			ConstValue::Slice(values) => {
+				let mut out = Vec::with_capacity(values.len());
+				for value in values {
+					out.push(Self::const_value_key(value)?);
+				}
+				Some(ConstExprKey::Slice(out))
+			}
+			ConstValue::Record(fields) => {
+				let mut entries: Vec<(&String, &ConstValue)> =
+					fields.iter().collect();
+				entries.sort_by(|a, b| a.0.cmp(b.0));
+				let mut out = Vec::with_capacity(entries.len());
+				for (name, value) in entries {
+					out.push((name.clone(), Self::const_value_key(value)?));
+				}
+				Some(ConstExprKey::Record(out))
+			}
+			ConstValue::Ref(_) => None,
+		}
+	}
+
+	fn canonicalize_type_level_expr(
+		&self,
+		module_id: &ModuleId,
+		expr: &AST,
+	) -> TypeLevelExprKey {
+		let mut engine = self.build_module_ctfe_engine(module_id);
+		if let Ok(value) = engine.eval_expr(expr) {
+			if let Some(key) = Self::const_value_key(&value) {
+				return TypeLevelExprKey::Ctfe(key);
+			}
+		}
+		TypeLevelExprKey::Ast(Box::new(expr.clone()))
 	}
 
 	fn refine_type_location(&self, location: &SourceLocation, name: &str) -> SourceLocation {
@@ -7098,6 +7259,32 @@ impl Pass4State {
 	) -> bool {
 		receiver.map(|node| self.expr_uses_runtime_value(node, ctx))
 			.unwrap_or(false) || self.call_has_runtime_dependent_args(args, ctx)
+	}
+
+	fn runtime_function_call_in_constexpr(
+		&self,
+		ctx: &TypeContext,
+		callee: &AST,
+	) -> Option<(String, TypeId)> {
+		if !ctx.in_constexpr {
+			return None;
+		}
+		let name = match &callee.v {
+			ASTValue::Id(name) => Some(name.as_str()),
+			ASTValue::GenericApply { target, .. } => {
+				if let ASTValue::Id(name) = &target.v {
+					Some(name.as_str())
+				} else {
+					None
+				}
+			}
+			_ => None,
+		}?;
+		let info = self.lookup_value_info(ctx, name)?;
+		if info.constexpr || !matches!(self.arena.get(info.ty), ResolvedType::Fn { .. }) {
+			return None;
+		}
+		Some((name.to_string(), info.ty))
 	}
 
 	fn maybe_require_runtimeable_for_call(
@@ -8595,6 +8782,22 @@ mod tests {
 	}
 
 	#[test]
+	fn allows_array_sizes_with_ctfe_equivalent_expressions() {
+		let (_typed, _resolved, errors, warnings) =
+			run_fixture("testdata/pass4_array_size_ctfe_ok", Vec::new());
+		assert!(errors.is_empty(), "errors: {errors:?}");
+		assert!(warnings.is_empty(), "warnings: {warnings:?}");
+	}
+
+	#[test]
+	fn allows_value_generic_args_with_ctfe_equivalent_expressions() {
+		let (_typed, _resolved, errors, warnings) =
+			run_fixture("testdata/pass4_generic_value_ctfe_ok", Vec::new());
+		assert!(errors.is_empty(), "errors: {errors:?}");
+		assert!(warnings.is_empty(), "warnings: {warnings:?}");
+	}
+
+	#[test]
 	fn reports_generic_member_constraint() {
 		assert_fixture_error(
 			"testdata/pass4_generics_missing_member",
@@ -8764,6 +8967,18 @@ mod tests {
 			run_fixture("testdata/pass4_constexpr_runtimeable_ok", Vec::new());
 		assert!(errors.is_empty(), "errors: {errors:?}");
 		assert!(warnings.is_empty(), "warnings: {warnings:?}");
+	}
+
+	#[test]
+	fn reports_runtime_call_in_constexpr_without_cascade_mismatch() {
+		let (_typed, _resolved, errors, warnings) =
+			run_fixture("testdata/pass4_constexpr_runtime_call", Vec::new());
+		assert!(warnings.is_empty(), "warnings: {warnings:?}");
+		assert_eq!(errors.len(), 1, "errors: {errors:?}");
+		assert!(matches!(
+			errors[0],
+			FrontendError::RuntimeCallInConstexpr { .. }
+		));
 	}
 
 	#[test]

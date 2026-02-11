@@ -1,6 +1,9 @@
 use std::collections::HashMap;
+use std::fmt;
 
-use crate::frontend::{ModuleExports, ModuleId, ModuleImports, Operator, SourceLocation, Trivia};
+use crate::frontend::{
+	AST, ModuleExports, ModuleId, ModuleImports, Operator, SourceLocation, Trivia,
+};
 
 pub type TypeId = usize;
 
@@ -64,7 +67,7 @@ pub enum ResolvedType {
 		underlying: TypeId,
 	},
 	Array {
-		size: String,
+		size: TypeLevelExprKey,
 		underlying: TypeId,
 	},
 	CArray {
@@ -92,8 +95,79 @@ pub enum ResolvedType {
 #[derive(Clone, Debug)]
 pub enum ResolvedGenericArg {
 	Type(TypeId),
-	Expr(String),
+	Expr(TypeLevelExprKey),
 	Name(String),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum TypeLevelExprKey {
+	Ctfe(ConstExprKey),
+	Ast(Box<AST>),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ConstExprKey {
+	Void,
+	Bool(bool),
+	Integer(i128),
+	Float(u64),
+	Char(char),
+	String(String),
+	Array(Vec<ConstExprKey>),
+	Slice(Vec<ConstExprKey>),
+	Record(Vec<(String, ConstExprKey)>),
+}
+
+impl fmt::Display for ConstExprKey {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		match self {
+			ConstExprKey::Void => write!(f, "void"),
+			ConstExprKey::Bool(v) => write!(f, "bool:{v}"),
+			ConstExprKey::Integer(v) => write!(f, "int:{v}"),
+			ConstExprKey::Float(bits) => write!(f, "float:{bits}"),
+			ConstExprKey::Char(v) => write!(f, "char:{v:?}"),
+			ConstExprKey::String(v) => write!(f, "string:{v:?}"),
+			ConstExprKey::Array(values) => {
+				write!(f, "array:[")?;
+				for (idx, value) in values.iter().enumerate() {
+					if idx > 0 {
+						write!(f, ",")?;
+					}
+					write!(f, "{value}")?;
+				}
+				write!(f, "]")
+			}
+			ConstExprKey::Slice(values) => {
+				write!(f, "slice:[")?;
+				for (idx, value) in values.iter().enumerate() {
+					if idx > 0 {
+						write!(f, ",")?;
+					}
+					write!(f, "{value}")?;
+				}
+				write!(f, "]")
+			}
+			ConstExprKey::Record(entries) => {
+				write!(f, "record:{{")?;
+				for (idx, (name, value)) in entries.iter().enumerate() {
+					if idx > 0 {
+						write!(f, ",")?;
+					}
+					write!(f, "{name}={value}")?;
+				}
+				write!(f, "}}")
+			}
+		}
+	}
+}
+
+impl fmt::Display for TypeLevelExprKey {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		match self {
+			TypeLevelExprKey::Ctfe(value) => write!(f, "ctfe:{value}"),
+			TypeLevelExprKey::Ast(expr) => write!(f, "{expr}"),
+		}
+	}
 }
 
 #[derive(Clone, Debug)]

@@ -1,0 +1,11 @@
+package main
+
+non_constexpr := fn -> int do 32
+
+constexpr :: fn -> int {
+	non_constexpr()
+}
+
+main :: fn {
+	_ = constexpr()
+}

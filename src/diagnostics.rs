@@ -450,6 +450,13 @@ fn emit_error_message(
 			locations.push(location);
 			message(format!("unknown value `{name}`"))
 		}
+		FrontendError::RuntimeCallInConstexpr { location, callee } => {
+			labels.push(Some("runtime call in constexpr".to_string()));
+			locations.push(location);
+			message(format!(
+				"attempt to call runtime function `{callee}` in constexpr context"
+			))
+		}
 		FrontendError::TypeMismatch {
 			location,
 			expected,

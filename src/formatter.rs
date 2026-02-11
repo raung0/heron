@@ -2211,7 +2211,7 @@ impl Formatter {
 		args.iter()
 			.map(|arg| match arg {
 				GenericArg::Type(t) => self.format_type(t),
-				GenericArg::Expr(e) => e.clone(),
+				GenericArg::Expr(e) => e.to_string(),
 				GenericArg::Name(n) => n.clone(),
 			})
 			.collect::<Vec<_>>()
