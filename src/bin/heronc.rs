@@ -1,11 +1,15 @@
 #![allow(dead_code)]
 
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::io::{self, Write};
+use std::time::{Duration, Instant};
 
 use clap::{Arg, ArgAction, Command};
 use heron::diagnostics::{Message, emit_message, pretty_print_error, pretty_print_multiple_errors};
-use heron::frontend::{self, FrontendError, dot_module_graph, run_passes_with_modules};
-use termcolor::{ColorChoice, StandardStream};
+use heron::frontend::{
+	self, FrontendError, PassTimings, dot_module_graph, run_passes_with_modules_timed,
+};
+use termcolor::{Color, ColorChoice, ColorSpec, StandardStream, WriteColor};
 
 fn main() {
 	let matches = Command::new("heronc")
@@ -47,29 +51,46 @@ fn main() {
 		.expect("clap enforces required argument")
 		.to_owned();
 	let file_for_lexer = file.clone();
+	let compilation_start = Instant::now();
+	let mut timings = CompilationTimings::default();
+	let mut compilation_succeeded = false;
 
+	let read_start = Instant::now();
 	let input = match std::fs::read_to_string(&file) {
-		Ok(input) => input,
+		Ok(input) => {
+			timings.read = Some(read_start.elapsed());
+			input
+		}
 		Err(e) => {
+			timings.read = Some(read_start.elapsed());
 			eprintln!("error: failed to read `{file}`: {e}");
+			eprintln!();
+			timings.total = compilation_start.elapsed();
+			let _ = print_compilation_timings(&timings, false);
 			std::process::exit(1);
 		}
 	};
 
+	let parse_start = Instant::now();
 	let mut lexer = frontend::Lexer::new(input, file_for_lexer);
 	let input = lexer.get_input();
 	let mut parser = match frontend::Parser::new(&mut lexer) {
 		Ok(parser) => parser,
 		Err(err) => {
+			timings.parse = Some(parse_start.elapsed());
 			pretty_print_error(
 				heron::frontend::FrontendError::ParseError(err),
 				input.as_str(),
 			);
+			eprintln!();
+			timings.total = compilation_start.elapsed();
+			let _ = print_compilation_timings(&timings, false);
 			return;
 		}
 	};
 	let ast = parser.parse();
 	let errors = parser.take_errors();
+	timings.parse = Some(parse_start.elapsed());
 	if errors.is_empty() {
 		match ast {
 			Ok(ast) => {
@@ -82,8 +103,13 @@ fn main() {
 						)
 					);
 				}
-				let (_typed_program, program, errors, warnings) =
-					run_passes_with_modules(ast, file.as_str(), &module_paths);
+				let (_typed_program, program, errors, warnings, pass_timings) =
+					run_passes_with_modules_timed(
+						ast,
+						file.as_str(),
+						&module_paths,
+					);
+				timings.frontend = Some(pass_timings);
 				if !warnings.is_empty() {
 					let mut stderr = StandardStream::stderr(ColorChoice::Auto);
 					for warning in warnings {
@@ -96,6 +122,9 @@ fn main() {
 				}
 				if !errors.is_empty() {
 					pretty_print_multiple_errors(input, errors);
+					eprintln!();
+					timings.total = compilation_start.elapsed();
+					let _ = print_compilation_timings(&timings, false);
 					return;
 				}
 				if dump_ctfe_results {
@@ -104,6 +133,7 @@ fn main() {
 				if dump_module_graph {
 					println!("{}", dot_module_graph(&program));
 				}
+				compilation_succeeded = true;
 			}
 			Err(e) => pretty_print_error(
 				heron::frontend::FrontendError::ParseError(e),
@@ -116,6 +146,102 @@ fn main() {
 			.map(|x| FrontendError::ParseError(x.clone()))
 			.collect();
 		pretty_print_multiple_errors(input, errors);
+	}
+	if !compilation_succeeded {
+		eprintln!();
+	}
+	timings.total = compilation_start.elapsed();
+	let _ = print_compilation_timings(&timings, compilation_succeeded);
+}
+
+#[derive(Default)]
+struct CompilationTimings {
+	read: Option<Duration>,
+	parse: Option<Duration>,
+	frontend: Option<PassTimings>,
+	total: Duration,
+}
+
+fn print_compilation_timings(
+	timings: &CompilationTimings,
+	compilation_succeeded: bool,
+) -> io::Result<()> {
+	let mut stderr = StandardStream::stderr(ColorChoice::Auto);
+	writeln!(&mut stderr, "Compilation timings:\n")?;
+	stderr.reset()?;
+	if let Some(read) = timings.read {
+		write_duration_line(&mut stderr, "Read Source", read)?;
+	}
+	if let Some(parse) = timings.parse {
+		write_duration_line(&mut stderr, "Parse", parse)?;
+	}
+	if let Some(frontend) = timings.frontend {
+		write_duration_line(&mut stderr, "Frontend", frontend.total)?;
+		write_duration_line(&mut stderr, "Pass 1", frontend.pass_1)?;
+		write_duration_line(&mut stderr, "Pass 2", frontend.pass_2)?;
+		write_duration_line(&mut stderr, "Pass 3", frontend.pass_3)?;
+		write_duration_line(&mut stderr, "Pass 4", frontend.pass_4)?;
+		write_duration_line(&mut stderr, "Pass 5", frontend.pass_5)?;
+	}
+	writeln!(&mut stderr)?;
+
+	let mut status_color = ColorSpec::new();
+	if compilation_succeeded {
+		status_color.set_fg(Some(Color::Green)).set_bold(true);
+		stderr.set_color(&status_color)?;
+		write!(&mut stderr, "Compilation finished")?;
+	} else {
+		status_color.set_fg(Some(Color::Red)).set_bold(true);
+		stderr.set_color(&status_color)?;
+		write!(&mut stderr, "Compilation failed")?;
+	}
+	stderr.reset()?;
+	write!(&mut stderr, " in ")?;
+	write_cyan_duration(&mut stderr, timings.total)?;
+	writeln!(&mut stderr)?;
+	Ok(())
+}
+
+fn write_duration_line<W: WriteColor>(
+	writer: &mut W,
+	label: &str,
+	duration: Duration,
+) -> io::Result<()> {
+	let mut label_spec = ColorSpec::new();
+	label_spec.set_fg(Some(Color::Yellow));
+	write!(writer, "\t")?;
+	writer.set_color(&label_spec)?;
+	write!(writer, "{label}")?;
+	writer.reset()?;
+	write!(writer, ": ")?;
+	write_cyan_duration(writer, duration)?;
+	writeln!(writer)?;
+	Ok(())
+}
+
+fn write_cyan_duration<W: WriteColor>(writer: &mut W, duration: Duration) -> io::Result<()> {
+	let mut spec = ColorSpec::new();
+	spec.set_fg(Some(Color::Cyan));
+	writer.set_color(&spec)?;
+	write!(writer, "{}", format_duration(duration))?;
+	writer.reset()?;
+	Ok(())
+}
+
+fn format_duration(duration: Duration) -> String {
+	if duration.as_secs() >= 60 {
+		let total_seconds = duration.as_secs_f64();
+		let minutes = (total_seconds / 60.0).floor() as u64;
+		let seconds = total_seconds - (minutes as f64 * 60.0);
+		format!("{minutes}m {seconds:.3}s")
+	} else if duration.as_secs_f64() >= 1.0 {
+		format!("{:.3}s", duration.as_secs_f64())
+	} else if duration.as_secs_f64() >= 0.001 {
+		format!("{:.3}ms", duration.as_secs_f64() * 1_000.0)
+	} else if duration.as_secs_f64() >= 0.000_001 {
+		format!("{:.3}us", duration.as_secs_f64() * 1_000_000.0)
+	} else {
+		format!("{}ns", duration.as_nanos())
 	}
 }
 
