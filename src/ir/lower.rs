@@ -271,6 +271,13 @@ pub fn lower_typed_program_to_ir(
 		for type_ty in module.types.values() {
 			let _ = type_ctx.lower(*type_ty, &mut out.types);
 		}
+		let module_lowering_data = ModuleLoweringData {
+			module_id,
+			module,
+			module_comptime_consts: &module_comptime_consts,
+			module_runtime_ctfe_consts: &module_runtime_ctfe_consts,
+			builtin_void_ty,
+		};
 
 		if let TypedValue::ExprList { items, .. }
 		| TypedValue::ExprListNoScope { items, .. } = &module.ast.v
@@ -285,13 +292,9 @@ pub fn lower_typed_program_to_ir(
 					TypedValue::Declaration { name, value, .. }
 					| TypedValue::DeclarationComptime(name, value) => {
 						match maybe_collect_function(
-							module_id,
 							name,
 							value.as_ref(),
-							module,
-							&module_comptime_consts,
-							&module_runtime_ctfe_consts,
-							builtin_void_ty,
+							&module_lowering_data,
 							&mut type_ctx,
 							&mut out.types,
 						) {
@@ -315,13 +318,9 @@ pub fn lower_typed_program_to_ir(
 								continue;
 							};
 							match maybe_collect_function(
-								module_id,
 								name,
 								value.as_ref(),
-								module,
-								&module_comptime_consts,
-								&module_runtime_ctfe_consts,
-								builtin_void_ty,
+								&module_lowering_data,
 								&mut type_ctx,
 								&mut out.types,
 							) {
@@ -421,6 +420,7 @@ fn collect_module_runtime_ctfe_consts(
 		return out;
 	};
 	let required_comptimes = collect_required_comptime_names(items);
+	let known_fn_names = collect_module_function_names(items);
 	let mut engine = CtfeEngine::new(crate::frontend::CtfeLimits::default());
 	for item in items {
 		engine.register_function_decls(unwrap_pub(item.as_ref()));
@@ -460,19 +460,58 @@ fn collect_module_runtime_ctfe_consts(
 		}
 	}
 
-	let mut runtime_scopes = vec![HashSet::new()];
+	let runtime_scopes = vec![HashSet::new()];
 	for item in items {
 		let target = unwrap_pub(item.as_ref());
-		collect_runtime_ctfe_candidates(&mut engine, target, &mut runtime_scopes, &mut out);
+		collect_runtime_ctfe_candidates(
+			&mut engine,
+			target,
+			&runtime_scopes,
+			&known_fn_names,
+			&mut out,
+		);
 	}
 
+	out
+}
+
+fn collect_module_function_names(items: &[Box<crate::frontend::AST>]) -> HashSet<String> {
+	let mut out = HashSet::new();
+	for item in items {
+		let target = unwrap_pub(item.as_ref());
+		match &target.v {
+			ASTValue::Declaration { name, value, .. }
+			| ASTValue::DeclarationComptime(name, value) => {
+				if matches!(value.v, ASTValue::Fn { .. }) {
+					out.insert(name.clone());
+				}
+			}
+			ASTValue::DeclarationMulti {
+				names,
+				values: Some(values),
+				..
+			} => {
+				for (idx, name) in names.iter().enumerate() {
+					if let Some(value) =
+						values.get(idx).or_else(|| values.first()) && matches!(
+						value.v,
+						ASTValue::Fn { .. }
+					) {
+						out.insert(name.clone());
+					}
+				}
+			}
+			_ => {}
+		}
+	}
 	out
 }
 
 fn collect_runtime_ctfe_candidates(
 	engine: &mut CtfeEngine,
 	node: &crate::frontend::AST,
-	runtime_scopes: &mut Vec<HashSet<String>>,
+	runtime_scopes: &[HashSet<String>],
+	known_fn_names: &HashSet<String>,
 	out: &mut HashMap<String, ConstValue>,
 ) {
 	match &node.v {
@@ -484,13 +523,20 @@ fn collect_runtime_ctfe_candidates(
 			if let ASTValue::Fn { body, .. } = &value.v {
 				let mut nested_scopes = runtime_scopes.to_vec();
 				nested_scopes.push(HashSet::new());
-				collect_fn_body_runtime_ctfe(engine, body, &mut nested_scopes, out);
+				collect_fn_body_runtime_ctfe(
+					engine,
+					body,
+					&mut nested_scopes,
+					known_fn_names,
+					out,
+				);
 			} else {
 				collect_runtime_decl_value_ctfe(
 					engine,
 					name,
 					value.as_ref(),
 					runtime_scopes,
+					known_fn_names,
 					out,
 				);
 			}
@@ -508,6 +554,7 @@ fn collect_runtime_ctfe_candidates(
 						name,
 						value.as_ref(),
 						runtime_scopes,
+						known_fn_names,
 						out,
 					);
 				}
@@ -522,12 +569,13 @@ fn collect_runtime_decl_value_ctfe(
 	_name: &str,
 	value: &crate::frontend::AST,
 	runtime_scopes: &[HashSet<String>],
+	known_fn_names: &HashSet<String>,
 	out: &mut HashMap<String, ConstValue>,
 ) {
 	if let ASTValue::Fn { body, .. } = &value.v {
 		let mut nested_scopes = runtime_scopes.to_vec();
 		nested_scopes.push(HashSet::new());
-		collect_fn_body_runtime_ctfe(engine, body, &mut nested_scopes, out);
+		collect_fn_body_runtime_ctfe(engine, body, &mut nested_scopes, known_fn_names, out);
 		return;
 	}
 	if expr_depends_on_runtime_locals(value, runtime_scopes) {
@@ -536,9 +584,13 @@ fn collect_runtime_decl_value_ctfe(
 	if !expr_contains_call(value) {
 		return;
 	}
-	if should_eval_comptime_value(value)
-		&& let Ok(result) = engine.eval_expr(value)
-	{
+	if !expr_calls_only_known_functions(value, known_fn_names) {
+		return;
+	}
+	if !should_eval_comptime_value(value) {
+		return;
+	}
+	if let Ok(result) = engine.eval_expr(value) {
 		out.insert(source_location_key(&value.location), result);
 	}
 }
@@ -547,11 +599,18 @@ fn collect_fn_body_runtime_ctfe(
 	engine: &mut CtfeEngine,
 	body: &crate::frontend::FnBody,
 	runtime_scopes: &mut Vec<HashSet<String>>,
+	known_fn_names: &HashSet<String>,
 	out: &mut HashMap<String, ConstValue>,
 ) {
 	match body {
 		crate::frontend::FnBody::Block(ast) | crate::frontend::FnBody::Expr(ast) => {
-			collect_ast_runtime_ctfe(engine, ast.as_ref(), runtime_scopes, out)
+			collect_ast_runtime_ctfe(
+				engine,
+				ast.as_ref(),
+				runtime_scopes,
+				known_fn_names,
+				out,
+			)
 		}
 		crate::frontend::FnBody::Uninitialized => {}
 	}
@@ -561,6 +620,7 @@ fn collect_ast_runtime_ctfe(
 	engine: &mut CtfeEngine,
 	node: &crate::frontend::AST,
 	runtime_scopes: &mut Vec<HashSet<String>>,
+	known_fn_names: &HashSet<String>,
 	out: &mut HashMap<String, ConstValue>,
 ) {
 	match &node.v {
@@ -571,6 +631,7 @@ fn collect_ast_runtime_ctfe(
 					engine,
 					item.as_ref(),
 					runtime_scopes,
+					known_fn_names,
 					out,
 				);
 			}
@@ -582,6 +643,7 @@ fn collect_ast_runtime_ctfe(
 				name,
 				value.as_ref(),
 				runtime_scopes,
+				known_fn_names,
 				out,
 			);
 			if let Some(scope) = runtime_scopes.last_mut() {
@@ -601,6 +663,7 @@ fn collect_ast_runtime_ctfe(
 						name,
 						value.as_ref(),
 						runtime_scopes,
+						known_fn_names,
 						out,
 					);
 				}
@@ -628,15 +691,23 @@ fn collect_ast_runtime_ctfe(
 					engine,
 					decl.as_ref(),
 					runtime_scopes,
+					known_fn_names,
 					out,
 				);
 			}
-			collect_ast_runtime_ctfe(engine, body.as_ref(), runtime_scopes, out);
+			collect_ast_runtime_ctfe(
+				engine,
+				body.as_ref(),
+				runtime_scopes,
+				known_fn_names,
+				out,
+			);
 			if let Some(else_) = else_ {
 				collect_ast_runtime_ctfe(
 					engine,
 					else_.as_ref(),
 					runtime_scopes,
+					known_fn_names,
 					out,
 				);
 			}
@@ -647,10 +718,17 @@ fn collect_ast_runtime_ctfe(
 					engine,
 					decl.as_ref(),
 					runtime_scopes,
+					known_fn_names,
 					out,
 				);
 			}
-			collect_ast_runtime_ctfe(engine, body.as_ref(), runtime_scopes, out);
+			collect_ast_runtime_ctfe(
+				engine,
+				body.as_ref(),
+				runtime_scopes,
+				known_fn_names,
+				out,
+			);
 		}
 		ASTValue::ForLoop {
 			init, step, body, ..
@@ -660,6 +738,7 @@ fn collect_ast_runtime_ctfe(
 					engine,
 					init.as_ref(),
 					runtime_scopes,
+					known_fn_names,
 					out,
 				);
 			}
@@ -668,20 +747,32 @@ fn collect_ast_runtime_ctfe(
 					engine,
 					step.as_ref(),
 					runtime_scopes,
+					known_fn_names,
 					out,
 				);
 			}
-			collect_ast_runtime_ctfe(engine, body.as_ref(), runtime_scopes, out);
+			collect_ast_runtime_ctfe(
+				engine,
+				body.as_ref(),
+				runtime_scopes,
+				known_fn_names,
+				out,
+			);
 		}
-		ASTValue::For { body, .. } => {
-			collect_ast_runtime_ctfe(engine, body.as_ref(), runtime_scopes, out)
-		}
+		ASTValue::For { body, .. } => collect_ast_runtime_ctfe(
+			engine,
+			body.as_ref(),
+			runtime_scopes,
+			known_fn_names,
+			out,
+		),
 		ASTValue::Match { cases, .. } => {
 			for case in cases {
 				collect_ast_runtime_ctfe(
 					engine,
 					case.body.as_ref(),
 					runtime_scopes,
+					known_fn_names,
 					out,
 				);
 			}
@@ -815,6 +906,167 @@ fn expr_contains_call(node: &crate::frontend::AST) -> bool {
 	}
 }
 
+fn expr_calls_only_known_functions(
+	node: &crate::frontend::AST,
+	known_fn_names: &HashSet<String>,
+) -> bool {
+	match &node.v {
+		ASTValue::Call { callee, args } => {
+			let callee_ok = match &callee.v {
+				ASTValue::Id(name) | ASTValue::DotId(name) => {
+					known_fn_names.contains(name)
+				}
+				ASTValue::GenericApply { target, .. } => match &target.v {
+					ASTValue::Id(name) | ASTValue::DotId(name) => {
+						known_fn_names.contains(name)
+					}
+					_ => false,
+				},
+				_ => false,
+			};
+			callee_ok
+				&& args.iter().all(|arg| {
+					expr_calls_only_known_functions(
+						arg.as_ref(),
+						known_fn_names,
+					)
+				})
+		}
+		ASTValue::Pub(inner)
+		| ASTValue::UnaryPlus(inner)
+		| ASTValue::UnaryMinus(inner)
+		| ASTValue::Not(inner)
+		| ASTValue::Deref(inner)
+		| ASTValue::Mut(inner)
+		| ASTValue::PtrOf(inner)
+		| ASTValue::Defer(inner)
+		| ASTValue::Ref { v: inner, .. }
+		| ASTValue::DeclarationComptime(_, inner)
+		| ASTValue::Set(_, inner)
+		| ASTValue::Cast { value: inner, .. }
+		| ASTValue::Transmute { value: inner, .. }
+		| ASTValue::Declaration { value: inner, .. }
+		| ASTValue::NamedArg { value: inner, .. }
+		| ASTValue::Return(Some(inner)) => {
+			expr_calls_only_known_functions(inner.as_ref(), known_fn_names)
+		}
+		ASTValue::BinExpr { lhs, rhs, .. } => {
+			expr_calls_only_known_functions(lhs.as_ref(), known_fn_names)
+				&& expr_calls_only_known_functions(rhs.as_ref(), known_fn_names)
+		}
+		ASTValue::DeclarationMulti {
+			values: Some(values),
+			..
+		}
+		| ASTValue::ExprList { items: values, .. }
+		| ASTValue::ExprListNoScope { items: values, .. }
+		| ASTValue::SetMulti { values, .. } => values
+			.iter()
+			.all(|v| expr_calls_only_known_functions(v.as_ref(), known_fn_names)),
+		ASTValue::GenericApply { target, .. } => {
+			expr_calls_only_known_functions(target.as_ref(), known_fn_names)
+		}
+		ASTValue::If {
+			cond,
+			decl,
+			body,
+			else_,
+		} => {
+			expr_calls_only_known_functions(cond.as_ref(), known_fn_names)
+				&& decl.as_ref().is_none_or(|d| {
+					expr_calls_only_known_functions(d.as_ref(), known_fn_names)
+				}) && expr_calls_only_known_functions(body.as_ref(), known_fn_names)
+				&& else_.as_ref().is_none_or(|e| {
+					expr_calls_only_known_functions(e.as_ref(), known_fn_names)
+				})
+		}
+		ASTValue::While { cond, decl, body } => {
+			expr_calls_only_known_functions(cond.as_ref(), known_fn_names)
+				&& decl.as_ref().is_none_or(|d| {
+					expr_calls_only_known_functions(d.as_ref(), known_fn_names)
+				}) && expr_calls_only_known_functions(body.as_ref(), known_fn_names)
+		}
+		ASTValue::ForLoop {
+			init,
+			cond,
+			step,
+			body,
+		} => {
+			init.as_ref().is_none_or(|i| {
+				expr_calls_only_known_functions(i.as_ref(), known_fn_names)
+			}) && cond.as_ref().is_none_or(|c| {
+				expr_calls_only_known_functions(c.as_ref(), known_fn_names)
+			}) && step.as_ref().is_none_or(|s| {
+				expr_calls_only_known_functions(s.as_ref(), known_fn_names)
+			}) && expr_calls_only_known_functions(body.as_ref(), known_fn_names)
+		}
+		ASTValue::For { iter, body, .. } => {
+			expr_calls_only_known_functions(iter.as_ref(), known_fn_names)
+				&& expr_calls_only_known_functions(body.as_ref(), known_fn_names)
+		}
+		ASTValue::InitializerList(items) | ASTValue::TypedInitializerList { items, .. } => {
+			items.iter().all(|item| match item {
+				crate::frontend::InitializerItem::Positional(value)
+				| crate::frontend::InitializerItem::Named { value, .. } => expr_calls_only_known_functions(
+					value.as_ref(),
+					known_fn_names,
+				),
+			})
+		}
+		ASTValue::Index { target, indices } => {
+			expr_calls_only_known_functions(target.as_ref(), known_fn_names)
+				&& indices.iter().all(|idx| {
+					expr_calls_only_known_functions(
+						idx.as_ref(),
+						known_fn_names,
+					)
+				})
+		}
+		ASTValue::Match {
+			scrutinee, cases, ..
+		} => {
+			expr_calls_only_known_functions(scrutinee.as_ref(), known_fn_names)
+				&& cases.iter().all(|case| {
+					case.guard.as_ref().is_none_or(|guard| {
+						expr_calls_only_known_functions(
+							guard.as_ref(),
+							known_fn_names,
+						)
+					}) && expr_calls_only_known_functions(
+						case.body.as_ref(),
+						known_fn_names,
+					)
+				})
+		}
+		ASTValue::Fn {
+			pre,
+			where_clause,
+			ensures,
+			body,
+			..
+		} => {
+			pre.iter().all(|p| {
+				expr_calls_only_known_functions(p.as_ref(), known_fn_names)
+			}) && where_clause.as_ref().is_none_or(|w| {
+				expr_calls_only_known_functions(w.as_ref(), known_fn_names)
+			}) && ensures.iter().all(|e| {
+				expr_calls_only_known_functions(
+					e.condition.as_ref(),
+					known_fn_names,
+				)
+			}) && match body {
+				crate::frontend::FnBody::Expr(expr)
+				| crate::frontend::FnBody::Block(expr) => expr_calls_only_known_functions(
+					expr.as_ref(),
+					known_fn_names,
+				),
+				crate::frontend::FnBody::Uninitialized => true,
+			}
+		}
+		_ => true,
+	}
+}
+
 fn source_location_key(location: &crate::frontend::SourceLocation) -> String {
 	format!(
 		"{}:{}:{}:{}:{}",
@@ -826,7 +1078,7 @@ fn source_location_key(location: &crate::frontend::SourceLocation) -> String {
 	)
 }
 
-fn unwrap_pub<'a>(node: &'a crate::frontend::AST) -> &'a crate::frontend::AST {
+fn unwrap_pub(node: &crate::frontend::AST) -> &crate::frontend::AST {
 	if let ASTValue::Pub(inner) = &node.v {
 		inner.as_ref()
 	} else {
@@ -1044,14 +1296,18 @@ fn collect_ids_in_ast(node: &crate::frontend::AST, out: &mut std::collections::V
 	}
 }
 
+struct ModuleLoweringData<'a> {
+	module_id: &'a str,
+	module: &'a crate::frontend::TypedModule,
+	module_comptime_consts: &'a HashMap<String, ConstValue>,
+	module_runtime_ctfe_consts: &'a HashMap<String, ConstValue>,
+	builtin_void_ty: TypeId,
+}
+
 fn maybe_collect_function(
-	module_id: &str,
 	name: &str,
 	value: &crate::frontend::TypedAst,
-	module: &crate::frontend::TypedModule,
-	module_comptime_consts: &HashMap<String, ConstValue>,
-	module_runtime_ctfe_consts: &HashMap<String, ConstValue>,
-	builtin_void_ty: TypeId,
+	module_data: &ModuleLoweringData,
 	type_ctx: &mut TypeLowerContext,
 	ir_types: &mut IrTypeTable,
 ) -> Result<Option<IrFunction>, IrLowerError> {
@@ -1070,22 +1326,20 @@ fn maybe_collect_function(
 		return Ok(None);
 	}
 
-	let Some(fn_ty) = module.values.get(name).copied() else {
+	let Some(fn_ty) = module_data.module.values.get(name).copied() else {
 		return Ok(None);
 	};
 
 	let sig = type_ctx.lower(fn_ty, ir_types);
-	let mut lowerer = FunctionLowerer::new(
-		module_id,
-		name,
-		builtin_void_ty,
-		&module.values,
-		&module.types,
-		module_comptime_consts,
-		module_runtime_ctfe_consts,
-		type_ctx,
-		ir_types,
-	);
+	let lowerer_module_data = FunctionLowererModuleData {
+		module_id: module_data.module_id,
+		builtin_void_ty: module_data.builtin_void_ty,
+		module_values: &module_data.module.values,
+		module_types: &module_data.module.types,
+		module_comptime_consts: module_data.module_comptime_consts,
+		runtime_ctfe_consts: module_data.module_runtime_ctfe_consts,
+	};
+	let mut lowerer = FunctionLowerer::new(name, lowerer_module_data, type_ctx, ir_types);
 	let entry = lowerer.create_block();
 	lowerer.switch_to(entry);
 	let mut out_params = Vec::new();
@@ -1137,11 +1391,14 @@ fn maybe_collect_function(
 
 	let ret_ty = return_type
 		.map(|ty| lowerer.type_ctx.lower(ty, lowerer.ir_types))
-		.unwrap_or_else(|| lowerer.type_ctx.lower(builtin_void_ty, lowerer.ir_types));
+		.unwrap_or_else(|| {
+			lowerer.type_ctx
+				.lower(module_data.builtin_void_ty, lowerer.ir_types)
+		});
 	let _term = lowerer
 		.lower_body(body, ret_ty)
 		.map_err(|message| IrLowerError {
-			module_id: module_id.to_string(),
+			module_id: module_data.module_id.to_string(),
 			message: format!("{}: {message}", name),
 		})?;
 
@@ -1174,26 +1431,30 @@ struct FunctionLowerer<'a, 'b> {
 	locals: HashMap<String, (IrValueId, IrTypeId)>,
 }
 
+struct FunctionLowererModuleData<'a> {
+	module_id: &'a str,
+	builtin_void_ty: TypeId,
+	module_values: &'a HashMap<String, TypeId>,
+	module_types: &'a HashMap<String, TypeId>,
+	module_comptime_consts: &'a HashMap<String, ConstValue>,
+	runtime_ctfe_consts: &'a HashMap<String, ConstValue>,
+}
+
 impl<'a, 'b> FunctionLowerer<'a, 'b> {
 	fn new(
-		module_id: &'a str,
 		function_name: &'a str,
-		builtin_void_ty: TypeId,
-		module_values: &'a HashMap<String, TypeId>,
-		module_types: &'a HashMap<String, TypeId>,
-		module_comptime_consts: &'a HashMap<String, ConstValue>,
-		runtime_ctfe_consts: &'a HashMap<String, ConstValue>,
+		module_data: FunctionLowererModuleData<'a>,
 		type_ctx: &'a mut TypeLowerContext<'b>,
 		ir_types: &'a mut IrTypeTable,
 	) -> Self {
 		Self {
-			module_id,
+			module_id: module_data.module_id,
 			function_name,
-			builtin_void_ty,
-			module_values,
-			module_types,
-			module_comptime_consts,
-			runtime_ctfe_consts,
+			builtin_void_ty: module_data.builtin_void_ty,
+			module_values: module_data.module_values,
+			module_types: module_data.module_types,
+			module_comptime_consts: module_data.module_comptime_consts,
+			runtime_ctfe_consts: module_data.runtime_ctfe_consts,
 			ids: FunctionBuildIds::default(),
 			type_ctx,
 			ir_types,
