@@ -1,6 +1,6 @@
 use crate::frontend::{
-	AST, FrontendError, FrontendWarning, ResolvedProgram, TypedProgram, pass_1::pass_1,
-	pass_2::pass_2, pass_3::pass_3, pass_4::pass_4, pass_5::pass_5,
+	AST, FrontendError, FrontendWarning, ResolvedProgram, Semantics, TypedProgram,
+	pass_1::pass_1, pass_2::pass_2, pass_3::pass_3, pass_4::pass_4, pass_5::pass_5,
 };
 use std::time::{Duration, Instant};
 
@@ -30,7 +30,7 @@ pub fn run_passes_with_modules(
 	Vec<FrontendError>,
 	Vec<FrontendWarning>,
 ) {
-	let (typed, resolved, errors, warnings, _timings) =
+	let (typed, _semantics, resolved, errors, warnings, _timings) =
 		run_passes_with_modules_timed(ast, entry_file, module_paths);
 	(typed, resolved, errors, warnings)
 }
@@ -41,6 +41,7 @@ pub fn run_passes_with_modules_timed(
 	module_paths: &[String],
 ) -> (
 	TypedProgram,
+	Semantics,
 	ResolvedProgram,
 	Vec<FrontendError>,
 	Vec<FrontendWarning>,
@@ -72,6 +73,7 @@ pub fn run_passes_with_modules_timed(
 
 	(
 		pass_4.program,
+		pass_4.semantics,
 		pass_3.program,
 		errors,
 		pass_3.warnings,

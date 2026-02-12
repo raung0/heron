@@ -1,0 +1,17 @@
+package mathlib
+
+pub Adder :: interface {
+	pub add := fn [[runtimeable]] (self: &Self; x: int) -> int ---
+}
+
+pub Counter :: struct {
+	pub value: int
+
+	pub add :: fn [[runtimeable]] (self: &Self; x: int) -> int do self.value + x
+}
+
+pub run :: fn [[runtimeable]] (seed: int) -> int {
+	counter := Counter .{ .value = seed }
+	iface := cast<Adder>counter
+	iface.add(10)
+}

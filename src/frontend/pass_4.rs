@@ -352,6 +352,11 @@ impl Pass4State {
 				variants: Vec::new(),
 				methods: HashMap::new(),
 			}),
+			ASTValue::Interface { .. } => self.arena.add(ResolvedType::Interface {
+				name: name.to_string(),
+				module: module_id.clone(),
+				methods: HashMap::new(),
+			}),
 			ASTValue::RawUnion { .. } => self.arena.add(ResolvedType::RawUnion {
 				name: name.to_string(),
 				module: module_id.clone(),
@@ -586,6 +591,35 @@ impl Pass4State {
 				{
 					*dst = resolved_variants;
 					*dst_methods = methods_map;
+				}
+			}
+			ASTValue::Interface {
+				attributes: _,
+				generics,
+				body,
+			} => {
+				let (_, generic_map) = self
+					.resolve_generic_params(module_id, generics, None, None);
+				let mut fields = Vec::new();
+				let mut methods: HashMap<String, MethodInfo> = HashMap::new();
+				let ASTValue::ExprList { items, .. } = &body.v else {
+					return;
+				};
+				for item in items {
+					self.collect_struct_member(
+						module_id,
+						item.as_ref(),
+						&generic_map,
+						Some(ty_id),
+						&mut fields,
+						&mut methods,
+					);
+				}
+				let _ = fields;
+				if let ResolvedType::Interface { methods: dst, .. } =
+					self.arena.get_mut(ty_id)
+				{
+					*dst = methods;
 				}
 			}
 			ASTValue::RawUnion {
@@ -945,6 +979,7 @@ impl Pass4State {
 			ResolvedType::Struct { .. }
 			| ResolvedType::Enum { .. }
 			| ResolvedType::Union { .. }
+			| ResolvedType::Interface { .. }
 			| ResolvedType::RawUnion { .. } => Some(ty_id),
 		}
 	}
@@ -1016,6 +1051,28 @@ impl Pass4State {
 				}
 			}
 			ASTValue::DeclarationComptime(field_name, value) => {
+				if let Some(fn_ty) = self.method_type_from_value(
+					module_id,
+					field_name,
+					value,
+					generic_map,
+					self_type,
+					&node.location,
+				) {
+					methods.insert(
+						field_name.clone(),
+						MethodInfo {
+							ty: fn_ty,
+							public: is_public,
+						},
+					);
+				}
+			}
+			ASTValue::Declaration {
+				name: field_name,
+				value,
+				..
+			} => {
 				if let Some(fn_ty) = self.method_type_from_value(
 					module_id,
 					field_name,
@@ -2481,20 +2538,34 @@ impl Pass4State {
 						&node.location,
 					)
 				});
-				let mut out = TypedAst::from(
-					node.location.clone(),
-					if matches!(node.v, ASTValue::Cast { .. }) {
-						TypedValue::Cast {
-							ty: resolved_ty,
-							value: typed_value,
-						}
-					} else {
-						TypedValue::Transmute {
-							ty: resolved_ty,
-							value: typed_value,
-						}
-					},
-				);
+				let mut out =
+					TypedAst::from(
+						node.location.clone(),
+						if matches!(node.v, ASTValue::Cast { .. }) {
+							if let Some(dst_ty) = resolved_ty
+								&& matches!(
+									self.arena.get(dst_ty),
+									ResolvedType::Interface { .. }
+								) && !self.type_implements_interface(
+								value_ty, dst_ty,
+							) {
+								self.errors.push(FrontendError::TypeMismatch {
+								location: node.location.clone(),
+								expected: self.type_name(dst_ty),
+								found: self.type_name(value_ty),
+							});
+							}
+							TypedValue::Cast {
+								ty: resolved_ty,
+								value: typed_value,
+							}
+						} else {
+							TypedValue::Transmute {
+								ty: resolved_ty,
+								value: typed_value,
+							}
+						},
+					);
 				out.ty = Some(resolved_ty.unwrap_or(value_ty));
 				out
 			}
@@ -3918,6 +3989,40 @@ impl Pass4State {
 		out
 	}
 
+	fn typed_ast_contains_return(node: &TypedAst) -> bool {
+		match &node.v {
+			TypedValue::Return(_) => true,
+			TypedValue::ExprList { items, .. }
+			| TypedValue::ExprListNoScope { items, .. } => items
+				.iter()
+				.any(|item| Self::typed_ast_contains_return(item.as_ref())),
+			TypedValue::If { body, else_, .. } => {
+				Self::typed_ast_contains_return(body.as_ref())
+					|| else_.as_ref().is_some_and(|else_body| {
+						Self::typed_ast_contains_return(else_body.as_ref())
+					})
+			}
+			TypedValue::While { body, .. }
+			| TypedValue::ForLoop { body, .. }
+			| TypedValue::For { body, .. }
+			| TypedValue::Defer(body)
+			| TypedValue::Pub(body) => Self::typed_ast_contains_return(body.as_ref()),
+			TypedValue::Match { cases, .. } => cases
+				.iter()
+				.any(|case| Self::typed_ast_contains_return(case.body.as_ref())),
+			_ => false,
+		}
+	}
+
+	fn typed_fn_body_contains_return(body: &TypedFnBody) -> bool {
+		match body {
+			TypedFnBody::Block(block) | TypedFnBody::Expr(block) => {
+				Self::typed_ast_contains_return(block.as_ref())
+			}
+			TypedFnBody::Uninitialized => false,
+		}
+	}
+
 	fn type_node_without_move(
 		&mut self,
 		node: &Box<AST>,
@@ -4778,14 +4883,26 @@ impl Pass4State {
 				}
 			}
 		}
-		let callee_type_id = if callee_ty == self.builtins.type_id {
-			if let ASTValue::Id(name) = &callee.v {
-				ctx.module.types.get(name).copied()
-			} else {
-				None
+		let callee_type_id = match &callee.v {
+			ASTValue::Id(name) => ctx.module.types.get(name).copied(),
+			ASTValue::GenericApply { target, .. } => {
+				if let ASTValue::Id(name) = &target.v {
+					ctx.module.types.get(name).copied()
+				} else {
+					None
+				}
 			}
-		} else {
-			None
+			_ => {
+				if callee_ty == self.builtins.type_id {
+					if let ASTValue::Id(name) = &callee.v {
+						ctx.module.types.get(name).copied()
+					} else {
+						None
+					}
+				} else {
+					None
+				}
+			}
 		};
 		let mut typed_args = Vec::new();
 		let mut return_ty = self.builtins.unknown_id;
@@ -4814,20 +4931,30 @@ impl Pass4State {
 				}
 				MemberAccess::Missing => None,
 			};
-			if let Some((_method_ty, params, _)) = method_info {
+			if let Some((_method_ty, params, method_return_ty)) = method_info {
 				let type_name = self.type_name(type_id);
+				let has_self_param = params
+					.first()
+					.map(|first| match self.arena.get(*first) {
+						ResolvedType::Reference { underlying, .. } => {
+							self.type_matches(*underlying, type_id)
+						}
+						_ => self.type_matches(*first, type_id),
+					})
+					.unwrap_or(false);
+				let param_offset = if has_self_param { 1 } else { 0 };
 				let param_defs =
 					self.method_param_defs_from_ast(type_id, "__construct");
 				let (normalized_args, has_named) = self.normalize_call_args(
 					args,
 					param_defs.as_deref(),
-					1,
+					param_offset,
 					&type_name,
 					&node.location,
 				);
 				if let Some(param_defs) = param_defs.as_deref() {
 					let (required, total) =
-						self.param_count_range(param_defs, 1);
+						self.param_count_range(param_defs, param_offset);
 					if normalized_args.len() < required
 						|| normalized_args.len() > total
 					{
@@ -4852,7 +4979,8 @@ impl Pass4State {
 						);
 					}
 				} else if !has_named
-					&& params.len().saturating_sub(1) != normalized_args.len()
+					&& params.len().saturating_sub(param_offset)
+						!= normalized_args.len()
 				{
 					self.errors.push(FrontendError::InvalidCall {
 						location: node.location.clone(),
@@ -4874,36 +5002,45 @@ impl Pass4State {
 						type_id,
 					);
 				}
-				let this_param =
-					params.first().copied().unwrap_or(self.builtins.unknown_id);
-				let mut this_ty = type_id;
-				if let ResolvedType::Reference { mutable, .. } =
-					self.arena.get(this_param)
-				{
-					this_ty = self.arena.add(ResolvedType::Reference {
-						mutable: *mutable,
-						lifetime: None,
-						underlying: type_id,
-					});
-				}
-				if !self.type_matches(this_ty, this_param) {
-					self.errors.push(FrontendError::TypeMismatch {
-						location: callee.location.clone(),
-						expected: self.type_name(this_param),
-						found: self.type_name(this_ty),
-					});
+				if has_self_param {
+					let this_param = params
+						.first()
+						.copied()
+						.unwrap_or(self.builtins.unknown_id);
+					let mut this_ty = type_id;
+					if let ResolvedType::Reference { mutable, .. } =
+						self.arena.get(this_param)
+					{
+						this_ty = self.arena.add(ResolvedType::Reference {
+							mutable: *mutable,
+							lifetime: None,
+							underlying: type_id,
+						});
+					}
+					if !self.type_matches(this_ty, this_param) {
+						self.errors.push(FrontendError::TypeMismatch {
+							location: callee.location.clone(),
+							expected: self.type_name(this_param),
+							found: self.type_name(this_ty),
+						});
+					}
 				}
 				let explicit_types = HashMap::new();
 				typed_args = self.type_args_with_expected(
 					ctx,
 					&normalized_args,
 					&params,
-					1,
+					param_offset,
 					&explicit_types,
 					false,
 				);
+				let ctor_result_ty = if has_self_param {
+					type_id
+				} else {
+					method_return_ty
+				};
 				let union_return = expected_union.filter(|union_ty| {
-					self.union_accepts_type(*union_ty, type_id)
+					self.union_accepts_type(*union_ty, ctor_result_ty)
 				});
 				if let Some(expected_union) = expected_union
 					&& union_return.is_none()
@@ -4911,10 +5048,10 @@ impl Pass4State {
 					self.errors.push(FrontendError::TypeMismatch {
 						location: node.location.clone(),
 						expected: self.type_name(expected_union),
-						found: self.type_name(type_id),
+						found: self.type_name(ctor_result_ty),
 					});
 				}
-				return_ty = union_return.unwrap_or(type_id);
+				return_ty = union_return.unwrap_or(ctor_result_ty);
 				return self.build_call(
 					node.location.clone(),
 					typed_callee,
@@ -4922,6 +5059,151 @@ impl Pass4State {
 					return_ty,
 				);
 			}
+
+			let type_snapshot = self.arena.get(type_id).clone();
+			match type_snapshot {
+				ResolvedType::Struct { fields, .. } if fields.is_empty() => {
+					let normalized_args = self.strip_named_args(args);
+					if !normalized_args.is_empty() {
+						self.errors.push(FrontendError::InvalidCall {
+							location: node.location.clone(),
+							callee: self.type_name(type_id),
+						});
+					}
+					let explicit_types = HashMap::new();
+					let typed_args = self.type_args_with_expected(
+						ctx,
+						&normalized_args,
+						&[],
+						0,
+						&explicit_types,
+						false,
+					);
+					return self.build_call(
+						node.location.clone(),
+						typed_callee,
+						typed_args,
+						type_id,
+					);
+				}
+				ResolvedType::Union { variants, .. } => {
+					let normalized_args = self.strip_named_args(args);
+					if normalized_args.len() != 1 {
+						self.errors.push(FrontendError::InvalidCall {
+							location: node.location.clone(),
+							callee: self.type_name(type_id),
+						});
+						let explicit_types = HashMap::new();
+						let typed_args = self.type_args_with_expected(
+							ctx,
+							&normalized_args,
+							&[],
+							0,
+							&explicit_types,
+							false,
+						);
+						return self.build_call(
+							node.location.clone(),
+							typed_callee,
+							typed_args,
+							self.builtins.unknown_id,
+						);
+					}
+					let explicit_types = HashMap::new();
+					let typed_args = self.type_args_with_expected(
+						ctx,
+						&normalized_args,
+						&[],
+						0,
+						&explicit_types,
+						false,
+					);
+					let arg_ty = typed_args
+						.first()
+						.and_then(|arg| arg.ty)
+						.unwrap_or(self.builtins.unknown_id);
+					let accepts = variants
+						.iter()
+						.any(|variant| self.type_matches(arg_ty, *variant));
+					if !accepts && arg_ty != self.builtins.unknown_id {
+						self.errors.push(FrontendError::TypeMismatch {
+							location: node.location.clone(),
+							expected: self.type_name(type_id),
+							found: self.type_name(arg_ty),
+						});
+					}
+					return self.build_call(
+						node.location.clone(),
+						typed_callee,
+						typed_args,
+						type_id,
+					);
+				}
+				ResolvedType::Alias { underlying, .. }
+				| ResolvedType::Newtype { underlying, .. } => {
+					let normalized_args = self.strip_named_args(args);
+					let explicit_types = HashMap::new();
+					let typed_args = self.type_args_with_expected(
+						ctx,
+						&normalized_args,
+						&[],
+						0,
+						&explicit_types,
+						false,
+					);
+					if typed_args.len() != 1 {
+						self.errors.push(FrontendError::InvalidCall {
+							location: node.location.clone(),
+							callee: self.type_name(type_id),
+						});
+						return self.build_call(
+							node.location.clone(),
+							typed_callee,
+							typed_args,
+							self.builtins.unknown_id,
+						);
+					}
+					let arg_ty = typed_args[0]
+						.ty
+						.unwrap_or(self.builtins.unknown_id);
+					if arg_ty != self.builtins.unknown_id
+						&& !self.type_matches(arg_ty, underlying)
+					{
+						self.errors.push(FrontendError::TypeMismatch {
+							location: node.location.clone(),
+							expected: self.type_name(underlying),
+							found: self.type_name(arg_ty),
+						});
+					}
+					return self.build_call(
+						node.location.clone(),
+						typed_callee,
+						typed_args,
+						type_id,
+					);
+				}
+				_ => {}
+			}
+			self.errors.push(FrontendError::InvalidCall {
+				location: node.location.clone(),
+				callee: self.type_name(type_id),
+			});
+			let normalized_args = self.strip_named_args(args);
+			let explicit_types = HashMap::new();
+			let typed_args = self.type_args_with_expected(
+				ctx,
+				&normalized_args,
+				&[],
+				0,
+				&explicit_types,
+				false,
+			);
+			return self.build_call(
+				node.location.clone(),
+				typed_callee,
+				typed_args,
+				self.builtins.unknown_id,
+			);
 		}
 
 		if let ResolvedType::Fn {
@@ -6318,8 +6600,12 @@ impl Pass4State {
 				TypedFnBody::Expr(expr) => (expr.ty, &expr.location),
 				TypedFnBody::Uninitialized => (None, &node.location),
 			};
+			let has_explicit_return = Self::typed_fn_body_contains_return(&typed_body);
 			if let Some(mut body_ty) = body_ty {
-				if body_ty != self.builtins.unknown_id
+				let skip_body_mismatch =
+					has_explicit_return && body_ty == self.builtins.void_id;
+				if !skip_body_mismatch
+					&& body_ty != self.builtins.unknown_id
 					&& !self.type_matches(body_ty, resolved_return)
 					&& !self.coerce_untyped(&mut body_ty, resolved_return)
 				{
@@ -7084,6 +7370,12 @@ impl Pass4State {
 				}
 				None
 			}
+			ResolvedType::Interface { methods, .. } => {
+				if let Some(method) = methods.get(name) {
+					return Some((method.ty, ty, method.public));
+				}
+				None
+			}
 			ResolvedType::GenericInstance { base, .. } => {
 				self.lookup_method_info(*base, name)
 			}
@@ -7105,6 +7397,75 @@ impl Pass4State {
 					Some(ResolvedType::Reference { .. })
 				)
 		)
+	}
+
+	fn fn_signature_compatible_for_interface(
+		&self,
+		expected_ty: TypeId,
+		actual_ty: TypeId,
+	) -> bool {
+		let (
+			ResolvedType::Fn {
+				params: expected_params,
+				return_type: expected_ret,
+			},
+			ResolvedType::Fn {
+				params: actual_params,
+				return_type: actual_ret,
+			},
+		) = (self.arena.get(expected_ty), self.arena.get(actual_ty))
+		else {
+			return false;
+		};
+		if expected_params.len() != actual_params.len() {
+			return false;
+		}
+		for (idx, (expected_param, actual_param)) in expected_params
+			.iter()
+			.copied()
+			.zip(actual_params.iter().copied())
+			.enumerate()
+		{
+			if idx == 0 {
+				let expected_ref_like = matches!(
+					self.arena.get(expected_param),
+					ResolvedType::Reference { .. }
+						| ResolvedType::Pointer { .. }
+				);
+				let actual_ref_like = matches!(
+					self.arena.get(actual_param),
+					ResolvedType::Reference { .. }
+						| ResolvedType::Pointer { .. }
+				);
+				if expected_ref_like && actual_ref_like {
+					continue;
+				}
+			}
+			if !self.type_matches(expected_param, actual_param) {
+				return false;
+			}
+		}
+		self.type_matches(*expected_ret, *actual_ret)
+	}
+
+	fn type_implements_interface(&self, concrete_ty: TypeId, interface_ty: TypeId) -> bool {
+		let ResolvedType::Interface { methods, .. } = self.arena.get(interface_ty) else {
+			return false;
+		};
+		for (method_name, iface_method) in methods {
+			let Some((concrete_method_ty, _, _)) =
+				self.lookup_method_info(concrete_ty, method_name)
+			else {
+				return false;
+			};
+			if !self.fn_signature_compatible_for_interface(
+				iface_method.ty,
+				concrete_method_ty,
+			) {
+				return false;
+			}
+		}
+		true
 	}
 
 	fn lookup_method_access(
@@ -7991,6 +8352,7 @@ impl Pass4State {
 			ResolvedType::Struct { name, .. } => name.clone(),
 			ResolvedType::Enum { name, .. } => name.clone(),
 			ResolvedType::Union { name, .. } => name.clone(),
+			ResolvedType::Interface { name, .. } => name.clone(),
 			ResolvedType::RawUnion { name, .. } => name.clone(),
 			ResolvedType::Newtype { name, .. } => name.clone(),
 			ResolvedType::Alias { name, .. } => name.clone(),
@@ -8165,6 +8527,7 @@ impl Semantics {
 			ResolvedType::Struct { module, .. }
 			| ResolvedType::Enum { module, .. }
 			| ResolvedType::Union { module, .. }
+			| ResolvedType::Interface { module, .. }
 			| ResolvedType::RawUnion { module, .. }
 			| ResolvedType::Newtype { module, .. }
 			| ResolvedType::Alias { module, .. } => Some(module.clone()),
@@ -8172,6 +8535,7 @@ impl Semantics {
 				ResolvedType::Struct { module, .. }
 				| ResolvedType::Enum { module, .. }
 				| ResolvedType::Union { module, .. }
+				| ResolvedType::Interface { module, .. }
 				| ResolvedType::RawUnion { module, .. }
 				| ResolvedType::Newtype { module, .. }
 				| ResolvedType::Alias { module, .. } => Some(module.clone()),
@@ -8197,6 +8561,7 @@ impl Semantics {
 			ResolvedType::Struct { name, .. }
 			| ResolvedType::Enum { name, .. }
 			| ResolvedType::Union { name, .. }
+			| ResolvedType::Interface { name, .. }
 			| ResolvedType::RawUnion { name, .. }
 			| ResolvedType::Newtype { name, .. }
 			| ResolvedType::Alias { name, .. } => name.clone(),
@@ -8609,6 +8974,12 @@ impl Semantics {
 				None
 			}
 			ResolvedType::Union { methods, .. } => {
+				if let Some(method) = methods.get(name) {
+					return Some((method.ty, ty, method.public));
+				}
+				None
+			}
+			ResolvedType::Interface { methods, .. } => {
 				if let Some(method) = methods.get(name) {
 					return Some((method.ty, ty, method.public));
 				}

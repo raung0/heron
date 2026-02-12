@@ -2,9 +2,11 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{self, Write};
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use clap::{Arg, ArgAction, Command};
+use heron::backend::{BackendOptions, LlvmBackend, OptimizationLevel, compile_modules};
 use heron::diagnostics::{Message, emit_message, pretty_print_error, pretty_print_multiple_errors};
 use heron::frontend::{
 	self, FrontendError, PassTimings, dot_module_graph, run_passes_with_modules_timed,
@@ -36,11 +38,58 @@ fn main() {
 			.long("dump-ctfe-results")
 			.help("Dump evaluated top-level comptime results")
 			.action(ArgAction::SetTrue))
+		.arg(Arg::new("emit_llvm")
+			.long("emit-llvm")
+			.help("Emit LLVM IR files for debugging")
+			.action(ArgAction::SetTrue))
+		.arg(Arg::new("emit_obj")
+			.long("emit-obj")
+			.help("Emit object files per module")
+			.action(ArgAction::SetTrue))
+		.arg(Arg::new("emit_dir")
+			.long("emit-dir")
+			.value_name("DIR")
+			.help("Output directory for backend artifacts"))
+		.arg(Arg::new("debug_info")
+			.short('g')
+			.long("debug-info")
+			.help("Emit debug information into object files")
+			.action(ArgAction::SetTrue))
+		.arg(Arg::new("target")
+			.long("target")
+			.value_name("TRIPLE")
+			.help("Override target triple for backend emission"))
+		.arg(Arg::new("optimization_level")
+			.short('o')
+			.long("optimization-level")
+			.value_name("LEVEL")
+			.value_parser(["none", "size", "optimized", "aggressive"])
+			.default_value("none")
+			.help("Backend optimization level"))
 		.get_matches();
 
 	let dump_ast = matches.get_flag("dump_ast");
 	let dump_module_graph = matches.get_flag("dump_module_graph");
 	let dump_ctfe_results = matches.get_flag("dump_ctfe_results");
+	let emit_llvm = matches.get_flag("emit_llvm");
+	let emit_obj = matches.get_flag("emit_obj");
+	let debug_info = matches.get_flag("debug_info");
+	let emit_dir = matches
+		.get_one::<String>("emit_dir")
+		.map(PathBuf::from)
+		.unwrap_or_else(|| PathBuf::from("target/heron-out"));
+	let target_triple = matches.get_one::<String>("target").cloned();
+	let optimization_level = match matches
+		.get_one::<String>("optimization_level")
+		.map(String::as_str)
+		.unwrap_or("none")
+	{
+		"none" => OptimizationLevel::None,
+		"size" => OptimizationLevel::Size,
+		"optimized" => OptimizationLevel::Optimized,
+		"aggressive" => OptimizationLevel::Aggressive,
+		_ => OptimizationLevel::None,
+	};
 	let module_paths: Vec<String> = matches
 		.get_many::<String>("module_path")
 		.map(|values| values.cloned().collect())
@@ -103,12 +152,14 @@ fn main() {
 						)
 					);
 				}
-				let (_typed_program, program, errors, warnings, pass_timings) =
-					run_passes_with_modules_timed(
-						ast,
-						file.as_str(),
-						&module_paths,
-					);
+				let (
+					typed_program,
+					semantics,
+					program,
+					errors,
+					warnings,
+					pass_timings,
+				) = run_passes_with_modules_timed(ast, file.as_str(), &module_paths);
 				timings.frontend = Some(pass_timings);
 				if !warnings.is_empty() {
 					let mut stderr = StandardStream::stderr(ColorChoice::Auto);
@@ -132,6 +183,78 @@ fn main() {
 				}
 				if dump_module_graph {
 					println!("{}", dot_module_graph(&program));
+				}
+
+				if emit_llvm || emit_obj {
+					let options = BackendOptions {
+						emit_obj,
+						emit_llvm,
+						debug_info,
+						emit_dir: emit_dir.clone(),
+						target_triple,
+						optimization_level,
+					};
+					let mut backend = LlvmBackend::new();
+					match compile_modules(
+						&mut backend,
+						&typed_program,
+						&semantics,
+						&options,
+					) {
+						Ok(artifacts) => {
+							if emit_obj {
+								for artifact in &artifacts {
+									if let Some(path) =
+										&artifact
+											.object_path
+									{
+										eprintln!("emitted object {} -> {}", artifact.module_id, path.display());
+									}
+								}
+							}
+							if emit_llvm {
+								for artifact in &artifacts {
+									if let Some(path) =
+										&artifact
+											.llvm_ir_path
+									{
+										eprintln!("emitted llvm-ir {} -> {}", artifact.module_id, path.display());
+									}
+								}
+							}
+						}
+						Err(backend_errors) => {
+							for err in backend_errors {
+								if let Some(location) = err.location
+								{
+									eprintln!(
+										"backend error in {} at {}:{}:{}: {}",
+										err.module_id,
+										location.file,
+										location.range
+											.begin
+											.0,
+										location.range
+											.begin
+											.1,
+										err.message
+									);
+								} else {
+									eprintln!(
+										"backend error in {}: {}",
+										err.module_id,
+										err.message
+									);
+								}
+							}
+							eprintln!();
+							timings.total = compilation_start.elapsed();
+							let _ = print_compilation_timings(
+								&timings, false,
+							);
+							return;
+						}
+					}
 				}
 				compilation_succeeded = true;
 			}

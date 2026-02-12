@@ -42,6 +42,7 @@ impl<'a> LayoutEstimator<'a> {
 			ResolvedType::RawUnion { fields, .. } => self.layout_union(fields),
 			ResolvedType::Enum { .. }
 			| ResolvedType::Union { .. }
+			| ResolvedType::Interface { .. }
 			| ResolvedType::Pointer { .. }
 			| ResolvedType::Reference { .. }
 			| ResolvedType::Fn { .. } => Layout {

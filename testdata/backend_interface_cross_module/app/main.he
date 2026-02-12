@@ -1,0 +1,7 @@
+package main
+
+use some_package
+
+main := fn {
+	_ = some_package.run(6)
+}

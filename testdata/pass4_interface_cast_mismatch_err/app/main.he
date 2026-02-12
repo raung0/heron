@@ -1,0 +1,16 @@
+package main
+
+Adder :: interface {
+	pub add := fn [[runtimeable]] (self: &Self; x: int) -> int ---
+}
+
+Wrong :: struct {
+	value: int
+
+	pub sub :: fn [[runtimeable]] (self: &Self; x: int) -> int do self.value - x
+}
+
+main := fn {
+	wrong := Wrong .{ .value = 10 }
+	_ = cast<Adder>wrong
+}

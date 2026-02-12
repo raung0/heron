@@ -1,0 +1,21 @@
+package main
+
+Ops :: interface {
+	pub add := fn [[runtimeable]] (self: &Self; x: int) -> int ---
+	pub mul := fn [[runtimeable]] (self: &Self; x: int) -> int ---
+}
+
+Counter :: struct {
+	value: int
+
+	pub add :: fn [[runtimeable]] (self: &Self; x: int) -> int do self.value + x
+	pub mul :: fn [[runtimeable]] (self: &Self; x: int) -> int do self.value * x
+}
+
+main := fn {
+	counter := Counter .{ .value = 3 }
+	iface := cast<Ops>counter
+	a := iface.add(4)
+	b := iface.mul(5)
+	_ = a + b
+}

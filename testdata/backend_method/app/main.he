@@ -1,0 +1,12 @@
+package main
+
+Counter :: struct {
+	value: int
+
+	pub inc :: fn [[runtimeable]] (self: &Self; amount: int) -> int do self.value + amount
+}
+
+main := fn {
+	counter := Counter .{ .value = 10 }
+	_ = counter.inc(5)
+}

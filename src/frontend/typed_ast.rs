@@ -43,6 +43,11 @@ pub enum ResolvedType {
 		variants: Vec<TypeId>,
 		methods: HashMap<String, MethodInfo>,
 	},
+	Interface {
+		name: String,
+		module: ModuleId,
+		methods: HashMap<String, MethodInfo>,
+	},
 	RawUnion {
 		name: String,
 		module: ModuleId,

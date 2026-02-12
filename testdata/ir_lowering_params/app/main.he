@@ -1,0 +1,5 @@
+package main
+
+sum := fn (a: int; b: int) -> int {
+	a + b
+}

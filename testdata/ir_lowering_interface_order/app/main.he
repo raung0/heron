@@ -1,0 +1,9 @@
+package main
+
+Ops :: interface {
+	pub zed := fn [[runtimeable]] (self: &Self) -> int ---
+	pub add := fn [[runtimeable]] (self: &Self) -> int ---
+}
+
+main := fn {
+}

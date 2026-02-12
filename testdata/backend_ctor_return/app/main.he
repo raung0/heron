@@ -1,0 +1,16 @@
+package main
+
+Pair :: struct {
+	a: int
+	b: int
+
+	pub __construct :: fn (x, y: int) -> Self do Self .{ .a = x, .b = y }
+}
+
+make_pair :: fn [[runtimeable]] (x, y: int) -> Pair {
+	return Pair(x, y)
+}
+
+main := fn {
+	_ = make_pair(1, 2)
+}

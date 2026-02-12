@@ -225,19 +225,33 @@ enum ModuleParseResult {
 fn build_module_roots(entry_file: &str, module_paths: &[String]) -> Vec<PathBuf> {
 	let mut roots = Vec::new();
 	let mut seen = HashSet::new();
-	let entry_path = Path::new(entry_file);
-	if let Some(parent) = entry_path.parent() {
-		let normalized = normalize_root(parent);
+	let mut push_root = |path: PathBuf| {
+		let normalized = normalize_root(&path);
 		let key = normalized.to_string_lossy().to_string();
 		if seen.insert(key) {
 			roots.push(normalized);
 		}
+	};
+	let entry_path = Path::new(entry_file);
+	if let Some(parent) = entry_path.parent() {
+		push_root(parent.to_path_buf());
+		let direct_modules = parent.join("modules");
+		if direct_modules.is_dir() {
+			push_root(direct_modules);
+		}
+		if let Some(grandparent) = parent.parent() {
+			let sibling_modules = grandparent.join("modules");
+			if sibling_modules.is_dir() {
+				push_root(sibling_modules);
+			}
+		}
 	}
 	for path in module_paths {
-		let normalized = normalize_root(Path::new(path));
-		let key = normalized.to_string_lossy().to_string();
-		if seen.insert(key) {
-			roots.push(normalized);
+		let path = Path::new(path);
+		push_root(path.to_path_buf());
+		let modules_dir = path.join("modules");
+		if modules_dir.is_dir() {
+			push_root(modules_dir);
 		}
 	}
 	roots

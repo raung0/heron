@@ -61,6 +61,7 @@
             rust-analyzer
             lldb
             graphviz
+            libxml2
 
             llvmPackages_21.libllvm
           ];

@@ -6268,6 +6268,25 @@ Child :: struct extends Base { };
 	}
 
 	#[test]
+	fn interface_cannot_extend() {
+		let lx = Lexer::new(
+			"ReadWriter :: interface extends Reader { write := fn() --- }"
+				.to_string(),
+			"<test>".to_string(),
+		);
+		let err = parse_all(lx).expect_err("interface extends must fail");
+		match err {
+			ParseError::ExpectedToken(tok, TokenValue::LSquirly) => {
+				assert_eq!(tok.v, TokenValue::Keyword(Keyword::Extends));
+			}
+			other => panic!(
+				"expected interface extends parse error, got {:?}",
+				other
+			),
+		}
+	}
+
+	#[test]
 	fn function_with_uninitialized_body() {
 		let lx = Lexer::new(
 			"extern_func :: fn(x: i32) -> i32 ---".to_string(),

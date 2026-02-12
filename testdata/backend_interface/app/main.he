@@ -1,0 +1,17 @@
+package main
+
+Adder :: interface {
+	pub add := fn [[runtimeable]] (self: &Self; x: int) -> int ---
+}
+
+Counter :: struct {
+	value: int
+
+	add :: fn [[runtimeable]] (self: &Self; x: int) -> int do self.value + x
+}
+
+main := fn {
+	counter := Counter .{ .value = 7 }
+	iface := cast<Adder>counter
+	_ = iface.add(5)
+}

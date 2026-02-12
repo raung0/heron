@@ -1,9 +1,5 @@
 target
 result
 .direnv
-
-
-
-# Added by cargo
-
 /target
+.heron-out

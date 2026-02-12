@@ -1,0 +1,12 @@
+package main
+
+Base :: struct {
+	pub x: int
+}
+
+Child :: struct extends Base {
+	pub y: int
+}
+
+main := fn {
+}

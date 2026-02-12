@@ -1,0 +1,6 @@
+package main
+
+main := fn {
+	value := { temp := 40; temp + 2 }
+	_ = value
+}

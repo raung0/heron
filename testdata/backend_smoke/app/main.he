@@ -1,0 +1,19 @@
+package main
+
+add :: fn [[runtimeable]] (a: int; b: int) -> int do a + b
+
+main := fn {
+	x := 1
+	mut y := 2
+	z := add(x, y)
+	if z > 2 {
+		y = z
+	} else  {
+		y = 0
+	}
+	mut i := 0
+	while i < 3 {
+		i = i + 1
+	}
+	_ = y
+}

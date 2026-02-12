@@ -1,0 +1,19 @@
+package main
+
+Mixed :: interface {
+	pub by_ref := fn [[runtimeable]] (self: &Self; x: int) -> int ---
+}
+
+Boxed :: struct {
+	value: int
+
+	pub by_ref :: fn [[runtimeable]] (self: &Self; x: int) -> int do self.value + x
+}
+
+main := fn {
+	boxed := Boxed .{ .value = 9 }
+	a := boxed.by_ref(1)
+	iface := cast<Mixed>boxed
+	b := iface.by_ref(2)
+	_ = a + b
+}

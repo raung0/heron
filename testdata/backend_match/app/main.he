@@ -1,0 +1,24 @@
+package main
+
+A :: struct {
+}
+
+B :: struct {
+}
+
+U :: union {
+	A
+	B
+}
+
+is_a :: fn [[runtimeable]] (u: U) -> bool {
+	match  v in u {
+		case A -> true
+		case B -> false
+	}
+}
+
+main := fn {
+	u := U(A())
+	_ = is_a(u)
+}
