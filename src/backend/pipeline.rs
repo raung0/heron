@@ -52,8 +52,6 @@ pub fn compile_modules_timed<B: Backend>(
 				timings.ir_lower = ir_lower_start.elapsed();
 				let ir_verify_start = Instant::now();
 				if let Err(verify_errors) = verify_program(&ir) {
-					timings.ir_verify = ir_verify_start.elapsed();
-					timings.total = total_start.elapsed();
 					let errors = verify_errors
 						.into_iter()
 						.map(|err| BackendError {
@@ -77,8 +75,6 @@ pub fn compile_modules_timed<B: Backend>(
 				Some(ir)
 			}
 			Err(ir_errors) => {
-				timings.ir_lower = ir_lower_start.elapsed();
-				timings.total = total_start.elapsed();
 				let errors = ir_errors
 					.into_iter()
 					.map(|err| BackendError {
@@ -163,8 +159,6 @@ pub fn compile_modules_timed<B: Backend>(
 		if options.emit_obj
 			&& let Err(err) = cache.save()
 		{
-			timings.cache_save = cache_save_start.elapsed();
-			timings.total = total_start.elapsed();
 			return Err(vec![BackendError {
 				module_id: "<build-cache>".to_string(),
 				message: err,
@@ -175,7 +169,6 @@ pub fn compile_modules_timed<B: Backend>(
 		timings.total = total_start.elapsed();
 		Ok((artifacts, timings))
 	} else {
-		timings.total = total_start.elapsed();
 		Err(errors)
 	}
 }
