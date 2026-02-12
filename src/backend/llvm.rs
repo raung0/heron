@@ -1,9 +1,9 @@
+use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::ffi::{CStr, CString};
 use std::fs;
 use std::path::PathBuf;
 use std::ptr;
-use std::cell::Cell;
 
 use llvm_sys::core::*;
 use llvm_sys::debuginfo::*;
@@ -202,7 +202,10 @@ impl LlvmBackend {
 				let payload_offset = Self::align_up(tag_size, payload_align);
 				let align = tag_align.max(payload_align);
 				(
-					Self::align_up(payload_offset.saturating_add(payload_size), align),
+					Self::align_up(
+						payload_offset.saturating_add(payload_size),
+						align,
+					),
 					align,
 				)
 			}
@@ -246,13 +249,7 @@ impl LlvmBackend {
 			max_size = max_size.max(size);
 		}
 
-		let anchor_llvm = Self::map_ir_type(
-			context,
-			program,
-			anchor_ty,
-			cache,
-			visiting,
-		);
+		let anchor_llvm = Self::map_ir_type(context, program, anchor_ty, cache, visiting);
 		let (anchor_size, _) = Self::approx_ir_layout(
 			program,
 			anchor_ty,
@@ -347,11 +344,7 @@ impl LlvmBackend {
 				let field_tys: Vec<IrTypeId> =
 					raw.fields.iter().map(|f| f.ty).collect();
 				Self::union_storage_type_for_variants(
-					context,
-					program,
-					&field_tys,
-					cache,
-					visiting,
+					context, program, &field_tys, cache, visiting,
 				)
 			}
 			IrType::Union(tagged) => {
@@ -602,11 +595,8 @@ impl Backend for LlvmBackend {
 
 			let mut target = ptr::null_mut();
 			let mut target_err = ptr::null_mut();
-			if LLVMGetTargetFromTriple(
-				triple.as_ptr(),
-				&mut target,
-				&mut target_err,
-			) != 0
+			if LLVMGetTargetFromTriple(triple.as_ptr(), &mut target, &mut target_err)
+				!= 0
 			{
 				let msg = if target_err.is_null() {
 					"failed to resolve target from triple".to_string()
@@ -1146,7 +1136,11 @@ impl Backend for LlvmBackend {
 									&mut type_cache,
 									&mut type_visiting,
 								);
-								Some(LLVMConstInt(enum_ty, u64::from(*variant), 0))
+								Some(LLVMConstInt(
+									enum_ty,
+									u64::from(*variant),
+									0,
+								))
 							}
 							IrInstKind::GetTag { tagged } => {
 								let Some(&tagged) =
@@ -1753,7 +1747,9 @@ impl Backend for LlvmBackend {
 				{
 					errors.push(BackendError {
 						module_id: module_id.to_string(),
-						message: format!("failed to create object dir: {err}"),
+						message: format!(
+							"failed to create object dir: {err}"
+						),
 						location: None,
 					});
 				}

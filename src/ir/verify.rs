@@ -89,7 +89,10 @@ fn verify_function(
 			errors.push(IrVerifyError {
 				module_id: module_id.to_string(),
 				function: Some(func.name.clone()),
-				message: format!("duplicate function param value id {:?}", param.value),
+				message: format!(
+					"duplicate function param value id {:?}",
+					param.value
+				),
 			});
 		}
 		def_sites.insert(param.value, None);
@@ -150,7 +153,10 @@ fn verify_function(
 			errors.push(IrVerifyError {
 				module_id: module_id.to_string(),
 				function: Some(func.name.clone()),
-				message: format!("value type map references unknown value {:?}", vid),
+				message: format!(
+					"value type map references unknown value {:?}",
+					vid
+				),
 			});
 		}
 	}
@@ -174,8 +180,7 @@ fn verify_function(
 						message: format!("use of undefined value {:?}", op),
 					});
 				} else if let Some(Some((def_block, def_idx))) = def_sites.get(&op)
-					&& *def_block == block.id
-					&& *def_idx > inst_idx
+					&& *def_block == block.id && *def_idx > inst_idx
 				{
 					errors.push(IrVerifyError {
 						module_id: module_id.to_string(),
@@ -186,9 +191,11 @@ fn verify_function(
 						),
 					});
 				} else if let Some(Some((def_block, _def_idx))) = def_sites.get(&op)
-					&& *def_block != block.id
-					&& !block_dominates(&dominators, *def_block, block.id)
-				{
+					&& *def_block != block.id && !block_dominates(
+					&dominators,
+					*def_block,
+					block.id,
+				) {
 					errors.push(IrVerifyError {
 						module_id: module_id.to_string(),
 						function: Some(func.name.clone()),
@@ -202,13 +209,18 @@ fn verify_function(
 		}
 
 		if let Some(term) = &block.term {
-			verify_terminator_types(module_id, func, term, &defs, types, fn_sig.ret, errors);
+			verify_terminator_types(
+				module_id, func, term, &defs, types, fn_sig.ret, errors,
+			);
 			for op in term.operands() {
 				if !defs.contains_key(&op) {
 					errors.push(IrVerifyError {
 						module_id: module_id.to_string(),
 						function: Some(func.name.clone()),
-						message: format!("terminator uses undefined value {:?}", op),
+						message: format!(
+							"terminator uses undefined value {:?}",
+							op
+						),
 					});
 				} else if let Some(Some((def_block, _def_idx))) = def_sites.get(&op)
 					&& *def_block == block.id
@@ -515,7 +527,10 @@ fn verify_terminator_types(
 				errors.push(IrVerifyError {
 					module_id: module_id.to_string(),
 					function: Some(func.name.clone()),
-					message: format!("condbr condition must be bool, got {:?}", cond_ty),
+					message: format!(
+						"condbr condition must be bool, got {:?}",
+						cond_ty
+					),
 				});
 			}
 		}
@@ -525,7 +540,8 @@ fn verify_terminator_types(
 					errors.push(IrVerifyError {
 						module_id: module_id.to_string(),
 						function: Some(func.name.clone()),
-						message: "void function cannot return a value".to_string(),
+						message: "void function cannot return a value"
+							.to_string(),
 					});
 				}
 			} else {
@@ -533,7 +549,8 @@ fn verify_terminator_types(
 					errors.push(IrVerifyError {
 						module_id: module_id.to_string(),
 						function: Some(func.name.clone()),
-						message: "non-void function must return a value".to_string(),
+						message: "non-void function must return a value"
+							.to_string(),
 					});
 					return;
 				};
@@ -577,8 +594,9 @@ fn dfs_reachable(
 #[cfg(test)]
 mod tests {
 	use crate::ir::{
-		IrBlock, IrBlockId, IrConst, IrEdge, IrFunction, IrFunctionTypeMap, IrInst, IrInstKind,
-		IrLinkage, IrModule, IrProgram, IrTerminator, IrType, IrTypeTable, IrValueDef, IrValueId,
+		IrBlock, IrBlockId, IrConst, IrEdge, IrFunction, IrFunctionTypeMap, IrInst,
+		IrInstKind, IrLinkage, IrModule, IrProgram, IrTerminator, IrType, IrTypeTable,
+		IrValueDef, IrValueId,
 	};
 
 	use super::verify_program;

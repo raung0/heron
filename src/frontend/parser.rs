@@ -6270,8 +6270,7 @@ Child :: struct extends Base { };
 	#[test]
 	fn interface_cannot_extend() {
 		let lx = Lexer::new(
-			"ReadWriter :: interface extends Reader { write := fn() --- }"
-				.to_string(),
+			"ReadWriter :: interface extends Reader { write := fn() --- }".to_string(),
 			"<test>".to_string(),
 		);
 		let err = parse_all(lx).expect_err("interface extends must fail");
@@ -6279,10 +6278,7 @@ Child :: struct extends Base { };
 			ParseError::ExpectedToken(tok, TokenValue::LSquirly) => {
 				assert_eq!(tok.v, TokenValue::Keyword(Keyword::Extends));
 			}
-			other => panic!(
-				"expected interface extends parse error, got {:?}",
-				other
-			),
+			other => panic!("expected interface extends parse error, got {:?}", other),
 		}
 	}
 

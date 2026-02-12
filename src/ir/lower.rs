@@ -1,8 +1,8 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use crate::frontend::{
-	BuiltinType, ConstExprKey, Operator, ResolvedType, Semantics, TypeId, TypeLevelExprKey,
-	TypedFnBody, TypedProgram, TypedValue,
+	ASTValue, BuiltinType, ConstExprKey, ConstValue, CtfeEngine, Operator, ResolvedType,
+	Semantics, TypeId, TypeLevelExprKey, TypedFnBody, TypedProgram, TypedValue,
 };
 use crate::ir::{
 	IrBinOp, IrBlock, IrBlockId, IrCastKind, IrCmpOp, IrConst, IrFunction, IrFunctionTypeMap,
@@ -256,6 +256,9 @@ pub fn lower_typed_program_to_ir(
 	let module_ids: BTreeMap<_, _> = program.modules.iter().collect();
 	let builtin_void_ty = semantics.builtins.void_id;
 	for (module_id, module) in module_ids {
+		let module_comptime_consts = collect_module_comptime_consts(semantics, module_id);
+		let module_runtime_ctfe_consts =
+			collect_module_runtime_ctfe_consts(semantics, module_id);
 		let mut ir_module = IrModule {
 			id: module_id.clone(),
 			source_file: module.file_path.clone(),
@@ -286,6 +289,8 @@ pub fn lower_typed_program_to_ir(
 							name,
 							value.as_ref(),
 							module,
+							&module_comptime_consts,
+							&module_runtime_ctfe_consts,
 							builtin_void_ty,
 							&mut type_ctx,
 							&mut out.types,
@@ -314,6 +319,8 @@ pub fn lower_typed_program_to_ir(
 								name,
 								value.as_ref(),
 								module,
+								&module_comptime_consts,
+								&module_runtime_ctfe_consts,
 								builtin_void_ty,
 								&mut type_ctx,
 								&mut out.types,
@@ -341,11 +348,709 @@ pub fn lower_typed_program_to_ir(
 	}
 }
 
+fn collect_module_comptime_consts(
+	semantics: &Semantics,
+	module_id: &str,
+) -> HashMap<String, ConstValue> {
+	let mut out = HashMap::new();
+	let Some(module) = semantics.modules.get(module_id) else {
+		return out;
+	};
+	let (ASTValue::ExprList { items, .. } | ASTValue::ExprListNoScope { items, .. }) =
+		&module.ast.v
+	else {
+		return out;
+	};
+	let required_comptimes = collect_required_comptime_names(items);
+	let mut engine = CtfeEngine::new(crate::frontend::CtfeLimits::default());
+	for item in items {
+		engine.register_function_decls(unwrap_pub(item.as_ref()));
+	}
+
+	for item in items {
+		let target = unwrap_pub(item.as_ref());
+		match &target.v {
+			ASTValue::DeclarationComptime(name, value) => {
+				if required_comptimes.contains(name)
+					&& should_eval_comptime_value(value.as_ref())
+					&& let Ok(evaluated) = engine.eval_expr(value.as_ref())
+				{
+					engine.bind_const(name, evaluated.clone());
+					out.insert(name.clone(), evaluated);
+				}
+			}
+			ASTValue::DeclarationMulti {
+				names,
+				values: Some(values),
+				comptime: true,
+				..
+			} => {
+				for (idx, name) in names.iter().enumerate() {
+					if !required_comptimes.contains(name) {
+						continue;
+					}
+					if let Some(value) =
+						values.get(idx).or_else(|| values.first())
+						&& should_eval_comptime_value(value.as_ref())
+						&& let Ok(evaluated) =
+							engine.eval_expr(value.as_ref())
+					{
+						engine.bind_const(name, evaluated.clone());
+						out.insert(name.clone(), evaluated);
+					}
+				}
+			}
+			_ => {}
+		}
+	}
+
+	out
+}
+
+fn collect_module_runtime_ctfe_consts(
+	semantics: &Semantics,
+	module_id: &str,
+) -> HashMap<String, ConstValue> {
+	let mut out = HashMap::new();
+	let Some(module) = semantics.modules.get(module_id) else {
+		return out;
+	};
+	let (ASTValue::ExprList { items, .. } | ASTValue::ExprListNoScope { items, .. }) =
+		&module.ast.v
+	else {
+		return out;
+	};
+	let required_comptimes = collect_required_comptime_names(items);
+	let mut engine = CtfeEngine::new(crate::frontend::CtfeLimits::default());
+	for item in items {
+		engine.register_function_decls(unwrap_pub(item.as_ref()));
+	}
+	for item in items {
+		let target = unwrap_pub(item.as_ref());
+		match &target.v {
+			ASTValue::DeclarationComptime(name, value) => {
+				if required_comptimes.contains(name)
+					&& should_eval_comptime_value(value.as_ref())
+					&& let Ok(evaluated) = engine.eval_expr(value.as_ref())
+				{
+					engine.bind_const(name, evaluated);
+				}
+			}
+			ASTValue::DeclarationMulti {
+				names,
+				values: Some(values),
+				comptime: true,
+				..
+			} => {
+				for (idx, name) in names.iter().enumerate() {
+					if !required_comptimes.contains(name) {
+						continue;
+					}
+					if let Some(value) =
+						values.get(idx).or_else(|| values.first())
+						&& should_eval_comptime_value(value.as_ref())
+						&& let Ok(evaluated) =
+							engine.eval_expr(value.as_ref())
+					{
+						engine.bind_const(name, evaluated);
+					}
+				}
+			}
+			_ => {}
+		}
+	}
+
+	let mut runtime_scopes = vec![HashSet::new()];
+	for item in items {
+		let target = unwrap_pub(item.as_ref());
+		collect_runtime_ctfe_candidates(&mut engine, target, &mut runtime_scopes, &mut out);
+	}
+
+	out
+}
+
+fn collect_runtime_ctfe_candidates(
+	engine: &mut CtfeEngine,
+	node: &crate::frontend::AST,
+	runtime_scopes: &mut Vec<HashSet<String>>,
+	out: &mut HashMap<String, ConstValue>,
+) {
+	match &node.v {
+		ASTValue::Declaration {
+			name,
+			value,
+			mutable: _,
+		} => {
+			if let ASTValue::Fn { body, .. } = &value.v {
+				let mut nested_scopes = runtime_scopes.to_vec();
+				nested_scopes.push(HashSet::new());
+				collect_fn_body_runtime_ctfe(engine, body, &mut nested_scopes, out);
+			} else {
+				collect_runtime_decl_value_ctfe(
+					engine,
+					name,
+					value.as_ref(),
+					runtime_scopes,
+					out,
+				);
+			}
+		}
+		ASTValue::DeclarationMulti {
+			names,
+			values: Some(values),
+			comptime: false,
+			..
+		} => {
+			for (idx, name) in names.iter().enumerate() {
+				if let Some(value) = values.get(idx).or_else(|| values.first()) {
+					collect_runtime_decl_value_ctfe(
+						engine,
+						name,
+						value.as_ref(),
+						runtime_scopes,
+						out,
+					);
+				}
+			}
+		}
+		_ => {}
+	}
+}
+
+fn collect_runtime_decl_value_ctfe(
+	engine: &mut CtfeEngine,
+	_name: &str,
+	value: &crate::frontend::AST,
+	runtime_scopes: &[HashSet<String>],
+	out: &mut HashMap<String, ConstValue>,
+) {
+	if let ASTValue::Fn { body, .. } = &value.v {
+		let mut nested_scopes = runtime_scopes.to_vec();
+		nested_scopes.push(HashSet::new());
+		collect_fn_body_runtime_ctfe(engine, body, &mut nested_scopes, out);
+		return;
+	}
+	if expr_depends_on_runtime_locals(value, runtime_scopes) {
+		return;
+	}
+	if !expr_contains_call(value) {
+		return;
+	}
+	if should_eval_comptime_value(value)
+		&& let Ok(result) = engine.eval_expr(value)
+	{
+		out.insert(source_location_key(&value.location), result);
+	}
+}
+
+fn collect_fn_body_runtime_ctfe(
+	engine: &mut CtfeEngine,
+	body: &crate::frontend::FnBody,
+	runtime_scopes: &mut Vec<HashSet<String>>,
+	out: &mut HashMap<String, ConstValue>,
+) {
+	match body {
+		crate::frontend::FnBody::Block(ast) | crate::frontend::FnBody::Expr(ast) => {
+			collect_ast_runtime_ctfe(engine, ast.as_ref(), runtime_scopes, out)
+		}
+		crate::frontend::FnBody::Uninitialized => {}
+	}
+}
+
+fn collect_ast_runtime_ctfe(
+	engine: &mut CtfeEngine,
+	node: &crate::frontend::AST,
+	runtime_scopes: &mut Vec<HashSet<String>>,
+	out: &mut HashMap<String, ConstValue>,
+) {
+	match &node.v {
+		ASTValue::ExprList { items, .. } | ASTValue::ExprListNoScope { items, .. } => {
+			runtime_scopes.push(HashSet::new());
+			for item in items {
+				collect_ast_runtime_ctfe(
+					engine,
+					item.as_ref(),
+					runtime_scopes,
+					out,
+				);
+			}
+			let _ = runtime_scopes.pop();
+		}
+		ASTValue::Declaration { name, value, .. } => {
+			collect_runtime_decl_value_ctfe(
+				engine,
+				name,
+				value.as_ref(),
+				runtime_scopes,
+				out,
+			);
+			if let Some(scope) = runtime_scopes.last_mut() {
+				scope.insert(name.clone());
+			}
+		}
+		ASTValue::DeclarationMulti {
+			names,
+			values: Some(values),
+			comptime: false,
+			..
+		} => {
+			for (idx, name) in names.iter().enumerate() {
+				if let Some(value) = values.get(idx).or_else(|| values.first()) {
+					collect_runtime_decl_value_ctfe(
+						engine,
+						name,
+						value.as_ref(),
+						runtime_scopes,
+						out,
+					);
+				}
+				if let Some(scope) = runtime_scopes.last_mut() {
+					scope.insert(name.clone());
+				}
+			}
+		}
+		ASTValue::DeclarationMulti {
+			names,
+			comptime: false,
+			..
+		} => {
+			if let Some(scope) = runtime_scopes.last_mut() {
+				for name in names {
+					scope.insert(name.clone());
+				}
+			}
+		}
+		ASTValue::If {
+			decl, body, else_, ..
+		} => {
+			if let Some(decl) = decl {
+				collect_ast_runtime_ctfe(
+					engine,
+					decl.as_ref(),
+					runtime_scopes,
+					out,
+				);
+			}
+			collect_ast_runtime_ctfe(engine, body.as_ref(), runtime_scopes, out);
+			if let Some(else_) = else_ {
+				collect_ast_runtime_ctfe(
+					engine,
+					else_.as_ref(),
+					runtime_scopes,
+					out,
+				);
+			}
+		}
+		ASTValue::While { decl, body, .. } => {
+			if let Some(decl) = decl {
+				collect_ast_runtime_ctfe(
+					engine,
+					decl.as_ref(),
+					runtime_scopes,
+					out,
+				);
+			}
+			collect_ast_runtime_ctfe(engine, body.as_ref(), runtime_scopes, out);
+		}
+		ASTValue::ForLoop {
+			init, step, body, ..
+		} => {
+			if let Some(init) = init {
+				collect_ast_runtime_ctfe(
+					engine,
+					init.as_ref(),
+					runtime_scopes,
+					out,
+				);
+			}
+			if let Some(step) = step {
+				collect_ast_runtime_ctfe(
+					engine,
+					step.as_ref(),
+					runtime_scopes,
+					out,
+				);
+			}
+			collect_ast_runtime_ctfe(engine, body.as_ref(), runtime_scopes, out);
+		}
+		ASTValue::For { body, .. } => {
+			collect_ast_runtime_ctfe(engine, body.as_ref(), runtime_scopes, out)
+		}
+		ASTValue::Match { cases, .. } => {
+			for case in cases {
+				collect_ast_runtime_ctfe(
+					engine,
+					case.body.as_ref(),
+					runtime_scopes,
+					out,
+				);
+			}
+		}
+		_ => {}
+	}
+}
+
+fn expr_depends_on_runtime_locals(
+	node: &crate::frontend::AST,
+	runtime_scopes: &[HashSet<String>],
+) -> bool {
+	let mut ids = std::collections::VecDeque::new();
+	collect_ids_in_ast(node, &mut ids);
+	while let Some(id) = ids.pop_front() {
+		if runtime_scopes.iter().rev().any(|scope| scope.contains(&id)) {
+			return true;
+		}
+	}
+	false
+}
+
+fn expr_contains_call(node: &crate::frontend::AST) -> bool {
+	match &node.v {
+		ASTValue::Call { .. } => true,
+		ASTValue::Pub(inner)
+		| ASTValue::UnaryPlus(inner)
+		| ASTValue::UnaryMinus(inner)
+		| ASTValue::Not(inner)
+		| ASTValue::Deref(inner)
+		| ASTValue::Mut(inner)
+		| ASTValue::PtrOf(inner)
+		| ASTValue::Defer(inner)
+		| ASTValue::Ref { v: inner, .. }
+		| ASTValue::DeclarationComptime(_, inner)
+		| ASTValue::Set(_, inner)
+		| ASTValue::Cast { value: inner, .. }
+		| ASTValue::Transmute { value: inner, .. }
+		| ASTValue::Declaration { value: inner, .. }
+		| ASTValue::NamedArg { value: inner, .. }
+		| ASTValue::Return(Some(inner)) => expr_contains_call(inner.as_ref()),
+		ASTValue::BinExpr { lhs, rhs, .. } => {
+			expr_contains_call(lhs.as_ref()) || expr_contains_call(rhs.as_ref())
+		}
+		ASTValue::DeclarationMulti {
+			values: Some(values),
+			..
+		}
+		| ASTValue::ExprList { items: values, .. }
+		| ASTValue::ExprListNoScope { items: values, .. }
+		| ASTValue::SetMulti { values, .. } => values.iter().any(|v| expr_contains_call(v.as_ref())),
+		ASTValue::GenericApply { target, .. } => expr_contains_call(target.as_ref()),
+		ASTValue::If {
+			cond,
+			decl,
+			body,
+			else_,
+		} => {
+			expr_contains_call(cond.as_ref())
+				|| decl.as_ref()
+					.is_some_and(|d| expr_contains_call(d.as_ref()))
+				|| expr_contains_call(body.as_ref())
+				|| else_.as_ref()
+					.is_some_and(|e| expr_contains_call(e.as_ref()))
+		}
+		ASTValue::While { cond, decl, body } => {
+			expr_contains_call(cond.as_ref())
+				|| decl.as_ref()
+					.is_some_and(|d| expr_contains_call(d.as_ref()))
+				|| expr_contains_call(body.as_ref())
+		}
+		ASTValue::ForLoop {
+			init,
+			cond,
+			step,
+			body,
+		} => {
+			init.as_ref()
+				.is_some_and(|i| expr_contains_call(i.as_ref()))
+				|| cond.as_ref()
+					.is_some_and(|c| expr_contains_call(c.as_ref()))
+				|| step.as_ref()
+					.is_some_and(|s| expr_contains_call(s.as_ref()))
+				|| expr_contains_call(body.as_ref())
+		}
+		ASTValue::For { iter, body, .. } => {
+			expr_contains_call(iter.as_ref()) || expr_contains_call(body.as_ref())
+		}
+		ASTValue::InitializerList(items) | ASTValue::TypedInitializerList { items, .. } => {
+			items.iter().any(|item| match item {
+				crate::frontend::InitializerItem::Positional(value)
+				| crate::frontend::InitializerItem::Named { value, .. } => expr_contains_call(value.as_ref()),
+			})
+		}
+		ASTValue::Index { target, indices } => {
+			expr_contains_call(target.as_ref())
+				|| indices.iter().any(|idx| expr_contains_call(idx.as_ref()))
+		}
+		ASTValue::Match {
+			scrutinee, cases, ..
+		} => {
+			expr_contains_call(scrutinee.as_ref())
+				|| cases.iter().any(|case| {
+					(case.guard
+						.as_ref()
+						.is_some_and(|g| expr_contains_call(g.as_ref())))
+						|| expr_contains_call(case.body.as_ref())
+				})
+		}
+		ASTValue::Fn {
+			pre,
+			where_clause,
+			ensures,
+			body,
+			..
+		} => {
+			pre.iter().any(|p| expr_contains_call(p.as_ref()))
+				|| where_clause
+					.as_ref()
+					.is_some_and(|w| expr_contains_call(w.as_ref()))
+				|| ensures
+					.iter()
+					.any(|e| expr_contains_call(e.condition.as_ref()))
+				|| match body {
+					crate::frontend::FnBody::Expr(expr)
+					| crate::frontend::FnBody::Block(expr) => expr_contains_call(expr.as_ref()),
+					crate::frontend::FnBody::Uninitialized => false,
+				}
+		}
+		_ => false,
+	}
+}
+
+fn source_location_key(location: &crate::frontend::SourceLocation) -> String {
+	format!(
+		"{}:{}:{}:{}:{}",
+		location.file,
+		location.range.begin.0,
+		location.range.begin.1,
+		location.range.end.0,
+		location.range.end.1
+	)
+}
+
+fn unwrap_pub<'a>(node: &'a crate::frontend::AST) -> &'a crate::frontend::AST {
+	if let ASTValue::Pub(inner) = &node.v {
+		inner.as_ref()
+	} else {
+		node
+	}
+}
+
+fn should_eval_comptime_value(value: &crate::frontend::AST) -> bool {
+	!matches!(
+		value.v,
+		ASTValue::Fn { .. }
+			| ASTValue::Struct { .. }
+			| ASTValue::Enum { .. }
+			| ASTValue::Union { .. }
+			| ASTValue::RawUnion { .. }
+			| ASTValue::Newtype { .. }
+			| ASTValue::Alias { .. }
+	)
+}
+
+fn collect_required_comptime_names(items: &[Box<crate::frontend::AST>]) -> HashSet<String> {
+	let mut comptime_values: HashMap<String, Box<crate::frontend::AST>> = HashMap::new();
+	let mut queue: std::collections::VecDeque<String> = std::collections::VecDeque::new();
+
+	for item in items {
+		let node = unwrap_pub(item.as_ref());
+		match &node.v {
+			ASTValue::DeclarationComptime(name, value) => {
+				comptime_values.insert(name.clone(), value.clone());
+			}
+			ASTValue::DeclarationMulti {
+				names,
+				values: Some(values),
+				comptime: true,
+				..
+			} => {
+				for (idx, name) in names.iter().enumerate() {
+					if let Some(value) =
+						values.get(idx).or_else(|| values.first())
+					{
+						comptime_values.insert(name.clone(), value.clone());
+					}
+				}
+			}
+			ASTValue::Declaration { value, .. } => {
+				collect_ids_in_ast(value.as_ref(), &mut queue);
+			}
+			ASTValue::DeclarationMulti {
+				values: Some(values),
+				comptime: false,
+				..
+			} => {
+				for value in values {
+					collect_ids_in_ast(value.as_ref(), &mut queue);
+				}
+			}
+			_ => {}
+		}
+	}
+
+	let mut required = HashSet::new();
+	while let Some(name) = queue.pop_front() {
+		if !required.insert(name.clone()) {
+			continue;
+		}
+		if let Some(value) = comptime_values.get(&name) {
+			collect_ids_in_ast(value.as_ref(), &mut queue);
+		}
+	}
+	required
+}
+
+fn collect_ids_in_ast(node: &crate::frontend::AST, out: &mut std::collections::VecDeque<String>) {
+	match &node.v {
+		ASTValue::Id(name) | ASTValue::DotId(name) => out.push_back(name.clone()),
+		ASTValue::Pub(inner)
+		| ASTValue::UnaryPlus(inner)
+		| ASTValue::UnaryMinus(inner)
+		| ASTValue::Not(inner)
+		| ASTValue::Deref(inner)
+		| ASTValue::Mut(inner)
+		| ASTValue::PtrOf(inner)
+		| ASTValue::Defer(inner) => collect_ids_in_ast(inner.as_ref(), out),
+		ASTValue::Ref { v, .. }
+		| ASTValue::DeclarationComptime(_, v)
+		| ASTValue::Set(_, v) => collect_ids_in_ast(v.as_ref(), out),
+		ASTValue::Cast { value, .. } | ASTValue::Transmute { value, .. } => {
+			collect_ids_in_ast(value.as_ref(), out)
+		}
+		ASTValue::BinExpr { lhs, rhs, .. } => {
+			collect_ids_in_ast(lhs.as_ref(), out);
+			collect_ids_in_ast(rhs.as_ref(), out);
+		}
+		ASTValue::Declaration { value, .. } => collect_ids_in_ast(value.as_ref(), out),
+		ASTValue::DeclarationMulti {
+			values: Some(values),
+			..
+		}
+		| ASTValue::ExprList { items: values, .. }
+		| ASTValue::ExprListNoScope { items: values, .. }
+		| ASTValue::SetMulti { values, .. } => {
+			for value in values {
+				collect_ids_in_ast(value.as_ref(), out);
+			}
+		}
+		ASTValue::Call { callee, args } => {
+			collect_ids_in_ast(callee.as_ref(), out);
+			for arg in args {
+				collect_ids_in_ast(arg.as_ref(), out);
+			}
+		}
+		ASTValue::NamedArg { value, .. } | ASTValue::Return(Some(value)) => {
+			collect_ids_in_ast(value.as_ref(), out)
+		}
+		ASTValue::If {
+			cond,
+			decl,
+			body,
+			else_,
+		} => {
+			collect_ids_in_ast(cond.as_ref(), out);
+			if let Some(decl) = decl {
+				collect_ids_in_ast(decl.as_ref(), out);
+			}
+			collect_ids_in_ast(body.as_ref(), out);
+			if let Some(else_) = else_ {
+				collect_ids_in_ast(else_.as_ref(), out);
+			}
+		}
+		ASTValue::While { cond, decl, body } => {
+			collect_ids_in_ast(cond.as_ref(), out);
+			if let Some(decl) = decl {
+				collect_ids_in_ast(decl.as_ref(), out);
+			}
+			collect_ids_in_ast(body.as_ref(), out);
+		}
+		ASTValue::ForLoop {
+			init,
+			cond,
+			step,
+			body,
+		} => {
+			if let Some(init) = init {
+				collect_ids_in_ast(init.as_ref(), out);
+			}
+			if let Some(cond) = cond {
+				collect_ids_in_ast(cond.as_ref(), out);
+			}
+			if let Some(step) = step {
+				collect_ids_in_ast(step.as_ref(), out);
+			}
+			collect_ids_in_ast(body.as_ref(), out);
+		}
+		ASTValue::For { iter, body, .. } => {
+			collect_ids_in_ast(iter.as_ref(), out);
+			collect_ids_in_ast(body.as_ref(), out);
+		}
+		ASTValue::InitializerList(items) | ASTValue::TypedInitializerList { items, .. } => {
+			for item in items {
+				match item {
+					crate::frontend::InitializerItem::Positional(value)
+					| crate::frontend::InitializerItem::Named {
+						value, ..
+					} => collect_ids_in_ast(value.as_ref(), out),
+				}
+			}
+		}
+		ASTValue::Index { target, indices } => {
+			collect_ids_in_ast(target.as_ref(), out);
+			for idx in indices {
+				collect_ids_in_ast(idx.as_ref(), out);
+			}
+		}
+		ASTValue::Match {
+			scrutinee, cases, ..
+		} => {
+			collect_ids_in_ast(scrutinee.as_ref(), out);
+			for case in cases {
+				if let crate::frontend::MatchCasePattern::Exprs(exprs) =
+					&case.pattern
+				{
+					for expr in exprs {
+						collect_ids_in_ast(expr.as_ref(), out);
+					}
+				}
+				if let Some(guard) = &case.guard {
+					collect_ids_in_ast(guard.as_ref(), out);
+				}
+				collect_ids_in_ast(case.body.as_ref(), out);
+			}
+		}
+		ASTValue::Fn {
+			pre,
+			where_clause,
+			ensures,
+			body,
+			..
+		} => {
+			for pre in pre {
+				collect_ids_in_ast(pre.as_ref(), out);
+			}
+			if let Some(where_clause) = where_clause {
+				collect_ids_in_ast(where_clause.as_ref(), out);
+			}
+			for ensure in ensures {
+				collect_ids_in_ast(ensure.condition.as_ref(), out);
+			}
+			match body {
+				crate::frontend::FnBody::Expr(expr)
+				| crate::frontend::FnBody::Block(expr) => collect_ids_in_ast(expr.as_ref(), out),
+				crate::frontend::FnBody::Uninitialized => {}
+			}
+		}
+		_ => {}
+	}
+}
+
 fn maybe_collect_function(
 	module_id: &str,
 	name: &str,
 	value: &crate::frontend::TypedAst,
 	module: &crate::frontend::TypedModule,
+	module_comptime_consts: &HashMap<String, ConstValue>,
+	module_runtime_ctfe_consts: &HashMap<String, ConstValue>,
 	builtin_void_ty: TypeId,
 	type_ctx: &mut TypeLowerContext,
 	ir_types: &mut IrTypeTable,
@@ -370,16 +1075,17 @@ fn maybe_collect_function(
 	};
 
 	let sig = type_ctx.lower(fn_ty, ir_types);
-	let mut lowerer =
-		FunctionLowerer::new(
-			module_id,
-			name,
-			builtin_void_ty,
-			&module.values,
-			&module.types,
-			type_ctx,
-			ir_types,
-		);
+	let mut lowerer = FunctionLowerer::new(
+		module_id,
+		name,
+		builtin_void_ty,
+		&module.values,
+		&module.types,
+		module_comptime_consts,
+		module_runtime_ctfe_consts,
+		type_ctx,
+		ir_types,
+	);
 	let entry = lowerer.create_block();
 	lowerer.switch_to(entry);
 	let mut out_params = Vec::new();
@@ -396,10 +1102,7 @@ fn maybe_collect_function(
 		&& !flat_param_names.is_empty()
 		&& flat_param_names.len() == sig_param_tys.len()
 	{
-		for (name, ty) in flat_param_names
-			.into_iter()
-			.zip(sig_param_tys.into_iter())
-		{
+		for (name, ty) in flat_param_names.into_iter().zip(sig_param_tys.into_iter()) {
 			let value = lowerer.ids.fresh_value();
 			out_params.push(IrParam {
 				name: name.clone(),
@@ -460,6 +1163,8 @@ struct FunctionLowerer<'a, 'b> {
 	builtin_void_ty: TypeId,
 	module_values: &'a HashMap<String, TypeId>,
 	module_types: &'a HashMap<String, TypeId>,
+	module_comptime_consts: &'a HashMap<String, ConstValue>,
+	runtime_ctfe_consts: &'a HashMap<String, ConstValue>,
 	ids: FunctionBuildIds,
 	type_ctx: &'a mut TypeLowerContext<'b>,
 	ir_types: &'a mut IrTypeTable,
@@ -476,6 +1181,8 @@ impl<'a, 'b> FunctionLowerer<'a, 'b> {
 		builtin_void_ty: TypeId,
 		module_values: &'a HashMap<String, TypeId>,
 		module_types: &'a HashMap<String, TypeId>,
+		module_comptime_consts: &'a HashMap<String, ConstValue>,
+		runtime_ctfe_consts: &'a HashMap<String, ConstValue>,
 		type_ctx: &'a mut TypeLowerContext<'b>,
 		ir_types: &'a mut IrTypeTable,
 	) -> Self {
@@ -485,6 +1192,8 @@ impl<'a, 'b> FunctionLowerer<'a, 'b> {
 			builtin_void_ty,
 			module_values,
 			module_types,
+			module_comptime_consts,
+			runtime_ctfe_consts,
 			ids: FunctionBuildIds::default(),
 			type_ctx,
 			ir_types,
@@ -738,6 +1447,10 @@ impl<'a, 'b> FunctionLowerer<'a, 'b> {
 					> = HashMap::new();
 					let mut merge_params: Vec<(String, IrValueId, IrValueId)> =
 						Vec::new();
+					let mut merge_expr_param: Option<(IrValueId, IrValueId)> =
+						None;
+					let mut merge_expr_value: Option<(IrValueId, IrTypeId)> =
+						None;
 
 					if then_falls && else_falls {
 						let mut names: Vec<_> = then_locals
@@ -776,10 +1489,41 @@ impl<'a, 'b> FunctionLowerer<'a, 'b> {
 								));
 							}
 						}
+						match (then_last, else_last) {
+							(
+								Some((then_value, then_ty)),
+								Some((else_value, else_ty)),
+							) if then_ty == else_ty => {
+								if then_value == else_value {
+									merge_expr_value = Some((
+										then_value, then_ty,
+									));
+								} else {
+									let phi = self
+										.add_block_param(
+										merge_bb,
+										Some("if.result"
+											.to_string(
+											)),
+										then_ty,
+									)?;
+									merge_expr_param = Some((
+										then_value,
+										else_value,
+									));
+									merge_expr_value = Some((
+										phi, then_ty,
+									));
+								}
+							}
+							_ => {}
+						}
 					} else if then_falls {
 						merge_locals = then_locals.clone();
+						merge_expr_value = then_last;
 					} else {
 						merge_locals = else_locals.clone();
+						merge_expr_value = else_last;
 					}
 
 					if then_falls {
@@ -791,10 +1535,15 @@ impl<'a, 'b> FunctionLowerer<'a, 'b> {
 							},
 						))?;
 						if then_falls && else_falls {
-							let args = merge_params
+							let mut args: Vec<IrValueId> = merge_params
 								.iter()
 								.map(|(_, then_val, _)| *then_val)
 								.collect();
+							if let Some((then_value, _)) =
+								merge_expr_param
+							{
+								args.push(then_value);
+							}
 							self.patch_edge_args(
 								then_bb, merge_bb, args,
 							)?;
@@ -809,10 +1558,15 @@ impl<'a, 'b> FunctionLowerer<'a, 'b> {
 							},
 						))?;
 						if then_falls && else_falls {
-							let args = merge_params
+							let mut args: Vec<IrValueId> = merge_params
 								.iter()
 								.map(|(_, _, else_val)| *else_val)
 								.collect();
+							if let Some((_, else_value)) =
+								merge_expr_param
+							{
+								args.push(else_value);
+							}
 							self.patch_edge_args(
 								else_bb, merge_bb, args,
 							)?;
@@ -820,9 +1574,10 @@ impl<'a, 'b> FunctionLowerer<'a, 'b> {
 					}
 					self.switch_to(merge_bb);
 					self.locals = merge_locals;
-					*last_value = None;
+					*last_value = merge_expr_value;
 				} else {
 					self.locals = incoming_locals;
+					*last_value = None;
 				}
 			}
 			TypedValue::While { cond, decl, body } => {
@@ -1012,6 +1767,23 @@ impl<'a, 'b> FunctionLowerer<'a, 'b> {
 			}
 			TypedValue::Declaration { name, value, .. }
 			| TypedValue::DeclarationComptime(name, value) => {
+				if let Some(const_value) = self
+					.runtime_ctfe_consts
+					.get(&source_location_key(&value.location))
+				{
+					let ty = self.node_ir_type(value.as_ref());
+					if let Some(ir_const) =
+						self.const_value_to_ir_const(const_value, ty)
+					{
+						let value_id = self.push_value(
+							IrInstKind::Const(ir_const),
+							ty,
+							Some(value.location.clone()),
+						)?;
+						self.locals.insert(name.clone(), (value_id, ty));
+						return Ok(());
+					}
+				}
 				if let Some((val, ty)) = self.lower_expr(value.as_ref())? {
 					self.locals.insert(name.clone(), (val, ty));
 				}
@@ -1027,6 +1799,26 @@ impl<'a, 'b> FunctionLowerer<'a, 'b> {
 					else {
 						continue;
 					};
+					if let Some(const_value) = self
+						.runtime_ctfe_consts
+						.get(&source_location_key(&value.location))
+					{
+						let ty = self.node_ir_type(value.as_ref());
+						if let Some(ir_const) = self
+							.const_value_to_ir_const(const_value, ty)
+						{
+							let value_id = self.push_value(
+								IrInstKind::Const(ir_const),
+								ty,
+								Some(value.location.clone()),
+							)?;
+							self.locals.insert(
+								name.clone(),
+								(value_id, ty),
+							);
+							continue;
+						}
+					}
 					if let Some((val, ty)) = self.lower_expr(value.as_ref())? {
 						self.locals.insert(name.clone(), (val, ty));
 					}
@@ -1279,7 +2071,23 @@ impl<'a, 'b> FunctionLowerer<'a, 'b> {
 					)?;
 					return Ok(Some((value, ty)));
 				}
-				Ok(self.locals.get(name).copied())
+				let ty = self.node_ir_type(node);
+				if let Some(local) = self.locals.get(name).copied() {
+					return Ok(Some(local));
+				}
+				if let Some(const_value) = self.module_comptime_consts.get(name)
+					&& let Some(ir_const) =
+						self.const_value_to_ir_const(const_value, ty)
+				{
+					let value = self.push_value(
+						IrInstKind::Const(ir_const),
+						ty,
+						Some(node.location.clone()),
+					)?;
+					self.locals.insert(name.clone(), (value, ty));
+					return Ok(Some((value, ty)));
+				}
+				Ok(None)
 			}
 			TypedValue::UnaryMinus(inner) => {
 				let Some((inner_value, inner_ty)) =
@@ -1379,7 +2187,9 @@ impl<'a, 'b> FunctionLowerer<'a, 'b> {
 					return Ok(Some((out, bool_ty)));
 				}
 				let Some(bin_op) = map_bin(op) else {
-					return Err(format!("unsupported binary operator in IR lowering: {op:?}"));
+					return Err(format!(
+						"unsupported binary operator in IR lowering: {op:?}"
+					));
 				};
 				let out_ty = self.node_ir_type(node);
 				let out = self.push_value(
@@ -1452,9 +2262,8 @@ impl<'a, 'b> FunctionLowerer<'a, 'b> {
 			}
 			TypedValue::Call { callee, args } => {
 				if let TypedValue::Id(callee_name) | TypedValue::DotId(callee_name) =
-					&callee.v
-					&& let Some(value) =
-						self.lower_type_constructor_call(callee_name, args, node)?
+					&callee.v && let Some(value) =
+					self.lower_type_constructor_call(callee_name, args, node)?
 				{
 					return Ok(Some(value));
 				}
@@ -1567,20 +2376,29 @@ impl<'a, 'b> FunctionLowerer<'a, 'b> {
 
 					let lhs_lowered = self.lower_expr(lhs.as_ref())?;
 					if lhs_lowered.is_none()
-						&& matches!(lhs.v, TypedValue::Id(_) | TypedValue::DotId(_))
-					{
-						let mut lowered_args = Vec::with_capacity(args.len());
+						&& matches!(
+							lhs.v,
+							TypedValue::Id(_) | TypedValue::DotId(_)
+						) {
+						let mut lowered_args =
+							Vec::with_capacity(args.len());
 						for arg in args {
-							let Some((arg_value, _)) = self.lower_expr(arg.as_ref())? else {
+							let Some((arg_value, _)) =
+								self.lower_expr(arg.as_ref())?
+							else {
 								return Err(
 									"module function call argument produced no value".to_string(),
 								);
 							};
 							lowered_args.push(arg_value);
 						}
-						let sig_ty = self.resolve_direct_call_signature(callee.as_ref(), node)?;
+						let sig_ty = self.resolve_direct_call_signature(
+							callee.as_ref(),
+							node,
+						)?;
 						let out_ty = self.node_ir_type(node);
-						if matches!(self.ir_types.get(out_ty), IrType::Void) {
+						if matches!(self.ir_types.get(out_ty), IrType::Void)
+						{
 							self.push_effect(
 								IrInstKind::CallDirect {
 									callee: method_name.clone(),
@@ -1604,23 +2422,39 @@ impl<'a, 'b> FunctionLowerer<'a, 'b> {
 					}
 
 					let Some((lhs_value, lhs_ir_ty)) = lhs_lowered else {
-						return Err("method call lhs produced no value".to_string());
+						return Err("method call lhs produced no value"
+							.to_string());
 					};
 					let method_sem_ty = self
-						.resolve_method_semantic_type(lhs_sem_ty, method_name, callee.ty)
+						.resolve_method_semantic_type(
+							lhs_sem_ty,
+							method_name,
+							callee.ty,
+						)
 						.ok_or_else(|| {
-							format!("unable to resolve method type for `{method_name}`")
+							format!(
+								"unable to resolve method type for `{method_name}`"
+							)
 						})?;
 					let method_sig = self
 						.resolve_fn_sig_type_from_semantic(method_sem_ty)
 						.ok_or_else(|| {
-							format!("unable to resolve method signature for `{method_name}`")
+							format!(
+								"unable to resolve method signature for `{method_name}`"
+							)
 						})?;
 
 					let mut call_args = Vec::with_capacity(args.len() + 1);
-					let self_arg = match self.type_ctx.semantics.arena.get(method_sem_ty) {
+					let self_arg = match self
+						.type_ctx
+						.semantics
+						.arena
+						.get(method_sem_ty)
+					{
 						ResolvedType::Fn { params, .. } => {
-							if let Some(first_param) = params.first().copied() {
+							if let Some(first_param) =
+								params.first().copied()
+							{
 								match self
 									.type_ctx
 									.semantics
@@ -1656,7 +2490,9 @@ impl<'a, 'b> FunctionLowerer<'a, 'b> {
 					};
 					call_args.push(self_arg);
 					for arg in args {
-						let Some((arg_value, _)) = self.lower_expr(arg.as_ref())? else {
+						let Some((arg_value, _)) =
+							self.lower_expr(arg.as_ref())?
+						else {
 							return Err(
 								"method call argument produced no value".to_string(),
 							);
@@ -1706,7 +2542,8 @@ impl<'a, 'b> FunctionLowerer<'a, 'b> {
 					};
 					lowered_args.push(arg_val);
 				}
-				let sig_ty = self.resolve_direct_call_signature(callee.as_ref(), node)?;
+				let sig_ty =
+					self.resolve_direct_call_signature(callee.as_ref(), node)?;
 				let out_ty = self.node_ir_type(node);
 				if matches!(self.ir_types.get(out_ty), IrType::Void) {
 					self.push_effect(
@@ -2026,6 +2863,30 @@ impl<'a, 'b> FunctionLowerer<'a, 'b> {
 		}
 	}
 
+	fn const_value_to_ir_const(&self, value: &ConstValue, ty: IrTypeId) -> Option<IrConst> {
+		match value {
+			ConstValue::Void => Some(IrConst::Undef),
+			ConstValue::Bool(v) => Some(IrConst::Bool(*v)),
+			ConstValue::Integer(v) => match self.ir_types.get(ty) {
+				IrType::Int { signed: true, .. } => Some(IrConst::Int(*v)),
+				IrType::Int { signed: false, .. } => {
+					Some(IrConst::UInt(*v as u128))
+				}
+				_ => Some(IrConst::Int(*v)),
+			},
+			ConstValue::Float(v) => match self.ir_types.get(ty) {
+				IrType::Float32 => Some(IrConst::Float32(*v as f32)),
+				_ => Some(IrConst::Float64(*v)),
+			},
+			ConstValue::Char(v) => Some(IrConst::Int(i128::from(u32::from(*v)))),
+			ConstValue::String(_)
+			| ConstValue::Array(_)
+			| ConstValue::Record(_)
+			| ConstValue::Slice(_)
+			| ConstValue::Ref(_) => None,
+		}
+	}
+
 	fn interface_methods_sorted(
 		&self,
 		interface_ty: TypeId,
@@ -2043,10 +2904,7 @@ impl<'a, 'b> FunctionLowerer<'a, 'b> {
 		Ok(ordered)
 	}
 
-	fn resolve_fn_sig_type_from_semantic(
-		&mut self,
-		sem_ty: TypeId,
-	) -> Option<IrTypeId> {
+	fn resolve_fn_sig_type_from_semantic(&mut self, sem_ty: TypeId) -> Option<IrTypeId> {
 		let canonical = self.canonical_type(sem_ty);
 		if matches!(
 			self.type_ctx.semantics.arena.get(canonical),
@@ -2080,7 +2938,11 @@ impl<'a, 'b> FunctionLowerer<'a, 'b> {
 		))
 	}
 
-	fn lookup_method_type_on_value_type(&self, ty: TypeId, method_name: &str) -> Option<TypeId> {
+	fn lookup_method_type_on_value_type(
+		&self,
+		ty: TypeId,
+		method_name: &str,
+	) -> Option<TypeId> {
 		match self.type_ctx.semantics.arena.get(ty) {
 			ResolvedType::Struct {
 				methods, extends, ..
@@ -2089,24 +2951,23 @@ impl<'a, 'b> FunctionLowerer<'a, 'b> {
 					return Some(method.ty);
 				}
 				for base in extends {
-					if let Some(found) =
-						self.lookup_method_type_on_value_type(*base, method_name)
-					{
+					if let Some(found) = self.lookup_method_type_on_value_type(
+						*base,
+						method_name,
+					) {
 						return Some(found);
 					}
 				}
 				None
 			}
-			ResolvedType::Union { methods, .. } | ResolvedType::Interface { methods, .. } => {
-				methods.get(method_name).map(|method| method.ty)
-			}
+			ResolvedType::Union { methods, .. }
+			| ResolvedType::Interface { methods, .. } => methods.get(method_name).map(|method| method.ty),
 			ResolvedType::Alias { underlying, .. }
 			| ResolvedType::Newtype { underlying, .. }
 			| ResolvedType::Reference { underlying, .. }
 			| ResolvedType::Pointer { underlying }
 			| ResolvedType::GenericInstance {
-				base: underlying,
-				..
+				base: underlying, ..
 			} => self.lookup_method_type_on_value_type(*underlying, method_name),
 			_ => None,
 		}
@@ -2119,8 +2980,10 @@ impl<'a, 'b> FunctionLowerer<'a, 'b> {
 		callee_ty: Option<TypeId>,
 	) -> Option<TypeId> {
 		if let Some(callee_ty) = callee_ty
-			&& !matches!(self.type_ctx.semantics.arena.get(callee_ty), ResolvedType::Unknown)
-		{
+			&& !matches!(
+				self.type_ctx.semantics.arena.get(callee_ty),
+				ResolvedType::Unknown
+			) {
 			return Some(callee_ty);
 		}
 		if let Some(from_lhs) =
@@ -2129,14 +2992,19 @@ impl<'a, 'b> FunctionLowerer<'a, 'b> {
 			return Some(from_lhs);
 		}
 		if let Some(from_values) = self.module_values.get(method_name).copied()
-			&& !matches!(self.type_ctx.semantics.arena.get(from_values), ResolvedType::Unknown)
-		{
+			&& !matches!(
+				self.type_ctx.semantics.arena.get(from_values),
+				ResolvedType::Unknown
+			) {
 			return Some(from_values);
 		}
 		let suffix = format!(".{method_name}");
 		self.module_values.iter().find_map(|(name, ty)| {
 			(name.ends_with(&suffix)
-				&& !matches!(self.type_ctx.semantics.arena.get(*ty), ResolvedType::Unknown))
+				&& !matches!(
+					self.type_ctx.semantics.arena.get(*ty),
+					ResolvedType::Unknown
+				))
 			.then_some(*ty)
 		})
 	}
@@ -2163,7 +3031,8 @@ impl<'a, 'b> FunctionLowerer<'a, 'b> {
 				}
 				let mut lowered_fields = Vec::with_capacity(args.len());
 				for arg in args {
-					let Some((value, _)) = self.lower_expr(arg.as_ref())? else {
+					let Some((value, _)) = self.lower_expr(arg.as_ref())?
+					else {
 						return Err(format!(
 							"constructor arg in `{callee_name}` produced no value"
 						));
@@ -2195,18 +3064,20 @@ impl<'a, 'b> FunctionLowerer<'a, 'b> {
 				};
 				let arg_ty = arg_node.ty.unwrap_or(self.builtin_void_ty);
 				let arg_canonical = self.canonical_type(arg_ty);
-				let Some(variant) = variants.iter().enumerate().find_map(|(idx, candidate)| {
-					let candidate_canonical = self.canonical_type(*candidate);
-					(self
-						.type_ctx
-						.semantics
-						.type_matches(candidate_canonical, arg_canonical)
-						|| self
-							.type_ctx
-							.semantics
-							.type_matches(arg_canonical, candidate_canonical))
+				let Some(variant) =
+					variants.iter().enumerate().find_map(|(idx, candidate)| {
+						let candidate_canonical =
+							self.canonical_type(*candidate);
+						(self.type_ctx.semantics.type_matches(
+							candidate_canonical,
+							arg_canonical,
+						) || self.type_ctx.semantics.type_matches(
+							arg_canonical,
+							candidate_canonical,
+						))
 						.then_some(idx as u32)
-				}) else {
+					})
+				else {
 					return Err(format!(
 						"union constructor `{callee_name}` arg type does not match a variant"
 					));
@@ -2289,7 +3160,7 @@ fn map_cmp(op: &Operator, has_eq: bool) -> Option<IrCmpOp> {
 mod tests {
 	use super::lower_typed_program_to_ir;
 	use crate::frontend::{
-		run_passes_with_modules_timed, Lexer, Parser, ResolvedType, Semantics, TypedProgram,
+		Lexer, Parser, ResolvedType, Semantics, TypedProgram, run_passes_with_modules_timed,
 	};
 	use crate::ir::{IrBinOp, IrInstKind, IrTerminator, IrType};
 	use std::fs::read_to_string;
@@ -2642,7 +3513,11 @@ mod tests {
 			.iter()
 			.flat_map(|block| block.insts.iter())
 			.find_map(|inst| match &inst.kind {
-				IrInstKind::CallDirect { callee, sig, .. } if callee == "make_pair" => Some(*sig),
+				IrInstKind::CallDirect { callee, sig, .. }
+					if callee == "make_pair" =>
+				{
+					Some(*sig)
+				}
 				_ => None,
 			})
 			.expect("make_pair call lowered");

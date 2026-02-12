@@ -1,6 +1,21 @@
 use crate::backend::{Backend, BackendError, BackendOptions, BuildCache, ModuleArtifact};
 use crate::frontend::{Semantics, TypedProgram};
 use crate::ir::{lower_typed_program_to_ir, verify_program};
+use std::time::{Duration, Instant};
+
+#[derive(Clone, Debug, Default)]
+pub struct BackendTimings {
+	pub total: Duration,
+	pub cache_load: Duration,
+	pub cache_plan: Duration,
+	pub ir_lower: Duration,
+	pub ir_verify: Duration,
+	pub module_compile: Duration,
+	pub module_reuse: Duration,
+	pub cache_save: Duration,
+	pub modules_compiled: usize,
+	pub modules_reused: usize,
+}
 
 pub fn compile_modules<B: Backend>(
 	backend: &mut B,
@@ -8,20 +23,48 @@ pub fn compile_modules<B: Backend>(
 	semantics: &Semantics,
 	options: &BackendOptions,
 ) -> Result<Vec<ModuleArtifact>, Vec<BackendError>> {
+	compile_modules_timed(backend, program, semantics, options).map(|(artifacts, _)| artifacts)
+}
+
+pub fn compile_modules_timed<B: Backend>(
+	backend: &mut B,
+	program: &TypedProgram,
+	semantics: &Semantics,
+	options: &BackendOptions,
+) -> Result<(Vec<ModuleArtifact>, BackendTimings), Vec<BackendError>> {
+	let total_start = Instant::now();
+	let mut timings = BackendTimings::default();
+
+	let cache_load_start = Instant::now();
 	let mut cache = BuildCache::load_or_create(options, backend.name());
+	timings.cache_load = cache_load_start.elapsed();
+
+	let cache_plan_start = Instant::now();
 	cache.prune_modules(program);
 	let plan = cache.compute_build_plan(program, semantics, backend.name(), options);
+	timings.cache_plan = cache_plan_start.elapsed();
+
 	let cache_trace = std::env::var("HERON_CACHE_TRACE").ok().as_deref() == Some("1");
 	let ir_program = if backend.supports_ir() {
+		let ir_lower_start = Instant::now();
 		match lower_typed_program_to_ir(program, semantics) {
 			Ok(ir) => {
+				timings.ir_lower = ir_lower_start.elapsed();
+				let ir_verify_start = Instant::now();
 				if let Err(verify_errors) = verify_program(&ir) {
+					timings.ir_verify = ir_verify_start.elapsed();
+					timings.total = total_start.elapsed();
 					let errors = verify_errors
 						.into_iter()
 						.map(|err| BackendError {
 							module_id: err.module_id,
-							message: if let Some(function) = err.function {
-								format!("IR verify in `{function}`: {}", err.message)
+							message: if let Some(function) =
+								err.function
+							{
+								format!(
+									"IR verify in `{function}`: {}",
+									err.message
+								)
 							} else {
 								err.message
 							},
@@ -30,9 +73,12 @@ pub fn compile_modules<B: Backend>(
 						.collect();
 					return Err(errors);
 				}
+				timings.ir_verify = ir_verify_start.elapsed();
 				Some(ir)
 			}
 			Err(ir_errors) => {
+				timings.ir_lower = ir_lower_start.elapsed();
+				timings.total = total_start.elapsed();
 				let errors = ir_errors
 					.into_iter()
 					.map(|err| BackendError {
@@ -61,15 +107,29 @@ pub fn compile_modules<B: Backend>(
 			);
 		}
 		if must_compile {
+			timings.modules_compiled += 1;
+			let module_compile_start = Instant::now();
 			let result = if let Some(ir_program) = ir_program.as_ref() {
-				backend.compile_module_ir(&module.module_id, ir_program, semantics, options)
+				backend.compile_module_ir(
+					&module.module_id,
+					ir_program,
+					semantics,
+					options,
+				)
 			} else {
-				backend.compile_module(&module.module_id, program, semantics, options)
+				backend.compile_module(
+					&module.module_id,
+					program,
+					semantics,
+					options,
+				)
 			};
+			timings.module_compile += module_compile_start.elapsed();
 			match result {
 				Ok(artifact) => {
 					if options.emit_obj
-						&& let Some(object_path) = artifact.object_path.as_ref()
+						&& let Some(object_path) =
+							artifact.object_path.as_ref()
 					{
 						cache.update_module(
 							&module.module_id,
@@ -84,6 +144,8 @@ pub fn compile_modules<B: Backend>(
 				}
 			}
 		} else {
+			timings.modules_reused += 1;
+			let module_reuse_start = Instant::now();
 			let mut artifact = ModuleArtifact {
 				module_id: module.module_id.clone(),
 				..ModuleArtifact::default()
@@ -92,34 +154,43 @@ pub fn compile_modules<B: Backend>(
 				artifact.object_path = Some(module.object_path.clone());
 			}
 			artifacts.push(artifact);
+			timings.module_reuse += module_reuse_start.elapsed();
 		}
 	}
 
 	if errors.is_empty() {
+		let cache_save_start = Instant::now();
 		if options.emit_obj
 			&& let Err(err) = cache.save()
 		{
+			timings.cache_save = cache_save_start.elapsed();
+			timings.total = total_start.elapsed();
 			return Err(vec![BackendError {
 				module_id: "<build-cache>".to_string(),
 				message: err,
 				location: None,
 			}]);
 		}
-		Ok(artifacts)
+		timings.cache_save = cache_save_start.elapsed();
+		timings.total = total_start.elapsed();
+		Ok((artifacts, timings))
 	} else {
+		timings.total = total_start.elapsed();
 		Err(errors)
 	}
 }
 
 #[cfg(test)]
 mod tests {
-	use std::time::{SystemTime, UNIX_EPOCH};
 	use std::path::{Path, PathBuf};
+	use std::time::{SystemTime, UNIX_EPOCH};
 
 	use crate::backend::{
 		Backend, BackendOptions, LlvmBackend, ModuleArtifact, compile_modules,
 	};
-	use crate::frontend::{Lexer, Parser, Semantics, TypedProgram, run_passes_with_modules_timed};
+	use crate::frontend::{
+		Lexer, Parser, Semantics, TypedProgram, run_passes_with_modules_timed,
+	};
 	use crate::ir::IrProgram;
 
 	fn load_typed_program(
@@ -317,9 +388,10 @@ mod tests {
 
 		let artifacts = result.expect("llvm IR path object emission succeeds");
 		assert!(!artifacts.is_empty());
-		assert!(artifacts
-			.iter()
-			.any(|artifact| artifact.object_path.as_ref().is_some_and(|p| p.exists())));
+		assert!(artifacts.iter().any(|artifact| artifact
+			.object_path
+			.as_ref()
+			.is_some_and(|p| p.exists())));
 		let _ = std::fs::remove_dir_all(emit_dir);
 	}
 
@@ -377,7 +449,10 @@ mod tests {
 
 		for fixture in fixtures {
 			let (typed, semantics, errors) = load_typed_program(fixture);
-			assert!(errors.is_empty(), "frontend errors for {fixture}: {errors:?}");
+			assert!(
+				errors.is_empty(),
+				"frontend errors for {fixture}: {errors:?}"
+			);
 
 			let mut backend = LlvmBackend::new();
 			let options = BackendOptions {

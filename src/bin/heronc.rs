@@ -6,7 +6,9 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use clap::{Arg, ArgAction, Command};
-use heron::backend::{BackendOptions, LlvmBackend, OptimizationLevel, compile_modules};
+use heron::backend::{
+	BackendOptions, BackendTimings, LlvmBackend, OptimizationLevel, compile_modules_timed,
+};
 use heron::diagnostics::{Message, emit_message, pretty_print_error, pretty_print_multiple_errors};
 use heron::frontend::{
 	self, FrontendError, PassTimings, dot_module_graph, run_passes_with_modules_timed,
@@ -195,13 +197,14 @@ fn main() {
 						optimization_level,
 					};
 					let mut backend = LlvmBackend::new();
-					match compile_modules(
+					match compile_modules_timed(
 						&mut backend,
 						&typed_program,
 						&semantics,
 						&options,
 					) {
-						Ok(artifacts) => {
+						Ok((artifacts, backend_timings)) => {
+							timings.backend = Some(backend_timings);
 							if emit_obj {
 								for artifact in &artifacts {
 									if let Some(path) =
@@ -282,6 +285,7 @@ struct CompilationTimings {
 	read: Option<Duration>,
 	parse: Option<Duration>,
 	frontend: Option<PassTimings>,
+	backend: Option<BackendTimings>,
 	total: Duration,
 }
 
@@ -300,11 +304,51 @@ fn print_compilation_timings(
 	}
 	if let Some(frontend) = timings.frontend {
 		write_duration_line(&mut stderr, "Frontend", frontend.total)?;
-		write_duration_line(&mut stderr, "Pass 1", frontend.pass_1)?;
-		write_duration_line(&mut stderr, "Pass 2", frontend.pass_2)?;
-		write_duration_line(&mut stderr, "Pass 3", frontend.pass_3)?;
-		write_duration_line(&mut stderr, "Pass 4", frontend.pass_4)?;
-		write_duration_line(&mut stderr, "Pass 5", frontend.pass_5)?;
+		write_duration_line_indented(&mut stderr, "Pass 1", frontend.pass_1, 2)?;
+		write_duration_line_indented(&mut stderr, "Pass 2", frontend.pass_2, 2)?;
+		write_duration_line_indented(&mut stderr, "Pass 3", frontend.pass_3, 2)?;
+		write_duration_line_indented(&mut stderr, "Pass 4", frontend.pass_4, 2)?;
+		write_duration_line_indented(&mut stderr, "Pass 5", frontend.pass_5, 2)?;
+	}
+	if let Some(backend) = timings.backend.as_ref() {
+		write_duration_line(&mut stderr, "Backend", backend.total)?;
+		write_duration_line_indented(&mut stderr, "Cache Load", backend.cache_load, 2)?;
+		write_duration_line_indented(&mut stderr, "Cache Plan", backend.cache_plan, 2)?;
+		if backend.ir_lower > Duration::ZERO {
+			write_duration_line_indented(&mut stderr, "IR Lower", backend.ir_lower, 2)?;
+		}
+		if backend.ir_verify > Duration::ZERO {
+			write_duration_line_indented(
+				&mut stderr,
+				"IR Verify",
+				backend.ir_verify,
+				2,
+			)?;
+		}
+		write_duration_line_indented(
+			&mut stderr,
+			"Module Compile",
+			backend.module_compile,
+			2,
+		)?;
+		write_duration_line_indented(&mut stderr, "Module Reuse", backend.module_reuse, 2)?;
+		if backend.cache_save > Duration::ZERO {
+			write_duration_line_indented(
+				&mut stderr,
+				"Cache Save",
+				backend.cache_save,
+				2,
+			)?;
+		}
+		write_info_line_indented(
+			&mut stderr,
+			"Backend Modules",
+			&format!(
+				"{} compiled, {} reused",
+				backend.modules_compiled, backend.modules_reused
+			),
+			2,
+		)?;
 	}
 	writeln!(&mut stderr)?;
 
@@ -330,15 +374,44 @@ fn write_duration_line<W: WriteColor>(
 	label: &str,
 	duration: Duration,
 ) -> io::Result<()> {
+	write_duration_line_indented(writer, label, duration, 1)
+}
+
+fn write_duration_line_indented<W: WriteColor>(
+	writer: &mut W,
+	label: &str,
+	duration: Duration,
+	indent_level: usize,
+) -> io::Result<()> {
 	let mut label_spec = ColorSpec::new();
 	label_spec.set_fg(Some(Color::Yellow));
-	write!(writer, "\t")?;
+	for _ in 0..indent_level {
+		write!(writer, "\t")?;
+	}
 	writer.set_color(&label_spec)?;
 	write!(writer, "{label}")?;
 	writer.reset()?;
 	write!(writer, ": ")?;
 	write_cyan_duration(writer, duration)?;
 	writeln!(writer)?;
+	Ok(())
+}
+
+fn write_info_line_indented<W: WriteColor>(
+	writer: &mut W,
+	label: &str,
+	value: &str,
+	indent_level: usize,
+) -> io::Result<()> {
+	let mut label_spec = ColorSpec::new();
+	label_spec.set_fg(Some(Color::Yellow));
+	for _ in 0..indent_level {
+		write!(writer, "\t")?;
+	}
+	writer.set_color(&label_spec)?;
+	write!(writer, "{label}")?;
+	writer.reset()?;
+	writeln!(writer, ": {value}")?;
 	Ok(())
 }
 
