@@ -61,10 +61,13 @@
             rust-analyzer
             lldb
             graphviz
+
+            llvmPackages_21.libllvm
           ];
 
           shellHook = ''
             export RUST_SRC_PATH="${pkgs.rustToolchain}/lib/rustlib/src/rust/library"
+            export LLVM_SYS_211_PREFIX="${pkgs.llvmPackages_21.libllvm.dev}"
           '';
         };
       }

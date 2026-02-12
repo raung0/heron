@@ -4,9 +4,9 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-gccjit = "2.10.0"
 threadpool = "1.8.1"
 termcolor = "1.4"
 clap = "4.5.53"
 serde_ini = "0.2.0"
 serde = { version = "1.0.228", features = ["derive"] }
+llvm-sys = "211"
