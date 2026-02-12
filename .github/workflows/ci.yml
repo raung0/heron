@@ -18,8 +18,19 @@ jobs:
           toolchain: stable
           override: true
 
+      - name: Install LLVM 21 dev libraries
+        run: |
+          wget https://apt.llvm.org/llvm.sh
+          chmod +x llvm.sh
+          sudo ./llvm.sh 21
+          sudo apt-get install -y llvm-21-dev libclang-21-dev
+
       - name: Build
+        env:
+          LLVM_SYS_211_PREFIX: /usr/lib/llvm-21
         run: cargo build --all-features
 
       - name: Run tests
+        env:
+          LLVM_SYS_211_PREFIX: /usr/lib/llvm-21
         run: cargo test --all-features
