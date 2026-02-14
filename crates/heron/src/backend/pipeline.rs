@@ -338,13 +338,19 @@ fn discover_linker() -> Result<LinkerTool, BackendError> {
 			flavor: LinkerFlavor::Mold,
 		});
 	}
-	if let Some(path) = find_program_on_path("lld") {
+	if let Some(path) = find_program_on_path("ld.lld") {
 		return Ok(LinkerTool {
 			path,
 			flavor: LinkerFlavor::Lld,
 		});
 	}
-	if let Some(path) = find_program_on_path("ld.lld") {
+	if let Some(path) = find_program_on_path("ld64.lld") {
+		return Ok(LinkerTool {
+			path,
+			flavor: LinkerFlavor::Lld,
+		});
+	}
+	if let Some(path) = find_program_on_path("lld") {
 		return Ok(LinkerTool {
 			path,
 			flavor: LinkerFlavor::Lld,
@@ -407,6 +413,14 @@ fn run_linker(
 	}
 
 	let mut command = Command::new(&linker.path);
+	if linker_is_generic_lld(&linker.path) {
+		let flavor = match format {
+			BinaryFormat::Pe => "link",
+			BinaryFormat::MachO => "darwin",
+			BinaryFormat::Elf | BinaryFormat::Auto => "gnu",
+		};
+		command.arg("-flavor").arg(flavor);
+	}
 	if debug_info && format == BinaryFormat::Pe && linker_supports_msvc_debug_flag(&linker.path)
 	{
 		command.arg("/DEBUG");
@@ -587,6 +601,14 @@ fn linker_supports_msvc_debug_flag(path: &Path) -> bool {
 	};
 	let name = name.to_ascii_lowercase();
 	name == "link" || name == "link.exe" || name == "lld-link" || name == "lld-link.exe"
+}
+
+fn linker_is_generic_lld(path: &Path) -> bool {
+	let Some(name) = path.file_name().and_then(|v| v.to_str()) else {
+		return false;
+	};
+	let name = name.to_ascii_lowercase();
+	name == "lld" || name == "lld.exe"
 }
 
 fn target_arch(target_triple: Option<&str>) -> Option<&'static str> {
