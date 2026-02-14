@@ -1,0 +1,8 @@
+package main
+
+main := fn {
+	[[unsafe]] {
+		mut funny_ptr := cast<^int>0
+		funny_ptr^ = 123
+	}
+}

@@ -2374,12 +2374,77 @@ impl<'a, 'b> FunctionLowerer<'a, 'b> {
 				)?;
 				Ok(Some((out, inner_ty)))
 			}
+			TypedValue::Deref(inner) => {
+				let Some((ptr, ptr_ty)) = self.lower_expr(inner.as_ref())? else {
+					return Err("deref operand produced no value".to_string());
+				};
+				if !matches!(self.ir_types.get(ptr_ty), IrType::Ptr { .. }) {
+					return Err("deref operand is not a pointer/reference value".to_string());
+				}
+				let out_ty = self.node_ir_type(node);
+				let out = self.push_value(
+					IrInstKind::Load { ptr, ty: out_ty },
+					out_ty,
+					Some(node.location.clone()),
+				)?;
+				Ok(Some((out, out_ty)))
+			}
 			TypedValue::BinExpr {
 				op,
 				lhs,
 				rhs,
 				has_eq,
 			} => {
+				if matches!(op, Operator::Set) && !*has_eq {
+					match &lhs.v {
+						TypedValue::Id(name) => {
+							let Some((rhs_val, rhs_ty)) =
+								self.lower_expr(rhs.as_ref())?
+							else {
+								return Err("assignment rhs produced no value".to_string());
+							};
+							if name != "_" {
+								self.locals.insert(name.clone(), (rhs_val, rhs_ty));
+							}
+							return Ok(None);
+						}
+						TypedValue::Deref(ptr_expr) => {
+							let Some((ptr, ptr_ty)) =
+								self.lower_expr(ptr_expr.as_ref())?
+							else {
+								return Err(
+									"assignment deref target produced no value"
+										.to_string(),
+								);
+							};
+							if !matches!(self.ir_types.get(ptr_ty), IrType::Ptr { .. }) {
+								return Err(
+									"assignment deref target is not a pointer/reference value"
+										.to_string(),
+								);
+							}
+							let Some((rhs_val, _rhs_ty)) =
+								self.lower_expr(rhs.as_ref())?
+							else {
+								return Err("assignment rhs produced no value".to_string());
+							};
+							self.push_effect(
+								IrInstKind::Store {
+									ptr,
+									value: rhs_val,
+								},
+								Some(node.location.clone()),
+							);
+							return Ok(None);
+						}
+						_ => {
+							return Err(format!(
+								"unsupported assignment target in IR lowering for {}::{}: {:?}",
+								self.module_id, self.function_name, lhs.v
+							));
+						}
+					}
+				}
 				if matches!(op, Operator::Dot) && !*has_eq {
 					let field_name = match &rhs.v {
 						TypedValue::Id(name) | TypedValue::DotId(name) => name,
@@ -3518,6 +3583,33 @@ mod tests {
 			semantics.arena.get(ops_ty),
 			ResolvedType::Interface { .. }
 		));
+	}
+
+	#[test]
+	fn lowers_deref_assignment_to_store_instruction() {
+		let (typed, semantics, errors) =
+			run_fixture("testdata/ir_lowering_deref_store");
+		assert!(errors.is_empty(), "frontend errors: {errors:?}");
+
+		let ir = lower_typed_program_to_ir(&typed, &semantics).expect("ir lowering");
+		let module = ir
+			.modules
+			.iter()
+			.find(|m| m.id == "main")
+			.expect("main module lowered");
+		let func = module
+			.functions
+			.iter()
+			.find(|f| f.name == "main")
+			.expect("main function lowered");
+
+		let has_store = func.blocks.iter().any(|block| {
+			block
+				.insts
+				.iter()
+				.any(|inst| matches!(inst.kind, IrInstKind::Store { .. }))
+		});
+		assert!(has_store, "expected deref assignment to lower to store");
 	}
 
 	#[test]
