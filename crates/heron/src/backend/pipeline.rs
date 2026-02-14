@@ -105,7 +105,9 @@ pub fn compile_modules_timed<B: Backend>(
 	let mut errors = Vec::new();
 
 	for module in plan {
-		let must_compile = (needs_objects && module.needs_compile) || options.emit_llvm;
+		let must_compile = options.no_cache
+			|| (needs_objects && module.needs_compile)
+			|| options.emit_llvm;
 		if cache_trace {
 			eprintln!(
 				"[cache] {} {}",
@@ -134,9 +136,9 @@ pub fn compile_modules_timed<B: Backend>(
 			timings.module_compile += module_compile_start.elapsed();
 			match result {
 				Ok(artifact) => {
-					if needs_objects
-						&& let Some(object_path) =
-							artifact.object_path.as_ref()
+					if !options.no_cache
+						&& needs_objects && let Some(object_path) =
+						artifact.object_path.as_ref()
 					{
 						cache.update_module(
 							&module.module_id,
@@ -167,7 +169,9 @@ pub fn compile_modules_timed<B: Backend>(
 
 	if errors.is_empty() {
 		let cache_save_start = Instant::now();
-		if needs_objects && let Err(err) = cache.save() {
+		if !options.no_cache
+			&& needs_objects && let Err(err) = cache.save()
+		{
 			return Err(vec![BackendError {
 				module_id: "<build-cache>".to_string(),
 				message: err,
@@ -258,8 +262,12 @@ fn link_artifacts(
 				&out_path,
 				link_mode,
 				format,
+				options.debug_info,
 				options.target_triple.as_deref(),
 			)?;
+			if options.debug_info {
+				emit_debug_sidecar(&out_path, format)?;
+			}
 		}
 		LinkMode::StaticLibrary => {
 			create_static_archive(&object_files, &out_path, format)?;
@@ -385,9 +393,24 @@ fn run_linker(
 	out_path: &Path,
 	link_mode: LinkMode,
 	format: BinaryFormat,
+	debug_info: bool,
 	target_triple: Option<&str>,
 ) -> Result<(), BackendError> {
+	if format == BinaryFormat::MachO {
+		return run_macho_link_via_clang(
+			objects,
+			out_path,
+			link_mode,
+			debug_info,
+			target_triple,
+		);
+	}
+
 	let mut command = Command::new(&linker.path);
+	if debug_info && format == BinaryFormat::Pe && linker_supports_msvc_debug_flag(&linker.path)
+	{
+		command.arg("/DEBUG");
+	}
 	if matches!(link_mode, LinkMode::SharedLibrary) {
 		if format == BinaryFormat::MachO {
 			command.arg("-dylib");
@@ -446,6 +469,124 @@ fn run_linker(
 		});
 	}
 	Ok(())
+}
+
+fn run_macho_link_via_clang(
+	objects: &[PathBuf],
+	out_path: &Path,
+	link_mode: LinkMode,
+	debug_info: bool,
+	target_triple: Option<&str>,
+) -> Result<(), BackendError> {
+	let driver = discover_macos_clang_driver()?;
+	let mut command = Command::new(&driver);
+	command.arg("-nostdlib");
+	if debug_info {
+		command.arg("-g");
+	}
+	if matches!(link_mode, LinkMode::SharedLibrary) {
+		command.arg("-dynamiclib");
+	}
+	if let Some(triple) = target_triple {
+		command.arg("-target").arg(triple);
+	}
+	if let Some(arch) = target_arch(target_triple) {
+		command.arg("-arch").arg(arch);
+	}
+	if let Some(sdk_root) = macos_sdk_root() {
+		command.arg("-isysroot").arg(sdk_root);
+	}
+	if matches!(link_mode, LinkMode::Executable) {
+		command.arg("-Wl,-e,_main::main");
+		command.arg("-Wl,-lSystem");
+	}
+	command.arg("-o").arg(out_path);
+	for object in objects {
+		command.arg(object);
+	}
+
+	let output = command.output().map_err(|err| BackendError {
+		module_id: "<link>".to_string(),
+		message: format!(
+			"failed to run Mach-O linker driver `{}`: {err}",
+			driver.display()
+		),
+		location: None,
+	})?;
+	if !output.status.success() {
+		let stderr = String::from_utf8_lossy(&output.stderr);
+		let stdout = String::from_utf8_lossy(&output.stdout);
+		let details = if stderr.trim().is_empty() {
+			stdout.trim().to_string()
+		} else {
+			stderr.trim().to_string()
+		};
+		return Err(BackendError {
+			module_id: "<link>".to_string(),
+			message: format!("linker failed: {details}"),
+			location: None,
+		});
+	}
+	Ok(())
+}
+
+fn discover_macos_clang_driver() -> Result<PathBuf, BackendError> {
+	if let Some(path) = find_program_on_path("clang") {
+		return Ok(path);
+	}
+	if let Some(path) = find_program_on_path("cc") {
+		return Ok(path);
+	}
+	Err(BackendError {
+		module_id: "<link>".to_string(),
+		message: "Mach-O linking requires `clang` or `cc` on PATH".to_string(),
+		location: None,
+	})
+}
+
+fn emit_debug_sidecar(out_path: &Path, format: BinaryFormat) -> Result<(), BackendError> {
+	if format != BinaryFormat::MachO {
+		return Ok(());
+	}
+	let dsymutil = find_program_on_path("dsymutil").ok_or_else(|| BackendError {
+		module_id: "<link>".to_string(),
+		message: "debug-info on Mach-O requires `dsymutil` on PATH".to_string(),
+		location: None,
+	})?;
+	let dsym_bundle = format!("{}.dSYM", out_path.display());
+	let output = Command::new(&dsymutil)
+		.arg(out_path)
+		.arg("-o")
+		.arg(&dsym_bundle)
+		.output()
+		.map_err(|err| BackendError {
+			module_id: "<link>".to_string(),
+			message: format!("failed to run `dsymutil`: {err}"),
+			location: None,
+		})?;
+	if !output.status.success() {
+		let stderr = String::from_utf8_lossy(&output.stderr);
+		let stdout = String::from_utf8_lossy(&output.stdout);
+		let details = if stderr.trim().is_empty() {
+			stdout.trim().to_string()
+		} else {
+			stderr.trim().to_string()
+		};
+		return Err(BackendError {
+			module_id: "<link>".to_string(),
+			message: format!("`dsymutil` failed: {details}"),
+			location: None,
+		});
+	}
+	Ok(())
+}
+
+fn linker_supports_msvc_debug_flag(path: &Path) -> bool {
+	let Some(name) = path.file_name().and_then(|v| v.to_str()) else {
+		return false;
+	};
+	let name = name.to_ascii_lowercase();
+	name == "link" || name == "link.exe" || name == "lld-link" || name == "lld-link.exe"
 }
 
 fn target_arch(target_triple: Option<&str>) -> Option<&'static str> {
@@ -853,6 +994,68 @@ mod tests {
 		assert!(
 			ir_text.contains("!dbg"),
 			"expected debug metadata markers in LLVM IR output"
+		);
+		assert!(
+			ir_text.contains("Dwarf Version"),
+			"expected Dwarf module flag in LLVM IR output"
+		);
+		assert!(
+			ir_text.contains("Debug Info Version"),
+			"expected debug info module flag in LLVM IR output"
+		);
+	}
+
+	#[test]
+	fn llvm_ir_debug_locations_use_source_line_axis() {
+		let (typed, semantics, errors) =
+			load_typed_program("testdata/ir_lowering_deref_store");
+		assert!(errors.is_empty(), "frontend errors: {errors:?}");
+
+		let mut backend = LlvmBackend::new();
+		let options = BackendOptions {
+			emit_llvm: true,
+			emit_obj: false,
+			debug_info: true,
+			..BackendOptions::default()
+		};
+		let artifacts = compile_modules(&mut backend, &typed, &semantics, &options)
+			.expect("llvm IR path with debug info should compile");
+		let ir_text = artifacts
+			.iter()
+			.find_map(|artifact| artifact.llvm_ir_text.as_ref())
+			.expect("llvm text emitted");
+		assert!(
+			ir_text.contains("!DILocation(line: 6"),
+			"expected deref store debug location to map to source line 6"
+		);
+	}
+
+	#[test]
+	fn llvm_ir_emits_local_variable_debug_metadata() {
+		let (typed, semantics, errors) =
+			load_typed_program("testdata/ir_lowering_deref_store");
+		assert!(errors.is_empty(), "frontend errors: {errors:?}");
+
+		let mut backend = LlvmBackend::new();
+		let options = BackendOptions {
+			emit_llvm: true,
+			emit_obj: false,
+			debug_info: true,
+			..BackendOptions::default()
+		};
+		let artifacts = compile_modules(&mut backend, &typed, &semantics, &options)
+			.expect("llvm IR path with debug info should compile");
+		let ir_text = artifacts
+			.iter()
+			.find_map(|artifact| artifact.llvm_ir_text.as_ref())
+			.expect("llvm text emitted");
+		assert!(
+			ir_text.contains("!DILocalVariable(name: \"funny_ptr\""),
+			"expected local variable debug metadata for funny_ptr"
+		);
+		assert!(
+			ir_text.contains("dbg_value") || ir_text.contains("dbg.value"),
+			"expected debug value intrinsic/record in LLVM IR"
 		);
 	}
 

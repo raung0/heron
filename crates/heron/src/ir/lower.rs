@@ -1363,7 +1363,7 @@ fn maybe_collect_function(
 				ty,
 				value,
 			});
-			lowerer.locals.insert(name, (value, ty));
+			lowerer.bind_local(name, value, ty);
 			lowerer.value_types.values.insert(value, ty);
 		}
 	} else {
@@ -1383,7 +1383,7 @@ fn maybe_collect_function(
 				value,
 			});
 			for param_name in &param.names {
-				lowerer.locals.insert(param_name.clone(), (value, ty));
+				lowerer.bind_local(param_name.clone(), value, ty);
 			}
 			lowerer.value_types.values.insert(value, ty);
 		}
@@ -1410,6 +1410,7 @@ fn maybe_collect_function(
 		blocks: lowerer.blocks,
 		entry: Some(entry),
 		value_types: lowerer.value_types,
+		local_names: lowerer.debug_value_names,
 		location: Some(value.location.clone()),
 	}))
 }
@@ -1429,6 +1430,7 @@ struct FunctionLowerer<'a, 'b> {
 	current_block: Option<IrBlockId>,
 	value_types: IrFunctionTypeMap,
 	locals: HashMap<String, (IrValueId, IrTypeId)>,
+	debug_value_names: HashMap<IrValueId, String>,
 }
 
 struct FunctionLowererModuleData<'a> {
@@ -1462,6 +1464,14 @@ impl<'a, 'b> FunctionLowerer<'a, 'b> {
 			current_block: None,
 			value_types: IrFunctionTypeMap::new(),
 			locals: HashMap::new(),
+			debug_value_names: HashMap::new(),
+		}
+	}
+
+	fn bind_local(&mut self, name: String, value: IrValueId, ty: IrTypeId) {
+		self.locals.insert(name.clone(), (value, ty));
+		if name != "_" {
+			self.debug_value_names.insert(value, name);
 		}
 	}
 
@@ -1516,9 +1526,14 @@ impl<'a, 'b> FunctionLowerer<'a, 'b> {
 		self.blocks[position].params.push(crate::ir::IrBlockParam {
 			value,
 			ty,
-			name_hint,
+			name_hint: name_hint.clone(),
 		});
 		self.value_types.values.insert(value, ty);
+		if let Some(name_hint) = name_hint
+			&& name_hint != "_"
+		{
+			self.debug_value_names.insert(value, name_hint);
+		}
 		Ok(value)
 	}
 
@@ -2041,12 +2056,12 @@ impl<'a, 'b> FunctionLowerer<'a, 'b> {
 							ty,
 							Some(value.location.clone()),
 						)?;
-						self.locals.insert(name.clone(), (value_id, ty));
+						self.bind_local(name.clone(), value_id, ty);
 						return Ok(());
 					}
 				}
 				if let Some((val, ty)) = self.lower_expr(value.as_ref())? {
-					self.locals.insert(name.clone(), (val, ty));
+					self.bind_local(name.clone(), val, ty);
 				}
 			}
 			TypedValue::DeclarationMulti {
@@ -2073,15 +2088,12 @@ impl<'a, 'b> FunctionLowerer<'a, 'b> {
 								ty,
 								Some(value.location.clone()),
 							)?;
-							self.locals.insert(
-								name.clone(),
-								(value_id, ty),
-							);
+							self.bind_local(name.clone(), value_id, ty);
 							continue;
 						}
 					}
 					if let Some((val, ty)) = self.lower_expr(value.as_ref())? {
-						self.locals.insert(name.clone(), (val, ty));
+						self.bind_local(name.clone(), val, ty);
 					}
 				}
 			}
@@ -2089,7 +2101,7 @@ impl<'a, 'b> FunctionLowerer<'a, 'b> {
 				if name == "_" {
 					let _ = self.lower_expr(value.as_ref())?;
 				} else if let Some((val, ty)) = self.lower_expr(value.as_ref())? {
-					self.locals.insert(name.clone(), (val, ty));
+					self.bind_local(name.clone(), val, ty);
 				}
 			}
 			TypedValue::SetMulti { names, values } => {
@@ -2104,7 +2116,7 @@ impl<'a, 'b> FunctionLowerer<'a, 'b> {
 					} else if let Some((val, ty)) =
 						self.lower_expr(value.as_ref())?
 					{
-						self.locals.insert(name.clone(), (val, ty));
+						self.bind_local(name.clone(), val, ty);
 					}
 				}
 			}
@@ -2345,7 +2357,7 @@ impl<'a, 'b> FunctionLowerer<'a, 'b> {
 						ty,
 						Some(node.location.clone()),
 					)?;
-					self.locals.insert(name.clone(), (value, ty));
+					self.bind_local(name.clone(), value, ty);
 					return Ok(Some((value, ty)));
 				}
 				Ok(None)
@@ -2379,7 +2391,10 @@ impl<'a, 'b> FunctionLowerer<'a, 'b> {
 					return Err("deref operand produced no value".to_string());
 				};
 				if !matches!(self.ir_types.get(ptr_ty), IrType::Ptr { .. }) {
-					return Err("deref operand is not a pointer/reference value".to_string());
+					return Err(
+						"deref operand is not a pointer/reference value"
+							.to_string(),
+					);
 				}
 				let out_ty = self.node_ir_type(node);
 				let out = self.push_value(
@@ -2404,7 +2419,11 @@ impl<'a, 'b> FunctionLowerer<'a, 'b> {
 								return Err("assignment rhs produced no value".to_string());
 							};
 							if name != "_" {
-								self.locals.insert(name.clone(), (rhs_val, rhs_ty));
+								self.bind_local(
+									name.clone(),
+									rhs_val,
+									rhs_ty,
+								);
 							}
 							return Ok(None);
 						}
@@ -2417,7 +2436,10 @@ impl<'a, 'b> FunctionLowerer<'a, 'b> {
 										.to_string(),
 								);
 							};
-							if !matches!(self.ir_types.get(ptr_ty), IrType::Ptr { .. }) {
+							if !matches!(
+								self.ir_types.get(ptr_ty),
+								IrType::Ptr { .. }
+							) {
 								return Err(
 									"assignment deref target is not a pointer/reference value"
 										.to_string(),
@@ -2433,14 +2455,16 @@ impl<'a, 'b> FunctionLowerer<'a, 'b> {
 									ptr,
 									value: rhs_val,
 								},
-								Some(node.location.clone()),
+								Some(rhs.location.clone()),
 							);
 							return Ok(None);
 						}
 						_ => {
 							return Err(format!(
 								"unsupported assignment target in IR lowering for {}::{}: {:?}",
-								self.module_id, self.function_name, lhs.v
+								self.module_id,
+								self.function_name,
+								lhs.v
 							));
 						}
 					}
@@ -3587,8 +3611,7 @@ mod tests {
 
 	#[test]
 	fn lowers_deref_assignment_to_store_instruction() {
-		let (typed, semantics, errors) =
-			run_fixture("testdata/ir_lowering_deref_store");
+		let (typed, semantics, errors) = run_fixture("testdata/ir_lowering_deref_store");
 		assert!(errors.is_empty(), "frontend errors: {errors:?}");
 
 		let ir = lower_typed_program_to_ir(&typed, &semantics).expect("ir lowering");
@@ -3604,8 +3627,7 @@ mod tests {
 			.expect("main function lowered");
 
 		let has_store = func.blocks.iter().any(|block| {
-			block
-				.insts
+			block.insts
 				.iter()
 				.any(|inst| matches!(inst.kind, IrInstKind::Store { .. }))
 		});

@@ -54,6 +54,10 @@ fn main() {
 			.long("debug-info")
 			.help("Emit debug information into object files")
 			.action(ArgAction::SetTrue))
+		.arg(Arg::new("no_cache")
+			.long("no-cache")
+			.help("Disable backend build cache reuse and writes")
+			.action(ArgAction::SetTrue))
 		.arg(Arg::new("target")
 			.long("target")
 			.value_name("TRIPLE")
@@ -89,6 +93,7 @@ fn main() {
 	let dump_ctfe_results = matches.get_flag("dump_ctfe_results");
 	let emit_llvm = matches.get_flag("emit_llvm");
 	let debug_info = matches.get_flag("debug_info");
+	let no_cache = matches.get_flag("no_cache");
 	let emit_dir = matches
 		.get_one::<String>("emit_dir")
 		.map(PathBuf::from)
@@ -238,6 +243,7 @@ fn main() {
 						emit_obj: true,
 						emit_llvm,
 						debug_info,
+						no_cache,
 						emit_dir: emit_dir.clone(),
 						target_triple,
 						optimization_level,

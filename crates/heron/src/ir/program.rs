@@ -2,7 +2,8 @@ use std::collections::HashMap;
 
 use crate::frontend::SourceLocation;
 use crate::ir::{
-	IrBlock, IrFunctionTypeMap, IrGlobalId, IrLayoutTable, IrTypeId, IrTypeTable, IrVTableId,
+	IrBlock, IrBlockId, IrFunctionTypeMap, IrGlobalId, IrLayoutTable, IrTypeId, IrTypeTable,
+	IrVTableId, IrValueId,
 };
 
 #[derive(Clone, Debug, Default)]
@@ -29,8 +30,9 @@ pub struct IrFunction {
 	pub signature: IrTypeId,
 	pub params: Vec<IrParam>,
 	pub blocks: Vec<IrBlock>,
-	pub entry: Option<crate::ir::IrBlockId>,
+	pub entry: Option<IrBlockId>,
 	pub value_types: IrFunctionTypeMap,
+	pub local_names: HashMap<IrValueId, String>,
 	pub location: Option<SourceLocation>,
 }
 

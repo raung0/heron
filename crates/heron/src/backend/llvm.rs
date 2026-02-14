@@ -111,6 +111,93 @@ impl LlvmBackend {
 		value.div_ceil(align).saturating_mul(align)
 	}
 
+	unsafe fn map_ir_type_to_debug_type(
+		di_builder: LLVMDIBuilderRef,
+		program: &IrProgram,
+		ty: IrTypeId,
+		cache: &mut HashMap<IrTypeId, LLVMMetadataRef>,
+	) -> LLVMMetadataRef {
+		if let Some(existing) = cache.get(&ty).copied() {
+			return existing;
+		}
+		const DW_ATE_ADDRESS: LLVMDWARFTypeEncoding = 0x01;
+		const DW_ATE_BOOLEAN: LLVMDWARFTypeEncoding = 0x02;
+		const DW_ATE_FLOAT: LLVMDWARFTypeEncoding = 0x04;
+		const DW_ATE_SIGNED: LLVMDWARFTypeEncoding = 0x05;
+		const DW_ATE_UNSIGNED: LLVMDWARFTypeEncoding = 0x07;
+
+		let mapped = match program.types.get(ty) {
+			IrType::Bool => LLVMDIBuilderCreateBasicType(
+				di_builder,
+				Self::sanitized_name("bool").as_ptr(),
+				4,
+				8,
+				DW_ATE_BOOLEAN,
+				LLVMDIFlagZero,
+			),
+			IrType::Int { bits, signed } => {
+				let name = if *signed {
+					format!("i{bits}")
+				} else {
+					format!("u{bits}")
+				};
+				let name_c = Self::sanitized_name(&name);
+				LLVMDIBuilderCreateBasicType(
+					di_builder,
+					name_c.as_ptr(),
+					name.len(),
+					u64::from(*bits),
+					if *signed {
+						DW_ATE_SIGNED
+					} else {
+						DW_ATE_UNSIGNED
+					},
+					LLVMDIFlagZero,
+				)
+			}
+			IrType::Float32 => LLVMDIBuilderCreateBasicType(
+				di_builder,
+				Self::sanitized_name("f32").as_ptr(),
+				3,
+				32,
+				DW_ATE_FLOAT,
+				LLVMDIFlagZero,
+			),
+			IrType::Float64 => LLVMDIBuilderCreateBasicType(
+				di_builder,
+				Self::sanitized_name("f64").as_ptr(),
+				3,
+				64,
+				DW_ATE_FLOAT,
+				LLVMDIFlagZero,
+			),
+			IrType::Ptr { to } => {
+				let pointee = Self::map_ir_type_to_debug_type(
+					di_builder, program, *to, cache,
+				);
+				LLVMDIBuilderCreatePointerType(
+					di_builder,
+					pointee,
+					64,
+					64,
+					0,
+					Self::sanitized_name("ptr").as_ptr(),
+					3,
+				)
+			}
+			_ => LLVMDIBuilderCreateBasicType(
+				di_builder,
+				Self::sanitized_name("heron.value").as_ptr(),
+				11,
+				64,
+				DW_ATE_ADDRESS,
+				LLVMDIFlagZero,
+			),
+		};
+		cache.insert(ty, mapped);
+		mapped
+	}
+
 	fn approx_ir_layout(
 		program: &IrProgram,
 		ty: IrTypeId,
@@ -458,8 +545,8 @@ impl LlvmBackend {
 		if subprogram.is_null() {
 			return;
 		}
-		let line = location.range.begin.0.max(1) as u32;
-		let col = location.range.begin.1.max(1) as u32;
+		let line = location.range.begin.1.max(1) as u32;
+		let col = location.range.begin.0.max(1) as u32;
 		let loc = LLVMDIBuilderCreateDebugLocation(
 			context,
 			line,
@@ -539,6 +626,27 @@ impl Backend for LlvmBackend {
 			let mut di_file = ptr::null_mut();
 			if options.debug_info {
 				di_builder = LLVMCreateDIBuilder(llvm_module);
+				let debug_info_version = LLVMConstInt(
+					LLVMInt32TypeInContext(context),
+					u64::from(LLVMDebugMetadataVersion()),
+					0,
+				);
+				LLVMAddModuleFlag(
+					llvm_module,
+					llvm_sys::LLVMModuleFlagBehavior::LLVMModuleFlagBehaviorWarning,
+					b"Debug Info Version".as_ptr().cast(),
+					"Debug Info Version".len(),
+					LLVMValueAsMetadata(debug_info_version),
+				);
+				let dwarf_version =
+					LLVMConstInt(LLVMInt32TypeInContext(context), 4, 0);
+				LLVMAddModuleFlag(
+					llvm_module,
+					llvm_sys::LLVMModuleFlagBehavior::LLVMModuleFlagBehaviorWarning,
+					b"Dwarf Version".as_ptr().cast(),
+					"Dwarf Version".len(),
+					LLVMValueAsMetadata(dwarf_version),
+				);
 				let (filename, directory) =
 					Self::split_source_path(&module.source_file);
 				let filename_c = Self::sanitized_name(&filename);
@@ -557,7 +665,7 @@ impl Backend for LlvmBackend {
 				let sdk = Self::sanitized_name("");
 				let _compile_unit = LLVMDIBuilderCreateCompileUnit(
 					di_builder,
-					LLVMDWARFSourceLanguage::LLVMDWARFSourceLanguageRust,
+					LLVMDWARFSourceLanguage::LLVMDWARFSourceLanguageC,
 					di_file,
 					producer.as_ptr(),
 					"heronc".len(),
@@ -651,6 +759,10 @@ impl Backend for LlvmBackend {
 			let mut type_visiting: HashSet<IrTypeId> = HashSet::new();
 
 			let mut function_map: HashMap<String, LLVMValueRef> = HashMap::new();
+			let mut function_debug_locals: HashMap<
+				String,
+				HashMap<IrValueId, LLVMMetadataRef>,
+			> = HashMap::new();
 			for function in &module.functions {
 				let llvm_fn_ty = Self::map_ir_type(
 					context,
@@ -667,12 +779,12 @@ impl Backend for LlvmBackend {
 					let function_line = function
 						.location
 						.as_ref()
-						.map(|loc| loc.range.begin.0.max(1) as u32)
+						.map(|loc| loc.range.begin.1.max(1) as u32)
 						.unwrap_or(1);
 					let function_col = function
 						.location
 						.as_ref()
-						.map(|loc| loc.range.begin.1.max(1) as u32)
+						.map(|loc| loc.range.begin.0.max(1) as u32)
 						.unwrap_or(1);
 					let subroutine_type = LLVMDIBuilderCreateSubroutineType(
 						di_builder,
@@ -709,6 +821,39 @@ impl Backend for LlvmBackend {
 							ptr::null_mut(),
 						);
 						LLVMSetCurrentDebugLocation2(builder, loc);
+						let mut local_var_map = HashMap::new();
+						let mut debug_type_cache: HashMap<
+							IrTypeId,
+							LLVMMetadataRef,
+						> = HashMap::new();
+						for (idx, param) in
+							function.params.iter().enumerate()
+						{
+							let param_name_c =
+								Self::sanitized_name(&param.name);
+							let var_info = LLVMDIBuilderCreateParameterVariable(
+								di_builder,
+								subprogram,
+								param_name_c.as_ptr(),
+								param.name.len(),
+								(idx + 1) as u32,
+								di_file,
+								function_line,
+								Self::map_ir_type_to_debug_type(
+									di_builder,
+									program,
+									param.ty,
+									&mut debug_type_cache,
+								),
+								1,
+								LLVMDIFlagZero,
+							);
+							local_var_map.insert(param.value, var_info);
+						}
+						function_debug_locals.insert(
+							function.name.clone(),
+							local_var_map,
+						);
 					}
 				}
 				function_map.insert(function.name.clone(), fn_val);
@@ -735,10 +880,72 @@ impl Backend for LlvmBackend {
 					HashMap::new();
 				let mut block_param_phis: HashMap<IrBlockId, Vec<LLVMValueRef>> =
 					HashMap::new();
+				let mut debug_shadow_slots: HashMap<IrValueId, LLVMValueRef> =
+					HashMap::new();
+				let mut debug_type_cache: HashMap<IrTypeId, LLVMMetadataRef> =
+					HashMap::new();
+				let mut empty_debug_local_map = HashMap::new();
+				let debug_local_map = function_debug_locals
+					.get_mut(&function.name)
+					.unwrap_or(&mut empty_debug_local_map);
+				let subprogram = if options.debug_info && !di_builder.is_null() {
+					LLVMGetSubprogram(fn_val)
+				} else {
+					ptr::null_mut()
+				};
+				let di_expr = if options.debug_info && !di_builder.is_null() {
+					LLVMDIBuilderCreateExpression(
+						di_builder,
+						ptr::null_mut(),
+						0,
+					)
+				} else {
+					ptr::null_mut()
+				};
+				let function_line = function
+					.location
+					.as_ref()
+					.map(|loc| loc.range.begin.1.max(1) as u32)
+					.unwrap_or(1);
+				let function_col = function
+					.location
+					.as_ref()
+					.map(|loc| loc.range.begin.0.max(1) as u32)
+					.unwrap_or(1);
+				let entry_bb = function
+					.entry
+					.and_then(|entry_id| block_map.get(&entry_id).copied());
 
 				for (idx, param) in function.params.iter().enumerate() {
 					let p = LLVMGetParam(fn_val, idx as u32);
 					value_map.insert(param.value, p);
+				}
+				if options.debug_info
+					&& !di_builder.is_null() && !subprogram.is_null()
+					&& !function.params.is_empty() && let Some(entry_bb) = entry_bb
+				{
+					for param in &function.params {
+						let Some(&param_val) = value_map.get(&param.value)
+						else {
+							continue;
+						};
+						let Some(&var_info) =
+							debug_local_map.get(&param.value)
+						else {
+							continue;
+						};
+						let loc = LLVMDIBuilderCreateDebugLocation(
+							context,
+							function_line,
+							function_col,
+							subprogram,
+							ptr::null_mut(),
+						);
+						LLVMDIBuilderInsertDbgValueRecordAtEnd(
+							di_builder, param_val, var_info, di_expr,
+							loc, entry_bb,
+						);
+					}
 				}
 
 				for block in &function.blocks {
@@ -1527,6 +1734,124 @@ impl Backend for LlvmBackend {
 							(inst.result.as_ref(), lowered)
 						{
 							value_map.insert(result.id, value);
+							if options.debug_info
+								&& !di_builder.is_null() && !subprogram
+								.is_null() && !di_expr.is_null()
+								&& let Some(name) = function
+									.local_names
+									.get(&result.id)
+							{
+								let var_info =
+									if let Some(&existing) =
+										debug_local_map.get(
+											&result.id,
+										) {
+										existing
+									} else {
+										let name_c = Self::sanitized_name(name);
+										let line = inst
+										.location
+										.as_ref()
+										.map(|loc| loc.range.begin.1.max(1) as u32)
+										.unwrap_or(function_line);
+										let created = LLVMDIBuilderCreateAutoVariable(
+										di_builder,
+										subprogram,
+										name_c.as_ptr(),
+										name.len(),
+										di_file,
+										line,
+										Self::map_ir_type_to_debug_type(
+											di_builder,
+											program,
+											result.ty,
+											&mut debug_type_cache,
+										),
+										1,
+										LLVMDIFlagZero,
+										0,
+									);
+										debug_local_map
+											.insert(
+											result.id,
+											created,
+										);
+										created
+									};
+								let loc =
+									if let Some(location) =
+										&inst.location
+									{
+										LLVMDIBuilderCreateDebugLocation(
+										context,
+										location.range.begin.1.max(1) as u32,
+										location.range.begin.0.max(1) as u32,
+										subprogram,
+										ptr::null_mut(),
+									)
+									} else {
+										LLVMGetCurrentDebugLocation2(builder)
+									};
+								if !loc.is_null() {
+									let shadow_slot =
+										if let Some(&slot) =
+											debug_shadow_slots.get(&result.id)
+										{
+											slot
+										} else {
+											let entry_builder =
+												LLVMCreateBuilderInContext(context);
+											let Some(entry_bb) = entry_bb else {
+												LLVMDisposeBuilder(entry_builder);
+												continue;
+											};
+											let first = LLVMGetFirstInstruction(entry_bb);
+											if first.is_null() {
+												LLVMPositionBuilderAtEnd(entry_builder, entry_bb);
+											} else {
+												LLVMPositionBuilderBefore(entry_builder, first);
+											}
+											let llvm_ty = Self::map_ir_type(
+												context,
+												program,
+												result.ty,
+												&mut type_cache,
+												&mut type_visiting,
+											);
+											let slot_name =
+												Self::sanitized_name(&format!("dbg.slot.{name}"));
+											let slot = LLVMBuildAlloca(
+												entry_builder,
+												llvm_ty,
+												slot_name.as_ptr(),
+											);
+											LLVMDIBuilderInsertDeclareRecordAtEnd(
+												di_builder,
+												slot,
+												var_info,
+												di_expr,
+												loc,
+												entry_bb,
+											);
+											LLVMDisposeBuilder(entry_builder);
+											debug_shadow_slots.insert(result.id, slot);
+											slot
+										};
+									LLVMBuildStore(
+										builder,
+										value,
+										shadow_slot,
+									);
+									LLVMDIBuilderInsertDbgValueRecordAtEnd(
+										di_builder,
+										value,
+										var_info,
+										di_expr,
+										loc,
+										bb,
+									);
+								}
+							}
 						}
 					}
 

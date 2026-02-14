@@ -593,6 +593,8 @@ fn dfs_reachable(
 
 #[cfg(test)]
 mod tests {
+	use std::collections::HashMap;
+
 	use crate::ir::{
 		IrBlock, IrBlockId, IrConst, IrEdge, IrFunction, IrFunctionTypeMap, IrInst,
 		IrInstKind, IrLinkage, IrModule, IrProgram, IrTerminator, IrType, IrTypeTable,
@@ -600,6 +602,39 @@ mod tests {
 	};
 
 	use super::verify_program;
+
+	fn test_program(types: IrTypeTable, function: IrFunction) -> IrProgram {
+		IrProgram {
+			modules: vec![IrModule {
+				id: "main".to_string(),
+				source_file: "main.he".to_string(),
+				functions: vec![function],
+				globals: Vec::new(),
+				externs: Vec::new(),
+				vtables: Vec::new(),
+			}],
+			types,
+			layouts: Default::default(),
+		}
+	}
+
+	fn test_function(
+		signature: crate::ir::IrTypeId,
+		blocks: Vec<IrBlock>,
+		entry: Option<IrBlockId>,
+	) -> IrFunction {
+		IrFunction {
+			name: "main".to_string(),
+			linkage: IrLinkage::Public,
+			signature,
+			params: Vec::new(),
+			blocks,
+			entry,
+			value_types: IrFunctionTypeMap::default(),
+			local_names: HashMap::new(),
+			location: None,
+		}
+	}
 
 	#[test]
 	fn verifies_simple_function() {
@@ -617,12 +652,9 @@ mod tests {
 		let v0 = IrValueId(0);
 		let entry = IrBlockId(0);
 
-		let f = IrFunction {
-			name: "main".to_string(),
-			linkage: IrLinkage::Public,
-			signature: sig,
-			params: Vec::new(),
-			blocks: vec![IrBlock {
+		let f = test_function(
+			sig,
+			vec![IrBlock {
 				id: entry,
 				params: Vec::new(),
 				insts: vec![IrInst {
@@ -632,23 +664,10 @@ mod tests {
 				}],
 				term: Some(IrTerminator::Ret(Some(v0))),
 			}],
-			entry: Some(entry),
-			value_types: IrFunctionTypeMap::default(),
-			location: None,
-		};
+			Some(entry),
+		);
 
-		let p = IrProgram {
-			modules: vec![IrModule {
-				id: "main".to_string(),
-				source_file: "main.he".to_string(),
-				functions: vec![f],
-				globals: Vec::new(),
-				externs: Vec::new(),
-				vtables: Vec::new(),
-			}],
-			types,
-			layouts: Default::default(),
-		};
+		let p = test_program(types, f);
 
 		assert!(verify_program(&p).is_ok());
 	}
@@ -670,12 +689,9 @@ mod tests {
 		let join = IrBlockId(1);
 		let v0 = IrValueId(0);
 
-		let f = IrFunction {
-			name: "main".to_string(),
-			linkage: IrLinkage::Public,
-			signature: sig,
-			params: Vec::new(),
-			blocks: vec![
+		let f = test_function(
+			sig,
+			vec![
 				IrBlock {
 					id: entry,
 					params: Vec::new(),
@@ -700,23 +716,10 @@ mod tests {
 					term: Some(IrTerminator::Unreachable),
 				},
 			],
-			entry: Some(entry),
-			value_types: IrFunctionTypeMap::default(),
-			location: None,
-		};
+			Some(entry),
+		);
 
-		let p = IrProgram {
-			modules: vec![IrModule {
-				id: "main".to_string(),
-				source_file: "main.he".to_string(),
-				functions: vec![f],
-				globals: Vec::new(),
-				externs: Vec::new(),
-				vtables: Vec::new(),
-			}],
-			types,
-			layouts: Default::default(),
-		};
+		let p = test_program(types, f);
 
 		assert!(verify_program(&p).is_err());
 	}
@@ -731,34 +734,18 @@ mod tests {
 			variadic: false,
 		}));
 
-		let f = IrFunction {
-			name: "main".to_string(),
-			linkage: IrLinkage::Public,
-			signature: sig,
-			params: Vec::new(),
-			blocks: vec![IrBlock {
+		let f = test_function(
+			sig,
+			vec![IrBlock {
 				id: IrBlockId(0),
 				params: Vec::new(),
 				insts: Vec::new(),
 				term: None,
 			}],
-			entry: Some(IrBlockId(0)),
-			value_types: IrFunctionTypeMap::default(),
-			location: None,
-		};
+			Some(IrBlockId(0)),
+		);
 
-		let p = IrProgram {
-			modules: vec![IrModule {
-				id: "main".to_string(),
-				source_file: "main.he".to_string(),
-				functions: vec![f],
-				globals: Vec::new(),
-				externs: Vec::new(),
-				vtables: Vec::new(),
-			}],
-			types,
-			layouts: Default::default(),
-		};
+		let p = test_program(types, f);
 
 		assert!(verify_program(&p).is_err());
 	}
@@ -776,34 +763,18 @@ mod tests {
 			variadic: false,
 		}));
 
-		let f = IrFunction {
-			name: "main".to_string(),
-			linkage: IrLinkage::Public,
-			signature: sig,
-			params: Vec::new(),
-			blocks: vec![IrBlock {
+		let f = test_function(
+			sig,
+			vec![IrBlock {
 				id: IrBlockId(0),
 				params: Vec::new(),
 				insts: Vec::new(),
 				term: Some(IrTerminator::Ret(Some(IrValueId(999)))),
 			}],
-			entry: Some(IrBlockId(0)),
-			value_types: IrFunctionTypeMap::default(),
-			location: None,
-		};
+			Some(IrBlockId(0)),
+		);
 
-		let p = IrProgram {
-			modules: vec![IrModule {
-				id: "main".to_string(),
-				source_file: "main.he".to_string(),
-				functions: vec![f],
-				globals: Vec::new(),
-				externs: Vec::new(),
-				vtables: Vec::new(),
-			}],
-			types,
-			layouts: Default::default(),
-		};
+		let p = test_program(types, f);
 
 		assert!(verify_program(&p).is_err());
 	}
@@ -818,12 +789,9 @@ mod tests {
 			variadic: false,
 		}));
 
-		let f = IrFunction {
-			name: "main".to_string(),
-			linkage: IrLinkage::Public,
-			signature: sig,
-			params: Vec::new(),
-			blocks: vec![
+		let f = test_function(
+			sig,
+			vec![
 				IrBlock {
 					id: IrBlockId(0),
 					params: Vec::new(),
@@ -837,23 +805,10 @@ mod tests {
 					term: Some(IrTerminator::Unreachable),
 				},
 			],
-			entry: Some(IrBlockId(0)),
-			value_types: IrFunctionTypeMap::default(),
-			location: None,
-		};
+			Some(IrBlockId(0)),
+		);
 
-		let p = IrProgram {
-			modules: vec![IrModule {
-				id: "main".to_string(),
-				source_file: "main.he".to_string(),
-				functions: vec![f],
-				globals: Vec::new(),
-				externs: Vec::new(),
-				vtables: Vec::new(),
-			}],
-			types,
-			layouts: Default::default(),
-		};
+		let p = test_program(types, f);
 
 		assert!(verify_program(&p).is_err());
 	}
@@ -868,34 +823,18 @@ mod tests {
 			variadic: false,
 		}));
 
-		let f = IrFunction {
-			name: "main".to_string(),
-			linkage: IrLinkage::Public,
-			signature: sig,
-			params: Vec::new(),
-			blocks: vec![IrBlock {
+		let f = test_function(
+			sig,
+			vec![IrBlock {
 				id: IrBlockId(0),
 				params: Vec::new(),
 				insts: Vec::new(),
 				term: Some(IrTerminator::Ret(None)),
 			}],
-			entry: Some(IrBlockId(42)),
-			value_types: IrFunctionTypeMap::default(),
-			location: None,
-		};
+			Some(IrBlockId(42)),
+		);
 
-		let p = IrProgram {
-			modules: vec![IrModule {
-				id: "main".to_string(),
-				source_file: "main.he".to_string(),
-				functions: vec![f],
-				globals: Vec::new(),
-				externs: Vec::new(),
-				vtables: Vec::new(),
-			}],
-			types,
-			layouts: Default::default(),
-		};
+		let p = test_program(types, f);
 
 		assert!(verify_program(&p).is_err());
 	}
@@ -915,12 +854,9 @@ mod tests {
 
 		let v0 = IrValueId(0);
 		let v1 = IrValueId(1);
-		let f = IrFunction {
-			name: "main".to_string(),
-			linkage: IrLinkage::Public,
-			signature: sig,
-			params: Vec::new(),
-			blocks: vec![IrBlock {
+		let f = test_function(
+			sig,
+			vec![IrBlock {
 				id: IrBlockId(0),
 				params: Vec::new(),
 				insts: vec![
@@ -941,23 +877,10 @@ mod tests {
 				],
 				term: Some(IrTerminator::Ret(Some(v1))),
 			}],
-			entry: Some(IrBlockId(0)),
-			value_types: IrFunctionTypeMap::default(),
-			location: None,
-		};
+			Some(IrBlockId(0)),
+		);
 
-		let p = IrProgram {
-			modules: vec![IrModule {
-				id: "main".to_string(),
-				source_file: "main.he".to_string(),
-				functions: vec![f],
-				globals: Vec::new(),
-				externs: Vec::new(),
-				vtables: Vec::new(),
-			}],
-			types,
-			layouts: Default::default(),
-		};
+		let p = test_program(types, f);
 
 		assert!(verify_program(&p).is_err());
 	}
@@ -977,12 +900,9 @@ mod tests {
 		}));
 
 		let v0 = IrValueId(0);
-		let f = IrFunction {
-			name: "main".to_string(),
-			linkage: IrLinkage::Public,
-			signature: sig,
-			params: Vec::new(),
-			blocks: vec![
+		let f = test_function(
+			sig,
+			vec![
 				IrBlock {
 					id: IrBlockId(0),
 					params: Vec::new(),
@@ -1007,23 +927,10 @@ mod tests {
 					term: Some(IrTerminator::Unreachable),
 				},
 			],
-			entry: Some(IrBlockId(0)),
-			value_types: IrFunctionTypeMap::default(),
-			location: None,
-		};
+			Some(IrBlockId(0)),
+		);
 
-		let p = IrProgram {
-			modules: vec![IrModule {
-				id: "main".to_string(),
-				source_file: "main.he".to_string(),
-				functions: vec![f],
-				globals: Vec::new(),
-				externs: Vec::new(),
-				vtables: Vec::new(),
-			}],
-			types,
-			layouts: Default::default(),
-		};
+		let p = test_program(types, f);
 
 		assert!(verify_program(&p).is_err());
 	}
@@ -1043,12 +950,9 @@ mod tests {
 		}));
 		let v0 = IrValueId(0);
 
-		let f = IrFunction {
-			name: "main".to_string(),
-			linkage: IrLinkage::Public,
-			signature: sig,
-			params: Vec::new(),
-			blocks: vec![IrBlock {
+		let f = test_function(
+			sig,
+			vec![IrBlock {
 				id: IrBlockId(0),
 				params: Vec::new(),
 				insts: vec![IrInst {
@@ -1058,23 +962,10 @@ mod tests {
 				}],
 				term: Some(IrTerminator::Ret(Some(v0))),
 			}],
-			entry: Some(IrBlockId(0)),
-			value_types: IrFunctionTypeMap::default(),
-			location: None,
-		};
+			Some(IrBlockId(0)),
+		);
 
-		let p = IrProgram {
-			modules: vec![IrModule {
-				id: "main".to_string(),
-				source_file: "main.he".to_string(),
-				functions: vec![f],
-				globals: Vec::new(),
-				externs: Vec::new(),
-				vtables: Vec::new(),
-			}],
-			types,
-			layouts: Default::default(),
-		};
+		let p = test_program(types, f);
 
 		assert!(verify_program(&p).is_err());
 	}
@@ -1097,12 +988,9 @@ mod tests {
 		let then_v = IrValueId(1);
 		let out_v = IrValueId(2);
 
-		let f = IrFunction {
-			name: "main".to_string(),
-			linkage: IrLinkage::Public,
-			signature: sig,
-			params: Vec::new(),
-			blocks: vec![
+		let f = test_function(
+			sig,
+			vec![
 				IrBlock {
 					id: IrBlockId(0),
 					params: Vec::new(),
@@ -1165,23 +1053,10 @@ mod tests {
 					term: Some(IrTerminator::Ret(Some(out_v))),
 				},
 			],
-			entry: Some(IrBlockId(0)),
-			value_types: IrFunctionTypeMap::default(),
-			location: None,
-		};
+			Some(IrBlockId(0)),
+		);
 
-		let p = IrProgram {
-			modules: vec![IrModule {
-				id: "main".to_string(),
-				source_file: "main.he".to_string(),
-				functions: vec![f],
-				globals: Vec::new(),
-				externs: Vec::new(),
-				vtables: Vec::new(),
-			}],
-			types,
-			layouts: Default::default(),
-		};
+		let p = test_program(types, f);
 
 		assert!(verify_program(&p).is_err());
 	}
