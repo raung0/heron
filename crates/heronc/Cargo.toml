@@ -1,0 +1,10 @@
+[package]
+name = "heronc"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+clap = "4.5.53"
+termcolor = "1.4"
+heron = { path = "../heron" }
+

@@ -117,13 +117,30 @@ checksum = "fc0fef456e4baa96da950455cd02c081ca953b141298e41db3fc7e36b1da849c"
 name = "heron"
 version = "0.1.0"
 dependencies = [
- "clap",
  "llvm-sys",
  "serde",
  "serde_ini",
  "serde_json",
  "termcolor",
  "threadpool",
+]
+
+[[package]]
+name = "heron-format"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "heron",
+ "serde_ini",
+]
+
+[[package]]
+name = "heronc"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "heron",
+ "termcolor",
 ]
 
 [[package]]
