@@ -1,6 +1,6 @@
 package main
 
-add :: fn [[runtimeable]] (a: int; b: int) -> int do a + b
+add :: fn (a: int; b: int) -> int do a + b
 
 main := fn {
 	x := 1

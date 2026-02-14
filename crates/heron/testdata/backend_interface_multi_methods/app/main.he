@@ -1,15 +1,15 @@
 package main
 
 Ops :: interface {
-	pub add := fn [[runtimeable]] (self: &Self; x: int) -> int ---
-	pub mul := fn [[runtimeable]] (self: &Self; x: int) -> int ---
+	pub add := fn (self: &Self; x: int) -> int ---
+	pub mul := fn (self: &Self; x: int) -> int ---
 }
 
 Counter :: struct {
 	value: int
 
-	pub add :: fn [[runtimeable]] (self: &Self; x: int) -> int do self.value + x
-	pub mul :: fn [[runtimeable]] (self: &Self; x: int) -> int do self.value * x
+	pub add :: fn (self: &Self; x: int) -> int do self.value + x
+	pub mul :: fn (self: &Self; x: int) -> int do self.value * x
 }
 
 main := fn {

@@ -4597,18 +4597,6 @@ impl Pass4State {
 								method_name,
 								&node.location,
 							);
-						self.maybe_require_runtimeable_for_call(
-							ctx,
-							&node.location,
-							method_name,
-							self.fn_flags_from_ast(
-								&module_id,
-								method_name,
-								"runtimeable",
-							),
-							&normalized_args,
-							None,
-						);
 						let mut return_ty = self.builtins.unknown_id;
 						let typed_args =
 							if let ResolvedType::Fn {
@@ -4724,18 +4712,6 @@ impl Pass4State {
 								method_name,
 								&node.location,
 							);
-						self.maybe_require_runtimeable_for_call(
-							ctx,
-							&node.location,
-							method_name,
-							self.method_flags_from_ast(
-								lhs_ty,
-								method_name,
-								"runtimeable",
-							),
-							&normalized_args,
-							Some(lhs.as_ref()),
-						);
 						if let Some(param_defs) = param_defs.as_deref() {
 							let (required, total) = self
 								.param_count_range(param_defs, 1);
@@ -5237,16 +5213,6 @@ impl Pass4State {
 				&callee_display,
 				&node.location,
 			);
-			if let Some(name) = callee_name.as_ref() {
-				self.maybe_require_runtimeable_for_call(
-					ctx,
-					&node.location,
-					name,
-					self.fn_flags_from_ast(ctx.module_id, name, "runtimeable"),
-					&normalized_args,
-					None,
-				);
-			}
 			if let Some(name) = callee_name.as_ref() {
 				if let Some(ast_params) =
 					self.fn_param_types_from_ast(ctx.module_id, name)
@@ -7525,99 +7491,6 @@ impl Pass4State {
 		None
 	}
 
-	fn fn_flags_from_ast(
-		&self,
-		module_id: &ModuleId,
-		name: &str,
-		attr: &str,
-	) -> Option<(bool, bool, SourceLocation)> {
-		let declaration_location = self.fn_keyword_location_from_source(module_id, name);
-		let items = self.module_items(module_id);
-		for item in items {
-			let item_location = item.location.clone();
-			let node = Self::unwrap_pub(item.as_ref());
-			match &node.v {
-				ASTValue::DeclarationComptime(decl_name, value)
-					if decl_name == name =>
-				{
-					if let ASTValue::Fn { attributes, .. } = &value.v {
-						return Some((
-							true,
-							attributes.iter().any(|a| a == attr),
-							declaration_location
-								.clone()
-								.unwrap_or(item_location.clone()),
-						));
-					}
-				}
-				ASTValue::Declaration {
-					name: decl_name,
-					value,
-					..
-				} if decl_name == name => {
-					if let ASTValue::Fn { attributes, .. } = &value.v {
-						return Some((
-							false,
-							attributes.iter().any(|a| a == attr),
-							declaration_location
-								.clone()
-								.unwrap_or(item_location.clone()),
-						));
-					}
-				}
-				ASTValue::DeclarationMulti {
-					names,
-					values,
-					comptime,
-					..
-				} => {
-					let Some(values) = values else {
-						continue;
-					};
-					for (idx, decl_name) in names.iter().enumerate() {
-						if decl_name != name {
-							continue;
-						}
-						if let Some(value) = values.get(idx)
-							&& let ASTValue::Fn { attributes, .. } =
-								&value.v
-						{
-							return Some((
-								*comptime,
-								attributes
-									.iter()
-									.any(|a| a == attr),
-								declaration_location
-									.clone()
-									.unwrap_or(
-										item_location
-											.clone(),
-									),
-							));
-						}
-					}
-				}
-				_ => {}
-			}
-		}
-		None
-	}
-
-	fn call_has_runtime_dependent_args(&self, args: &[Box<AST>], ctx: &TypeContext) -> bool {
-		args.iter()
-			.any(|arg| self.expr_uses_runtime_value(arg.as_ref(), ctx))
-	}
-
-	fn call_depends_on_runtime_values(
-		&self,
-		args: &[Box<AST>],
-		receiver: Option<&AST>,
-		ctx: &TypeContext,
-	) -> bool {
-		receiver.map(|node| self.expr_uses_runtime_value(node, ctx))
-			.unwrap_or(false) || self.call_has_runtime_dependent_args(args, ctx)
-	}
-
 	fn runtime_function_call_in_comptime(
 		&self,
 		ctx: &TypeContext,
@@ -7642,55 +7515,6 @@ impl Pass4State {
 			return None;
 		}
 		Some((name.to_string(), info.ty))
-	}
-
-	fn maybe_require_runtimeable_for_call(
-		&mut self,
-		ctx: &TypeContext,
-		call_location: &SourceLocation,
-		callee: &str,
-		flags: Option<(bool, bool, SourceLocation)>,
-		args: &[Box<AST>],
-		receiver: Option<&AST>,
-	) {
-		if ctx.in_comptime {
-			return;
-		}
-		let Some((is_comptime, is_runtimeable, declaration_location)) = flags else {
-			return;
-		};
-		if !is_comptime || is_runtimeable {
-			return;
-		}
-		if !self.call_depends_on_runtime_values(args, receiver, ctx) {
-			return;
-		}
-		self.errors
-			.push(FrontendError::ComptimeCallNeedsRuntimeable {
-				location: call_location.clone(),
-				callee: callee.to_string(),
-				declaration_location,
-			});
-	}
-
-	fn expr_uses_runtime_value(&self, node: &AST, ctx: &TypeContext) -> bool {
-		let mut ids = VecDeque::new();
-		Self::collect_ids_in_ast(node, &mut ids);
-		while let Some(name) = ids.pop_front() {
-			if let Some(info) = ctx.value_scopes.iter().rev().find_map(|s| s.get(&name))
-			{
-				if !info.comptime {
-					return true;
-				}
-				continue;
-			}
-			if let Some(info) = ctx.module.values.get(&name)
-				&& !info.comptime
-			{
-				return true;
-			}
-		}
-		false
 	}
 
 	fn method_param_defs_from_ast(
@@ -7763,163 +7587,6 @@ impl Pass4State {
 			}
 		}
 		let _ = module;
-		None
-	}
-
-	fn method_flags_from_ast(
-		&self,
-		ty_id: TypeId,
-		method_name: &str,
-		attr: &str,
-	) -> Option<(bool, bool, SourceLocation)> {
-		let base_ty = match self.arena.get(ty_id) {
-			ResolvedType::GenericInstance { base, .. } => *base,
-			_ => ty_id,
-		};
-		let (module_id, type_name) = match self.arena.get(base_ty) {
-			ResolvedType::Struct { module, name, .. }
-			| ResolvedType::Union { module, name, .. } => (module.clone(), name.clone()),
-			_ => return None,
-		};
-		let items = self.module_items(&module_id);
-		for item in items {
-			let node = Self::unwrap_pub(item.as_ref());
-			let (decl_name, value) = match &node.v {
-				ASTValue::DeclarationComptime(name, value) => (name, value),
-				ASTValue::DeclarationMulti {
-					names,
-					values: Some(values),
-					comptime: true,
-					..
-				} => {
-					let mut found = None;
-					for (idx, name) in names.iter().enumerate() {
-						if name == &type_name {
-							found = values
-								.get(idx)
-								.map(|value| (name, value));
-							break;
-						}
-					}
-					let Some((decl, value)) = found else {
-						continue;
-					};
-					(decl, value)
-				}
-				_ => continue,
-			};
-			if decl_name != &type_name {
-				continue;
-			}
-			match &value.v {
-				ASTValue::Struct { body, .. } => {
-					if let ASTValue::ExprList { items, .. }
-					| ASTValue::ExprListNoScope { items, .. } = &body.v
-					{
-						if let Some(flags) = self.method_flags_from_items(
-							items,
-							method_name,
-							attr,
-						) {
-							return Some(flags);
-						}
-					}
-				}
-				ASTValue::Union { methods, .. } => {
-					if let Some(flags) = self.method_flags_from_items(
-						methods,
-						method_name,
-						attr,
-					) {
-						return Some(flags);
-					}
-				}
-				_ => {}
-			}
-		}
-		None
-	}
-
-	fn method_flags_from_items(
-		&self,
-		items: &[Box<AST>],
-		method_name: &str,
-		attr: &str,
-	) -> Option<(bool, bool, SourceLocation)> {
-		for item in items {
-			let item_location = item.location.clone();
-			let node = Self::unwrap_pub(item.as_ref());
-			match &node.v {
-				ASTValue::DeclarationComptime(name, value)
-					if name == method_name =>
-				{
-					if let ASTValue::Fn { attributes, .. } = &value.v {
-						return Some((
-							true,
-							attributes.iter().any(|a| a == attr),
-							item_location.clone(),
-						));
-					}
-				}
-				ASTValue::DeclarationMulti {
-					names,
-					values: Some(values),
-					comptime,
-					..
-				} => {
-					for (idx, name) in names.iter().enumerate() {
-						if name != method_name {
-							continue;
-						}
-						if let Some(value) = values.get(idx)
-							&& let ASTValue::Fn { attributes, .. } =
-								&value.v
-						{
-							return Some((
-								*comptime,
-								attributes
-									.iter()
-									.any(|a| a == attr),
-								item_location.clone(),
-							));
-						}
-					}
-				}
-				_ => {}
-			}
-		}
-		None
-	}
-
-	fn fn_keyword_location_from_source(
-		&self,
-		module_id: &ModuleId,
-		name: &str,
-	) -> Option<SourceLocation> {
-		let module = self.modules.get(module_id)?;
-		let src = read_to_string(&module.file_path).ok()?;
-		for (line_idx, line) in src.lines().enumerate() {
-			let Some(name_pos) = line.find(name) else {
-				continue;
-			};
-			let after_name = &line[name_pos + name.len()..];
-			let Some(fn_rel) = after_name.find("fn") else {
-				continue;
-			};
-			let before_fn = &after_name[..fn_rel];
-			if !(before_fn.contains("::") || before_fn.contains(":=")) {
-				continue;
-			}
-			let fn_col = (name_pos + name.len() + fn_rel + 1) as i32;
-			let line_no = (line_idx + 1) as i32;
-			return Some(SourceLocation {
-				file: module.file_path.clone(),
-				range: crate::frontend::LocationRange {
-					begin: (fn_col, line_no),
-					end: (fn_col, line_no),
-				},
-			});
-		}
 		None
 	}
 
@@ -9387,18 +9054,9 @@ mod tests {
 	}
 
 	#[test]
-	fn reports_comptime_call_needing_runtimeable() {
-		assert_fixture_error(
-			"testdata/pass4_comptime_runtimeable_required",
-			Vec::new(),
-			|err| matches!(err, FrontendError::ComptimeCallNeedsRuntimeable { .. }),
-		);
-	}
-
-	#[test]
-	fn allows_comptime_call_with_runtimeable() {
+	fn allows_comptime_call_with_runtime_args_by_default() {
 		let (_typed, _resolved, errors, warnings) =
-			run_fixture("testdata/pass4_comptime_runtimeable_ok", Vec::new());
+			run_fixture("testdata/pass4_comptime_runtimeable_required", Vec::new());
 		assert!(errors.is_empty(), "errors: {errors:?}");
 		assert!(warnings.is_empty(), "warnings: {warnings:?}");
 	}

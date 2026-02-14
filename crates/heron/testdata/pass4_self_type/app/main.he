@@ -3,7 +3,7 @@ package main
 Node :: struct {
 	value: int
 
-	pub clone :: fn [[runtimeable]] (self: &Self) -> Self do Self .{ .value = self.value }
+	pub clone :: fn (self: &Self) -> Self do Self .{ .value = self.value }
 	pub with_value :: fn (value: int) -> Self do Self .{ .value }
 }
 

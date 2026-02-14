@@ -11,7 +11,7 @@ U :: union {
 	B
 }
 
-is_a :: fn [[runtimeable]] (u: U) -> bool {
+is_a :: fn (u: U) -> bool {
 	match  v in u {
 		case A -> true
 		case B -> false

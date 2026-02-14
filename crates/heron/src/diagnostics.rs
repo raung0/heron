@@ -1,4 +1,3 @@
-use std::fs::read_to_string;
 use std::io;
 
 use crate::frontend::{
@@ -750,29 +749,6 @@ fn emit_error_message(
 				Some("mark it as `pub` to expose it".to_string()),
 			)
 		}
-		FrontendError::ComptimeCallNeedsRuntimeable {
-			location,
-			callee,
-			declaration_location,
-		} => {
-			labels.push(Some("runtimeable required".to_string()));
-			locations.push(location);
-			let mut declaration_location =
-				find_fn_hint_location(callee.as_str(), declaration_location);
-			declaration_location.range.begin.0 += 2;
-			declaration_location.range.end.0 += 2;
-			hint_blocks.push(SourceLocationBlock {
-				location: declaration_location,
-				label: Some("add [[runtimeable]] here".to_string()),
-			});
-			(
-				format!(
-					"compile time call `{callee}` uses runtime-dependent arguments"
-				),
-				Some("add `[[runtimeable]]` to the function declaration"
-					.to_string()),
-			)
-		}
 		FrontendError::CtfeError(err) => emit_ctfe_error(err, &mut labels, &mut locations),
 	};
 	for (label, location) in labels.into_iter().zip(locations) {
@@ -783,35 +759,6 @@ fn emit_error_message(
 
 fn message(text: impl Into<String>) -> (String, Option<String>) {
 	(text.into(), None)
-}
-
-fn find_fn_hint_location(callee: &str, fallback: SourceLocation) -> SourceLocation {
-	let Ok(src) = read_to_string(&fallback.file) else {
-		return fallback;
-	};
-	for (line_idx, line) in src.lines().enumerate() {
-		let Some(name_pos) = line.find(callee) else {
-			continue;
-		};
-		let after_name = &line[name_pos + callee.len()..];
-		let Some(fn_rel) = after_name.find("fn") else {
-			continue;
-		};
-		let before_fn = &after_name[..fn_rel];
-		if !(before_fn.contains("::") || before_fn.contains(":=")) {
-			continue;
-		}
-		let fn_col = (name_pos + callee.len() + fn_rel + 1) as i32;
-		let line_no = (line_idx + 1) as i32;
-		return SourceLocation {
-			file: fallback.file,
-			range: crate::frontend::LocationRange {
-				begin: (fn_col, line_no),
-				end: (fn_col, line_no),
-			},
-		};
-	}
-	fallback
 }
 
 fn emit_ctfe_error(

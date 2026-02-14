@@ -3,7 +3,7 @@ package main
 Counter :: struct {
 	value: int
 
-	pub inc :: fn [[runtimeable]] (self: &Self; amount: int) -> int do self.value + amount
+	pub inc :: fn (self: &Self; amount: int) -> int do self.value + amount
 }
 
 main := fn {

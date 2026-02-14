@@ -1,13 +1,13 @@
 package main
 
 Mixed :: interface {
-	pub by_ref := fn [[runtimeable]] (self: &Self; x: int) -> int ---
+	pub by_ref := fn (self: &Self; x: int) -> int ---
 }
 
 Boxed :: struct {
 	value: int
 
-	pub by_ref :: fn [[runtimeable]] (self: &Self; x: int) -> int do self.value + x
+	pub by_ref :: fn (self: &Self; x: int) -> int do self.value + x
 }
 
 main := fn {

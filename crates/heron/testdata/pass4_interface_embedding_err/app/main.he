@@ -1,11 +1,11 @@
 package main
 
 Reader :: interface {
-	pub read := fn [[runtimeable]] (self: &Self) -> int ---
+	pub read := fn (self: &Self) -> int ---
 }
 
 ReadWriter :: interface extends Reader {
-	pub write := fn [[runtimeable]] (self: &Self; x: int) ---
+	pub write := fn (self: &Self; x: int) ---
 }
 
 main := fn {

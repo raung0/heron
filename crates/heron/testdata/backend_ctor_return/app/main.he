@@ -7,7 +7,7 @@ Pair :: struct {
 	pub __construct :: fn (x, y: int) -> Self do Self .{ .a = x, .b = y }
 }
 
-make_pair :: fn [[runtimeable]] (x, y: int) -> Pair {
+make_pair :: fn (x, y: int) -> Pair {
 	return Pair(x, y)
 }
 

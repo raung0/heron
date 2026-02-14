@@ -1,6 +1,6 @@
 package main
 
-fib :: fn [[runtimeable]] (n: int) -> int {
+fib :: fn (n: int) -> int {
 	if n <= 1 {
 		n
 	} else  {

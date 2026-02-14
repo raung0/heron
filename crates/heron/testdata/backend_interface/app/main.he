@@ -1,13 +1,13 @@
 package main
 
 Adder :: interface {
-	pub add := fn [[runtimeable]] (self: &Self; x: int) -> int ---
+	pub add := fn (self: &Self; x: int) -> int ---
 }
 
 Counter :: struct {
 	value: int
 
-	add :: fn [[runtimeable]] (self: &Self; x: int) -> int do self.value + x
+	add :: fn (self: &Self; x: int) -> int do self.value + x
 }
 
 main := fn {

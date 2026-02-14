@@ -247,11 +247,6 @@ pub enum FrontendError {
 		location: SourceLocation,
 		callee: String,
 	},
-	ComptimeCallNeedsRuntimeable {
-		location: SourceLocation,
-		callee: String,
-		declaration_location: SourceLocation,
-	},
 	CtfeError(CtfeError),
 }
 
@@ -329,7 +324,6 @@ impl FrontendError {
 			| FrontendError::UnusedValue { location, .. }
 			| FrontendError::InaccessibleMember { location, .. }
 			| FrontendError::RuntimeCallInComptime { location, .. }
-			| FrontendError::ComptimeCallNeedsRuntimeable { location, .. }
 			| FrontendError::CtfeError(CtfeError { location, .. }) => Some(location),
 		}
 	}
