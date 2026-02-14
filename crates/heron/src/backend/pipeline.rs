@@ -1,6 +1,13 @@
-use crate::backend::{Backend, BackendError, BackendOptions, BuildCache, ModuleArtifact};
+use crate::backend::{
+	Backend, BackendError, BackendOptions, BinaryFormat, BuildCache, LinkMode, ModuleArtifact,
+	resolve_binary_format,
+};
 use crate::frontend::{Semantics, TypedProgram};
 use crate::ir::{lower_typed_program_to_ir, verify_program};
+use std::env;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::time::{Duration, Instant};
 
 #[derive(Clone, Debug, Default)]
@@ -34,6 +41,10 @@ pub fn compile_modules_timed<B: Backend>(
 ) -> Result<(Vec<ModuleArtifact>, BackendTimings), Vec<BackendError>> {
 	let total_start = Instant::now();
 	let mut timings = BackendTimings::default();
+	let needs_link = options.link_mode.is_some();
+	let needs_objects = options.emit_obj || needs_link;
+	let mut compile_options = options.clone();
+	compile_options.emit_obj = needs_objects;
 
 	let cache_load_start = Instant::now();
 	let mut cache = BuildCache::load_or_create(options, backend.name());
@@ -41,7 +52,7 @@ pub fn compile_modules_timed<B: Backend>(
 
 	let cache_plan_start = Instant::now();
 	cache.prune_modules(program);
-	let plan = cache.compute_build_plan(program, semantics, backend.name(), options);
+	let plan = cache.compute_build_plan(program, semantics, backend.name(), &compile_options);
 	timings.cache_plan = cache_plan_start.elapsed();
 
 	let cache_trace = std::env::var("HERON_CACHE_TRACE").ok().as_deref() == Some("1");
@@ -94,7 +105,7 @@ pub fn compile_modules_timed<B: Backend>(
 	let mut errors = Vec::new();
 
 	for module in plan {
-		let must_compile = (options.emit_obj && module.needs_compile) || options.emit_llvm;
+		let must_compile = (needs_objects && module.needs_compile) || options.emit_llvm;
 		if cache_trace {
 			eprintln!(
 				"[cache] {} {}",
@@ -110,20 +121,20 @@ pub fn compile_modules_timed<B: Backend>(
 					&module.module_id,
 					ir_program,
 					semantics,
-					options,
+					&compile_options,
 				)
 			} else {
 				backend.compile_module(
 					&module.module_id,
 					program,
 					semantics,
-					options,
+					&compile_options,
 				)
 			};
 			timings.module_compile += module_compile_start.elapsed();
 			match result {
 				Ok(artifact) => {
-					if options.emit_obj
+					if needs_objects
 						&& let Some(object_path) =
 							artifact.object_path.as_ref()
 					{
@@ -146,7 +157,7 @@ pub fn compile_modules_timed<B: Backend>(
 				module_id: module.module_id.clone(),
 				..ModuleArtifact::default()
 			};
-			if options.emit_obj {
+			if needs_objects {
 				artifact.object_path = Some(module.object_path.clone());
 			}
 			artifacts.push(artifact);
@@ -156,9 +167,7 @@ pub fn compile_modules_timed<B: Backend>(
 
 	if errors.is_empty() {
 		let cache_save_start = Instant::now();
-		if options.emit_obj
-			&& let Err(err) = cache.save()
-		{
+		if needs_objects && let Err(err) = cache.save() {
 			return Err(vec![BackendError {
 				module_id: "<build-cache>".to_string(),
 				message: err,
@@ -166,11 +175,371 @@ pub fn compile_modules_timed<B: Backend>(
 			}]);
 		}
 		timings.cache_save = cache_save_start.elapsed();
+		if needs_link {
+			match link_artifacts(&artifacts, options) {
+				Ok(linked_path) => {
+					artifacts.push(ModuleArtifact {
+						module_id: "<link>".to_string(),
+						linked_output_path: Some(linked_path),
+						..ModuleArtifact::default()
+					});
+				}
+				Err(link_error) => return Err(vec![link_error]),
+			}
+		}
 		timings.total = total_start.elapsed();
 		Ok((artifacts, timings))
 	} else {
 		Err(errors)
 	}
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LinkerFlavor {
+	Mold,
+	Lld,
+	Ld,
+}
+
+struct LinkerTool {
+	path: PathBuf,
+	flavor: LinkerFlavor,
+}
+
+fn link_artifacts(
+	artifacts: &[ModuleArtifact],
+	options: &BackendOptions,
+) -> Result<PathBuf, BackendError> {
+	let Some(link_mode) = options.link_mode else {
+		return Err(BackendError {
+			module_id: "<link>".to_string(),
+			message: "missing link mode".to_string(),
+			location: None,
+		});
+	};
+	let object_files: Vec<PathBuf> = artifacts
+		.iter()
+		.filter_map(|artifact| artifact.object_path.clone())
+		.collect();
+	if object_files.is_empty() {
+		return Err(BackendError {
+			module_id: "<link>".to_string(),
+			message: "no object files available for final link".to_string(),
+			location: None,
+		});
+	}
+
+	let format = resolve_binary_format(options.binary_format, options.target_triple.as_deref());
+	validate_binary_format(format, options.target_triple.as_deref())?;
+
+	let out_path = options
+		.out_path
+		.clone()
+		.unwrap_or_else(|| default_link_output_path(&options.emit_dir, link_mode, format));
+	if let Some(parent) = out_path.parent()
+		&& let Err(err) = fs::create_dir_all(parent)
+	{
+		return Err(BackendError {
+			module_id: "<link>".to_string(),
+			message: format!(
+				"failed to create output dir `{}`: {err}",
+				parent.display()
+			),
+			location: None,
+		});
+	}
+
+	match link_mode {
+		LinkMode::Executable | LinkMode::SharedLibrary => {
+			let linker = discover_linker()?;
+			run_linker(
+				&linker,
+				&object_files,
+				&out_path,
+				link_mode,
+				format,
+				options.target_triple.as_deref(),
+			)?;
+		}
+		LinkMode::StaticLibrary => {
+			create_static_archive(&object_files, &out_path, format)?;
+		}
+	}
+
+	Ok(out_path)
+}
+
+fn validate_binary_format(
+	format: BinaryFormat,
+	target_triple: Option<&str>,
+) -> Result<(), BackendError> {
+	let inferred = resolve_binary_format(BinaryFormat::Auto, target_triple);
+	if format != inferred {
+		let target = target_triple.unwrap_or("<host-default>");
+		return Err(BackendError {
+			module_id: "<link>".to_string(),
+			message: format!(
+				"binary format `{}` does not match target `{}` (expected `{}`)",
+				format.as_str(),
+				target,
+				inferred.as_str()
+			),
+			location: None,
+		});
+	}
+	Ok(())
+}
+
+fn default_link_output_path(emit_dir: &Path, link_mode: LinkMode, format: BinaryFormat) -> PathBuf {
+	let mut name = "a".to_string();
+	match link_mode {
+		LinkMode::Executable => {
+			if format == BinaryFormat::Pe {
+				name.push_str(".exe");
+			}
+		}
+		LinkMode::SharedLibrary => {
+			if format != BinaryFormat::Pe {
+				name = format!("lib{name}");
+			}
+			name.push_str(match format {
+				BinaryFormat::Pe => ".dll",
+				BinaryFormat::Elf => ".so",
+				BinaryFormat::MachO => ".dylib",
+				BinaryFormat::Auto => unreachable!("auto format must be resolved"),
+			});
+		}
+		LinkMode::StaticLibrary => {
+			if format != BinaryFormat::Pe {
+				name = format!("lib{name}");
+			}
+			name.push_str(match format {
+				BinaryFormat::Pe => ".lib",
+				BinaryFormat::Elf | BinaryFormat::MachO => ".a",
+				BinaryFormat::Auto => unreachable!("auto format must be resolved"),
+			});
+		}
+	}
+	emit_dir.join("bin").join(name)
+}
+
+fn discover_linker() -> Result<LinkerTool, BackendError> {
+	if let Some(path) = find_program_on_path("mold") {
+		return Ok(LinkerTool {
+			path,
+			flavor: LinkerFlavor::Mold,
+		});
+	}
+	if let Some(path) = find_program_on_path("lld") {
+		return Ok(LinkerTool {
+			path,
+			flavor: LinkerFlavor::Lld,
+		});
+	}
+	if let Some(path) = find_program_on_path("ld.lld") {
+		return Ok(LinkerTool {
+			path,
+			flavor: LinkerFlavor::Lld,
+		});
+	}
+	if let Some(path) = find_program_on_path("ld") {
+		return Ok(LinkerTool {
+			path,
+			flavor: LinkerFlavor::Ld,
+		});
+	}
+	Err(BackendError {
+		module_id: "<link>".to_string(),
+		message: "no linker found on PATH (expected one of: mold, lld/ld.lld, ld)"
+			.to_string(),
+		location: None,
+	})
+}
+
+fn find_program_on_path(name: &str) -> Option<PathBuf> {
+	let path_var = env::var_os("PATH")?;
+	for dir in env::split_paths(&path_var) {
+		for candidate in executable_candidates(name) {
+			let full = dir.join(candidate);
+			if full.is_file() {
+				return Some(full);
+			}
+		}
+	}
+	None
+}
+
+fn executable_candidates(name: &str) -> Vec<String> {
+	let mut candidates = vec![name.to_string()];
+	if cfg!(windows) && !name.contains('.') {
+		candidates.push(format!("{name}.exe"));
+		candidates.push(format!("{name}.cmd"));
+		candidates.push(format!("{name}.bat"));
+	}
+	candidates
+}
+
+fn run_linker(
+	linker: &LinkerTool,
+	objects: &[PathBuf],
+	out_path: &Path,
+	link_mode: LinkMode,
+	format: BinaryFormat,
+	target_triple: Option<&str>,
+) -> Result<(), BackendError> {
+	let mut command = Command::new(&linker.path);
+	if matches!(link_mode, LinkMode::SharedLibrary) {
+		if format == BinaryFormat::MachO {
+			command.arg("-dylib");
+		} else {
+			command.arg("-shared");
+		}
+	}
+	if let Some(triple) = target_triple
+		&& matches!(linker.flavor, LinkerFlavor::Lld)
+	{
+		command.arg("-target").arg(triple);
+	}
+	if format == BinaryFormat::MachO {
+		if let Some(arch) = target_arch(target_triple) {
+			command.arg("-arch").arg(arch);
+		}
+		if let Some(sdk_root) = macos_sdk_root() {
+			command.arg("-syslibroot").arg(sdk_root);
+		}
+		command.arg("-platform_version")
+			.arg("macos")
+			.arg("14.0")
+			.arg("14.0");
+		if matches!(link_mode, LinkMode::Executable) {
+			let entry_symbol = if format == BinaryFormat::MachO {
+				"_main::main"
+			} else {
+				"main::main"
+			};
+			command.arg("-e").arg(entry_symbol);
+			command.arg("-lSystem");
+		}
+	}
+	command.arg("-o").arg(out_path);
+	for object in objects {
+		command.arg(object);
+	}
+
+	let output = command.output().map_err(|err| BackendError {
+		module_id: "<link>".to_string(),
+		message: format!("failed to run linker `{}`: {err}", linker.path.display()),
+		location: None,
+	})?;
+	if !output.status.success() {
+		let stderr = String::from_utf8_lossy(&output.stderr);
+		let stdout = String::from_utf8_lossy(&output.stdout);
+		let details = if stderr.trim().is_empty() {
+			stdout.trim().to_string()
+		} else {
+			stderr.trim().to_string()
+		};
+		return Err(BackendError {
+			module_id: "<link>".to_string(),
+			message: format!("linker failed: {details}"),
+			location: None,
+		});
+	}
+	Ok(())
+}
+
+fn target_arch(target_triple: Option<&str>) -> Option<&'static str> {
+	let triple = target_triple.unwrap_or("").to_ascii_lowercase();
+	if triple.contains("aarch64") || triple.contains("arm64") {
+		Some("arm64")
+	} else if triple.contains("x86_64") || triple.contains("amd64") {
+		Some("x86_64")
+	} else if triple.is_empty() {
+		match env::consts::ARCH {
+			"aarch64" => Some("arm64"),
+			"x86_64" => Some("x86_64"),
+			_ => None,
+		}
+	} else {
+		None
+	}
+}
+
+fn macos_sdk_root() -> Option<String> {
+	let output = Command::new("xcrun").arg("--show-sdk-path").output().ok()?;
+	if !output.status.success() {
+		return None;
+	}
+	let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+	if path.is_empty() { None } else { Some(path) }
+}
+
+fn create_static_archive(
+	objects: &[PathBuf],
+	out_path: &Path,
+	format: BinaryFormat,
+) -> Result<(), BackendError> {
+	if format == BinaryFormat::Pe {
+		let archive = find_program_on_path("llvm-lib")
+			.or_else(|| find_program_on_path("lib"))
+			.ok_or_else(|| {
+				BackendError {
+				module_id: "<link>".to_string(),
+				message:
+					"PE static-library linking requires `llvm-lib` or `lib` on PATH"
+						.to_string(),
+				location: None,
+			}
+			})?;
+		let mut command = Command::new(&archive);
+		command.arg(format!("/OUT:{}", out_path.display()));
+		for object in objects {
+			command.arg(object);
+		}
+		let output = command.output().map_err(|err| BackendError {
+			module_id: "<link>".to_string(),
+			message: format!("failed to run `{}`: {err}", archive.display()),
+			location: None,
+		})?;
+		if !output.status.success() {
+			let stderr = String::from_utf8_lossy(&output.stderr);
+			return Err(BackendError {
+				module_id: "<link>".to_string(),
+				message: format!(
+					"`{}` failed: {}",
+					archive.display(),
+					stderr.trim()
+				),
+				location: None,
+			});
+		}
+		return Ok(());
+	}
+
+	let archive = find_program_on_path("ar").ok_or_else(|| BackendError {
+		module_id: "<link>".to_string(),
+		message: "static-library linking requires `ar` on PATH".to_string(),
+		location: None,
+	})?;
+	let mut command = Command::new(&archive);
+	command.arg("crs").arg(out_path);
+	for object in objects {
+		command.arg(object);
+	}
+	let output = command.output().map_err(|err| BackendError {
+		module_id: "<link>".to_string(),
+		message: format!("failed to run `{}`: {err}", archive.display()),
+		location: None,
+	})?;
+	if !output.status.success() {
+		let stderr = String::from_utf8_lossy(&output.stderr);
+		return Err(BackendError {
+			module_id: "<link>".to_string(),
+			message: format!("`{}` failed: {}", archive.display(), stderr.trim()),
+			location: None,
+		});
+	}
+	Ok(())
 }
 
 #[cfg(test)]

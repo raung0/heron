@@ -2,12 +2,13 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{self, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use clap::{Arg, ArgAction, Command};
 use heron::backend::{
-	BackendOptions, BackendTimings, LlvmBackend, OptimizationLevel, compile_modules_timed,
+	BackendOptions, BackendTimings, BinaryFormat, LinkMode, LlvmBackend, OptimizationLevel,
+	compile_modules_timed, resolve_binary_format,
 };
 use heron::diagnostics::{Message, emit_message, pretty_print_error, pretty_print_multiple_errors};
 use heron::frontend::{
@@ -44,10 +45,6 @@ fn main() {
 			.long("emit-llvm")
 			.help("Emit LLVM IR files for debugging")
 			.action(ArgAction::SetTrue))
-		.arg(Arg::new("emit_obj")
-			.long("emit-obj")
-			.help("Emit object files per module")
-			.action(ArgAction::SetTrue))
 		.arg(Arg::new("emit_dir")
 			.long("emit-dir")
 			.value_name("DIR")
@@ -68,19 +65,56 @@ fn main() {
 			.value_parser(["none", "size", "optimized", "aggressive"])
 			.default_value("none")
 			.help("Backend optimization level"))
+		.arg(Arg::new("build_type")
+			.long("build-type")
+			.alias("linking")
+			.value_name("MODE")
+			.value_parser(["executable", "shared-library", "static-library"])
+			.default_value("executable")
+			.help("Final artifact kind"))
+		.arg(Arg::new("binfmt")
+			.long("binfmt")
+			.value_name("FORMAT")
+			.value_parser(["auto", "pe", "elf", "mach-o"])
+			.default_value("auto")
+			.help("Final binary format (auto infers from target)"))
+		.arg(Arg::new("out")
+			.long("out")
+			.value_name("PATH")
+			.help("Output path for final linked artifact"))
 		.get_matches();
 
 	let dump_ast = matches.get_flag("dump_ast");
 	let dump_module_graph = matches.get_flag("dump_module_graph");
 	let dump_ctfe_results = matches.get_flag("dump_ctfe_results");
 	let emit_llvm = matches.get_flag("emit_llvm");
-	let emit_obj = matches.get_flag("emit_obj");
 	let debug_info = matches.get_flag("debug_info");
 	let emit_dir = matches
 		.get_one::<String>("emit_dir")
 		.map(PathBuf::from)
 		.unwrap_or_else(|| PathBuf::from("target/heron-out"));
 	let target_triple = matches.get_one::<String>("target").cloned();
+	let link_mode = match matches
+		.get_one::<String>("build_type")
+		.map(String::as_str)
+		.unwrap_or("executable")
+	{
+		"executable" => LinkMode::Executable,
+		"shared-library" => LinkMode::SharedLibrary,
+		"static-library" => LinkMode::StaticLibrary,
+		_ => LinkMode::Executable,
+	};
+	let binary_format = match matches
+		.get_one::<String>("binfmt")
+		.map(String::as_str)
+		.unwrap_or("auto")
+	{
+		"auto" => BinaryFormat::Auto,
+		"pe" => BinaryFormat::Pe,
+		"elf" => BinaryFormat::Elf,
+		"mach-o" => BinaryFormat::MachO,
+		_ => BinaryFormat::Auto,
+	};
 	let optimization_level = match matches
 		.get_one::<String>("optimization_level")
 		.map(String::as_str)
@@ -101,6 +135,18 @@ fn main() {
 		.get_one::<String>("file")
 		.expect("clap enforces required argument")
 		.to_owned();
+	let out_path = matches
+		.get_one::<String>("out")
+		.map(PathBuf::from)
+		.unwrap_or_else(|| {
+			default_output_path(
+				Path::new(&file),
+				&emit_dir,
+				link_mode,
+				binary_format,
+				target_triple.as_deref(),
+			)
+		});
 	let file_for_lexer = file.clone();
 	let compilation_start = Instant::now();
 	let mut timings = CompilationTimings::default();
@@ -187,14 +233,17 @@ fn main() {
 					println!("{}", dot_module_graph(&program));
 				}
 
-				if emit_llvm || emit_obj {
+				{
 					let options = BackendOptions {
-						emit_obj,
+						emit_obj: true,
 						emit_llvm,
 						debug_info,
 						emit_dir: emit_dir.clone(),
 						target_triple,
 						optimization_level,
+						link_mode: Some(link_mode),
+						binary_format,
+						out_path: Some(out_path.clone()),
 					};
 					let mut backend = LlvmBackend::new();
 					match compile_modules_timed(
@@ -205,16 +254,6 @@ fn main() {
 					) {
 						Ok((artifacts, backend_timings)) => {
 							timings.backend = Some(backend_timings);
-							if emit_obj {
-								for artifact in &artifacts {
-									if let Some(path) =
-										&artifact
-											.object_path
-									{
-										eprintln!("emitted object {} -> {}", artifact.module_id, path.display());
-									}
-								}
-							}
 							if emit_llvm {
 								for artifact in &artifacts {
 									if let Some(path) =
@@ -223,6 +262,16 @@ fn main() {
 									{
 										eprintln!("emitted llvm-ir {} -> {}", artifact.module_id, path.display());
 									}
+								}
+							}
+							for artifact in &artifacts {
+								if let Some(path) =
+									&artifact.linked_output_path
+								{
+									eprintln!(
+										"emitted linked output -> {}",
+										path.display()
+									);
 								}
 							}
 						}
@@ -439,6 +488,51 @@ fn format_duration(duration: Duration) -> String {
 	} else {
 		format!("{}ns", duration.as_nanos())
 	}
+}
+
+fn default_output_path(
+	input_file: &Path,
+	emit_dir: &Path,
+	link_mode: LinkMode,
+	binary_format: BinaryFormat,
+	target_triple: Option<&str>,
+) -> PathBuf {
+	let stem = input_file
+		.file_stem()
+		.and_then(|s| s.to_str())
+		.filter(|s| !s.is_empty())
+		.unwrap_or("a");
+	let resolved = resolve_binary_format(binary_format, target_triple);
+	let mut name = stem.to_string();
+	match link_mode {
+		LinkMode::Executable => match resolved {
+			BinaryFormat::Pe => name.push_str(".exe"),
+			BinaryFormat::Elf | BinaryFormat::MachO => {}
+			BinaryFormat::Auto => unreachable!("auto format must be resolved"),
+		},
+		LinkMode::SharedLibrary => {
+			if resolved != BinaryFormat::Pe {
+				name = format!("lib{name}");
+			}
+			match resolved {
+				BinaryFormat::Pe => name.push_str(".dll"),
+				BinaryFormat::Elf => name.push_str(".so"),
+				BinaryFormat::MachO => name.push_str(".dylib"),
+				BinaryFormat::Auto => unreachable!("auto format must be resolved"),
+			}
+		}
+		LinkMode::StaticLibrary => {
+			if resolved != BinaryFormat::Pe {
+				name = format!("lib{name}");
+			}
+			match resolved {
+				BinaryFormat::Pe => name.push_str(".lib"),
+				BinaryFormat::Elf | BinaryFormat::MachO => name.push_str(".a"),
+				BinaryFormat::Auto => unreachable!("auto format must be resolved"),
+			}
+		}
+	}
+	emit_dir.join("bin").join(name)
 }
 
 fn dump_ctfe_results_for_ast(ast: &frontend::AST) {

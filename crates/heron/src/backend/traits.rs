@@ -11,6 +11,66 @@ pub enum OptimizationLevel {
 	Aggressive,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LinkMode {
+	Executable,
+	SharedLibrary,
+	StaticLibrary,
+}
+
+impl LinkMode {
+	pub fn as_str(self) -> &'static str {
+		match self {
+			Self::Executable => "executable",
+			Self::SharedLibrary => "shared-library",
+			Self::StaticLibrary => "static-library",
+		}
+	}
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BinaryFormat {
+	Auto,
+	Pe,
+	Elf,
+	MachO,
+}
+
+impl BinaryFormat {
+	pub fn as_str(self) -> &'static str {
+		match self {
+			Self::Auto => "auto",
+			Self::Pe => "pe",
+			Self::Elf => "elf",
+			Self::MachO => "mach-o",
+		}
+	}
+}
+
+pub fn resolve_binary_format(requested: BinaryFormat, target_triple: Option<&str>) -> BinaryFormat {
+	if requested != BinaryFormat::Auto {
+		return requested;
+	}
+	let triple = target_triple.unwrap_or("").to_ascii_lowercase();
+	if triple.contains("windows") || triple.contains("mingw") || triple.contains("msvc") {
+		BinaryFormat::Pe
+	} else if triple.contains("apple")
+		|| triple.contains("darwin")
+		|| triple.contains("macos")
+		|| triple.contains("ios")
+	{
+		BinaryFormat::MachO
+	} else if triple.is_empty() {
+		match std::env::consts::OS {
+			"windows" => BinaryFormat::Pe,
+			"macos" | "ios" => BinaryFormat::MachO,
+			_ => BinaryFormat::Elf,
+		}
+	} else {
+		BinaryFormat::Elf
+	}
+}
+
 impl OptimizationLevel {
 	pub fn as_str(self) -> &'static str {
 		match self {
@@ -30,6 +90,9 @@ pub struct BackendOptions {
 	pub emit_dir: PathBuf,
 	pub target_triple: Option<String>,
 	pub optimization_level: OptimizationLevel,
+	pub link_mode: Option<LinkMode>,
+	pub binary_format: BinaryFormat,
+	pub out_path: Option<PathBuf>,
 }
 
 impl Default for BackendOptions {
@@ -41,6 +104,9 @@ impl Default for BackendOptions {
 			emit_dir: PathBuf::from("target/heron-out"),
 			target_triple: None,
 			optimization_level: OptimizationLevel::None,
+			link_mode: None,
+			binary_format: BinaryFormat::Auto,
+			out_path: None,
 		}
 	}
 }
@@ -51,6 +117,7 @@ pub struct ModuleArtifact {
 	pub object_path: Option<PathBuf>,
 	pub llvm_ir_path: Option<PathBuf>,
 	pub llvm_ir_text: Option<String>,
+	pub linked_output_path: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug)]
