@@ -751,6 +751,7 @@ mod tests {
 		let options = BackendOptions {
 			emit_llvm: true,
 			emit_obj: false,
+			no_cache: true,
 			..BackendOptions::default()
 		};
 		let artifacts = compile_modules(&mut backend, &typed, &semantics, &options)
@@ -854,6 +855,7 @@ mod tests {
 		let options = BackendOptions {
 			emit_llvm: true,
 			emit_obj: false,
+			no_cache: true,
 			..BackendOptions::default()
 		};
 		let result = compile_modules(&mut backend, &typed, &semantics, &options);
@@ -907,6 +909,7 @@ mod tests {
 			emit_llvm: false,
 			emit_obj: true,
 			emit_dir: emit_dir.clone(),
+			no_cache: true,
 			..BackendOptions::default()
 		};
 		let result = compile_modules(&mut backend, &typed, &semantics, &options);
@@ -929,6 +932,7 @@ mod tests {
 		let options = BackendOptions {
 			emit_llvm: true,
 			emit_obj: false,
+			no_cache: true,
 			..BackendOptions::default()
 		};
 		let result = compile_modules(&mut backend, &typed, &semantics, &options);
@@ -948,6 +952,7 @@ mod tests {
 		let options = BackendOptions {
 			emit_llvm: true,
 			emit_obj: false,
+			no_cache: true,
 			..BackendOptions::default()
 		};
 		let result = compile_modules(&mut backend, &typed, &semantics, &options);
@@ -983,6 +988,7 @@ mod tests {
 			let options = BackendOptions {
 				emit_llvm: true,
 				emit_obj: false,
+				no_cache: true,
 				..BackendOptions::default()
 			};
 			let result = compile_modules(&mut backend, &typed, &semantics, &options);
@@ -1004,6 +1010,7 @@ mod tests {
 			emit_llvm: true,
 			emit_obj: false,
 			debug_info: true,
+			no_cache: true,
 			..BackendOptions::default()
 		};
 		let artifacts = compile_modules(&mut backend, &typed, &semantics, &options)
@@ -1038,6 +1045,7 @@ mod tests {
 			emit_llvm: true,
 			emit_obj: false,
 			debug_info: true,
+			no_cache: true,
 			..BackendOptions::default()
 		};
 		let artifacts = compile_modules(&mut backend, &typed, &semantics, &options)
@@ -1063,6 +1071,7 @@ mod tests {
 			emit_llvm: true,
 			emit_obj: false,
 			debug_info: true,
+			no_cache: true,
 			..BackendOptions::default()
 		};
 		let artifacts = compile_modules(&mut backend, &typed, &semantics, &options)
