@@ -1,0 +1,55 @@
+package main
+
+use core.reflect as rf
+
+// late_stage cannot face rf.Output!
+add_flags :: fn[[late_stage]](ci: &mut rf.CompileInfo) -> void {
+	// Finds raylib through pkg-config and if that fails, it gets it manually.
+	builder := ci.get_builder();
+	raylib := builder.find_external_library("raylib").or_else(fn {
+		path := match ci.os {
+			// heron-format off
+			case .Windows: "libs/raylib/raylib.lib"
+			case .MacOS:   "libs/raylib/raylib_mac.a"
+			case .Linux:   "libs/raylib/raylib_linux.a"
+			// heron-format on
+		}
+		
+		builder.error("Could not find raylib!")
+		builder.make_external_library("raylib", path)
+	})
+	builder.add_external_library(raylib)
+}
+
+struct Color {
+	r, g, b, a: u8
+}
+
+struct Raylib {
+	InitWindow :: fn[[c,nomangle,unsafe]](width, height: i32; name: [^]u8) ---
+	CloseWindow :: fn[[c,nomangle]] ---
+	BeginDrawing :: fn[[c,nomangle]] ---
+	EndDrawing :: fn[[c,nomangle]] ---
+	WindowShouldClose :: fn[[c,nomangle]] -> i32 ---
+	ClearBackground :: fn[[c,nomangle]](color: Color) ---
+	DrawText :: fn[[c,nomangle,unsafe]](text: [^]u8; x, y, font_size: i32; color: Color) ---
+}
+
+main := fn {
+	[[unsafe]] {
+		Raylib.InitWindow(800, 400, "Hello world!")
+	}
+	defer Raylib.CloseWindow()
+
+	for !cast<bool>Raylib.WindowShouldClose() {
+		Raylib.BeginDrawing()
+
+		[[unsafe]] {
+			Raylib.ClearBackground(Color .{ 100, 100, 100, 255 })
+			Raylib.DrawText("Hello world!", 40, 40, 40, Color .{ 255, 0, 0, 255 })
+		}
+
+		Raylib.EndDrawing()
+	}
+}
+

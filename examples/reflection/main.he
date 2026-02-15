@@ -10,7 +10,7 @@ use core.reflect as rf
 
 // NOTE: Doesn't handle reference fields!
 // rf.Output is a black box type
-impl_clone :: fn (ty: rf.TypeInfo) -> rf.Output {
+impl_clone :: fn (_ci: &rf.CompileInfo, ty: rf.TypeInfo) -> rf.Output {
 	builder := rf.Builder()
 	match &v in ty {
 		case rf.StructTypeInfo -> {
